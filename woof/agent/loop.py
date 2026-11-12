@@ -845,7 +845,7 @@ async def run_turn(session_id: str, blocks: list[dict], emit: Emit) -> None:
 
     # 預算：超過每日／每月上限時依設定只警告、暫停，或這一回合改用備用模型（排程、子代理同樣算在內）
     from woof import cost
-    bst = cost.status(REG.config) if (REG.config.get("budget") or {}) else None
+    bst = cost.status(REG.config) if (REG.config.get("budget") or {}).get("enabled") else None
     if bst and bst["over"] and cost.price_of(model_cfg) is not None:
         why = "；".join(bst["over"])
         if bst["action"] == "pause":

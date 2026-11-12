@@ -84,19 +84,21 @@ class Cost(unittest.TestCase):
         self.assertAlmostEqual(cost.cost_of({"price": [2]}, 1_000_000, 1_000_000, 0), 4.0)
 
     def test_budget(self):
-        self.assertEqual(cost.clean_budget({"daily": "1.5", "action": "pause"}), {"daily": 1.5, "action": "pause"})
-        self.assertEqual(cost.clean_budget({"action": "???"}), {"action": "warn"})
+        self.assertEqual(cost.clean_budget({"enabled": True, "daily": "1.5", "action": "pause"}), {"enabled": True, "daily": 1.5, "action": "pause"})
+        self.assertEqual(cost.clean_budget({"action": "???"}), {"enabled": False, "action": "warn"})
         with self.assertRaises(ValueError):
             cost.clean_budget({"daily": -1})
 
     def test_spent_and_status(self):
-        cfg = {"models": [{"id": "a", "price": [1, 2]}, {"id": "b"}], "budget": {"daily": 0.5, "action": "pause"}}
+        cfg = {"models": [{"id": "a", "price": [1, 2]}, {"id": "b"}], "budget": {"enabled": True, "daily": 0.5, "action": "pause"}}
         store.log_usage("s1", "a", {"input_tokens": 1_000_000, "output_tokens": 0})
         store.log_usage("s1", "b", {"input_tokens": 10, "output_tokens": 10})
         st = cost.status(cfg)
         self.assertAlmostEqual(st["today"], 1.0)
         self.assertTrue(st["over"])
         self.assertEqual(cost.spent(cfg, 0)["unpriced"], ["b"])
+        cfg["budget"]["enabled"] = False
+        self.assertEqual(cost.status(cfg)["over"], [])  # 關閉時不檢查
 
 
 class Prune(unittest.TestCase):

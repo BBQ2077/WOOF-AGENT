@@ -1,5 +1,15 @@
 // 介面英文對照：key 是介面上的中文原文（{0} {1} 是會變動的部分），value 是英文
 window.WOOF_EN = {
+"還沒設備用模型，超過時只會提醒": "No fallback model set; going over will only warn",
+"花費與預算": "Spending & budget",
+"依模型單價計算，沒填單價的不算": "Based on model prices; models without a price are not counted",
+"用免費模型或訂閱時不需要": "Not needed with free models or subscriptions",
+"改用備用": "Use fallback",
+"超過時跳提醒，照常送出": "Warn when over, keep sending",
+"超過時不送出，等隔天或下個月": "Stop sending when over until the next day or month",
+"超過時改用「模型用途 → 備用模型」": "Switch to Model roles → Fallback when over",
+"每日上限": "Daily cap",
+"每月上限": "Monthly cap",
 "主要模型出錯（限流、額度用完、連不上，服務商自己的重試都用完）時，這一回合改用它接著做，做到一半也會接手；預算設「改用備用模型」時也用它。留空就不切換。": "When the main model fails (rate limit, quota used up, unreachable, after the provider's own retries), switch to this one for the rest of the turn, even mid-way; also used when the budget action is \"switch to fallback\". Leave empty to never switch.",
 "主要模型是新對話預設；備用、看圖、壓縮、子代理、自動審核每項都可以單獨指定服務商與模型。看圖、壓縮、子代理留空就跟隨主模型；備用、自動審核留空就不使用。": "The main model is the default for new chats. Fallback, vision, compression, sub-agent and auto review can each use their own provider and model. Vision, compression and sub-agent follow the main model when empty; fallback and auto review are off when empty.",
 "自動審核": "Auto review",

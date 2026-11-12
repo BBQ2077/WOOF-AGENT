@@ -1947,28 +1947,50 @@ function usageCardHtml() {
   const r = S.usageRange;
   return `<div class="qcard usage-card"><div class="qtop"><div class="qhd"><b>用量</b><small>本機紀錄，每次模型呼叫算一次</small></div></div>`
     + `<div class="qbody"><div class="seg useg">${[['today', '今天'], ['7d', '7 天'], ['30d', '30 天'], ['session', '此對話']].map(([k, l]) => `<b class="${r === k ? 'on' : ''}" data-urange="${k}">${l}</b>`).join('')}</div>`
-    + `<div id="usageBox">讀取中…</div><div id="budgetBox"></div></div></div>`;
+    + `<div id="usageBox">讀取中…</div></div></div><div id="budgetBox"></div>`;
 }
-const BUDGET_ACT = { warn: '只提醒', pause: '暫停送出', fallback: '改用備用模型' };
-const money = (v) => (v == null ? '' : v >= 100 ? '$' + Math.round(v).toLocaleString('en-US') : '$' + Number(v).toFixed(v < 1 ? 3 : 2));
+const BUDGET_ACT = { warn: '只提醒', pause: '暫停送出', fallback: '改用備用' };
+const BUDGET_TIP = { warn: '超過時跳提醒，照常送出', pause: '超過時不送出，等隔天或下個月', fallback: '超過時改用「模型用途 → 備用模型」' };
+const money = (v) => (v == null ? '' : v >= 100 ? '$' + Math.round(v).toLocaleString('en-US') : '$' + Number(v).toFixed(2));
+let BUDGET = null;
 function renderBudget(b) {
   const box = $('#budgetBox'); if (!box || !b) return;
-  const bar = (spent, cap) => cap ? `<i class="bgbar${spent >= cap ? ' over' : spent >= cap * 0.8 ? ' near' : ''}"><i style="width:${Math.min(100, Math.round(spent / cap * 100))}%"></i></i>` : '';
-  box.innerHTML = `<div class="bghd"><b>預算</b><small>依模型單價計算，沒填單價的模型不算</small></div>
-    <div class="bgrow"><span>今天 <b>${money(b.today)}</b>${b.daily ? ` / ${money(b.daily)}` : ''}</span>${bar(b.today, b.daily)}</div>
-    <div class="bgrow"><span>本月 <b>${money(b.month)}</b>${b.monthly ? ` / ${money(b.monthly)}` : ''}</span>${bar(b.month, b.monthly)}</div>
-    <div class="bgform"><label>每日上限 $<input data-bg="daily" value="${b.daily || ''}" placeholder="不限" class="mono"></label>
-      <label>每月上限 $<input data-bg="monthly" value="${b.monthly || ''}" placeholder="不限" class="mono"></label>
-      <label>超過時<select data-bg="action">${Object.entries(BUDGET_ACT).map(([k, l]) => `<option value="${k}"${b.action === k ? ' selected' : ''}>${l}</option>`).join('')}</select></label></div>`
+  BUDGET = b;
+  const head = `<div class="qtop"><div class="qhd"><b>花費與預算</b><small>${b.enabled ? '依模型單價計算，沒填單價的不算' : '用免費模型或訂閱時不需要'}</small></div>`
+    + `<span class="sw${b.enabled ? ' on' : ''}" data-bgon title="${b.enabled ? '關閉' : '開啟'}"></span></div>`;
+  if (!b.enabled) { box.innerHTML = `<div class="qcard bgcard">${head}</div>`; return; }
+  const row = (name, spent, cap) => {
+    const p = cap ? Math.min(100, Math.round(spent / cap * 100)) : 0;
+    const cls = !cap ? '' : spent >= cap ? ' over' : spent >= cap * 0.8 ? ' near' : '';
+    return `<div class="bgstat${cls}"><span class="bgn">${name}</span><b>${money(spent)}</b>`
+      + `<small>${cap ? '／ ' + money(cap) : '不限'}</small><i class="bgbar"><i style="width:${p}%"></i></i></div>`;
+  };
+  const cap = (k, name) => `<label class="bgcap"><span>${name}</span><span class="bgin"><em>$</em><input data-bg="${k}" value="${b[k] || ''}" placeholder="不限" inputmode="decimal"></span></label>`;
+  box.innerHTML = `<div class="qcard bgcard">${head}<div class="qbody">`
+    + row('今天', b.today, b.daily) + row('本月', b.month, b.monthly)
+    + `<div class="bgcaps">${cap('daily', '每日上限')}${cap('monthly', '每月上限')}</div>`
+    + `<div class="bgact"><span>超過時</span><div class="seg">${Object.entries(BUDGET_ACT).map(([k, l]) => `<b class="${b.action === k ? 'on' : ''}" data-bgact="${k}" title="${BUDGET_TIP[k]}">${l}</b>`).join('')}</div></div>`
     + (b.over && b.over.length ? `<div class="bgover">${b.over.map(esc).join('<br>')}</div>` : '')
-    + (b.action === 'fallback' && !b.fallback ? '<div class="bgover">還沒指定備用模型（設定 → 模型用途 → 備用），超過時只會提醒</div>' : '');
+    + (b.action === 'fallback' && !b.fallback ? '<div class="bgnote">還沒設備用模型，超過時只會提醒</div>' : '')
+    + '</div></div>';
 }
-async function saveBudget() {
-  const box = $('#budgetBox'); if (!box) return;
-  const body = {}; box.querySelectorAll('[data-bg]').forEach((el) => { body[el.dataset.bg] = el.value.trim(); });
-  try { renderBudget(await api('POST', '/api/budget', body)); toast('預算已儲存'); } catch (e) { toast('預算沒存：' + e.message); }
+async function saveBudget(patch) {
+  const box = $('#budgetBox'); if (!box || !BUDGET) return;
+  const body = { enabled: BUDGET.enabled, daily: BUDGET.daily, monthly: BUDGET.monthly, action: BUDGET.action, ...patch };
+  box.querySelectorAll('input[data-bg]').forEach((el) => { if (!(el.dataset.bg in (patch || {}))) body[el.dataset.bg] = el.value.trim(); });
+  try {
+    renderBudget(await api('POST', '/api/budget', body));
+    if (S.cfg) S.cfg.cost_on = !!body.enabled;
+    if ('enabled' in (patch || {})) loadUsage();
+  } catch (e) { toast('預算沒存：' + e.message); }
 }
-document.addEventListener('change', (e) => { if (e.target.closest && e.target.closest('#budgetBox [data-bg]')) saveBudget(); });
+document.addEventListener('change', (e) => { if (e.target.closest && e.target.closest('#budgetBox input[data-bg]')) saveBudget(); });
+document.addEventListener('click', (e) => {
+  if (!e.target.closest) return;
+  if (e.target.closest('#budgetBox [data-bgon]')) { saveBudget({ enabled: !BUDGET.enabled }); return; }
+  const act = e.target.closest('#budgetBox [data-bgact]');
+  if (act) saveBudget({ action: act.dataset.bgact });
+});
 function fmtCount(n) {
   const v = Number(n || 0);
   if (v < 1000) return String(Math.round(v));
@@ -3668,6 +3690,7 @@ async function loadCfg() {
     discovery: c.discovery || {},
     prompts: { ...(c.prompts || { mode: 'normal' }) },
     redact_secrets: c.redact_secrets !== false, keys_encrypted: !!c.keys_encrypted,
+    cost_on: !!c.cost_on,
   };
   S.cfgBackends = c.backends || S.backends;
   setDirty(false);
@@ -4282,7 +4305,7 @@ function renderVendors(box) {
         <input data-mf="label" value="${esc(m.label || '')}" placeholder="顯示名稱">
         <input data-mf="model" value="${esc(m.model || '')}" placeholder="API 模型名稱" class="mono">
         <input data-mf="context_window" value="${esc(m.context_window || '')}" placeholder="200000" class="mono">
-        <input data-mf="price" value="${esc((m.price || []).join(' / '))}" placeholder="—" class="mono" title="美元／每百萬 token：輸入 / 輸出 / 快取讀取，例如 3 / 15 / 0.3。快取沒填就照輸入價；留空＝不算錢">
+        ${S.cfg.cost_on ? `<input data-mf="price" value="${esc((m.price || []).join(' / '))}" placeholder="—" class="mono" title="美元／每百萬 token：輸入 / 輸出 / 快取讀取，例如 3 / 15 / 0.3。快取沒填就照輸入價；留空＝不算錢">` : ''}
         <input data-mf="efforts" value="${esc(effs.join(', '))}" placeholder="${autoEff.length ? '自動 ' + autoEff.map((e) => EFFORT_LABEL[e] || e).join('/') : '沒有思考'}" title="${autoEff.length ? '留空＝自動偵測，目前偵測到：' + esc(autoEff.join(', ')) + '。要固定就填，例如 low, medium, high' : '沒偵測到思考強度；這個模型支援的話照 API 填，例如 low, medium, high'}" class="mono">
         <select data-mf="default_effort"><option value="">${effs.length ? '—' : '自動'}</option>${opt(effs, m.default_effort, EFFORT_LABEL)}</select>
         <span class="cell"><span class="sw sm${visOn ? ' on' : ''}" data-mvision title="${(st.learned && st.learned.no_vision) ? '自動偵測到不能直接看圖（下方可清掉重新偵測）' : m.vision === undefined ? '看圖：沒設定＝預設會看，撞到不支援會自動改走看圖模型' : '看圖'}"></span></span>
@@ -4301,7 +4324,7 @@ function renderVendors(box) {
           ${isOA ? `<label>思考參數</label><select data-vf="effort_style">${opt(['', 'openai', 'openrouter', 'deepseek', 'nim', 'none'], v.effort_style || '', { '': '自動（依位址判斷）', openai: 'OpenAI reasoning_effort', openrouter: 'OpenRouter reasoning', deepseek: 'DeepSeek thinking', nim: 'NVIDIA enable_thinking', none: '不送' })}</select>
             <label>思考回傳</label><select data-vf="echo_reasoning" title="模型上一步的思考要不要跟著送回去">${opt(['', 'all', 'off'], v.echo_reasoning === true ? 'all' : v.echo_reasoning === false ? 'off' : (v.echo_reasoning || ''), { '': '自動：工具呼叫鏈內保留，新回合捨棄', all: '每回合都保留（DeepSeek 必須）', off: '都不回傳' })}</select>` : ''}
         </div>
-        <div class="mtable"><div class="mth"><span>顯示名稱</span><span>API 模型名稱</span><span>上下文</span><span title="美元／每百萬 token：輸入 / 輸出 / 快取讀取">單價 $/M</span><span>思考強度</span><span>預設</span><span>看圖</span><span></span></div>
+        <div class="mtable${S.cfg.cost_on ? ' priced' : ''}"><div class="mth"><span>顯示名稱</span><span>API 模型名稱</span><span>上下文</span>${S.cfg.cost_on ? '<span title="美元／每百萬 token：輸入 / 輸出 / 快取讀取">單價 $/M</span>' : ''}<span>思考強度</span><span>預設</span><span>看圖</span><span></span></div>
           ${mrows || '<div class="mtempty">還沒有模型</div>'}</div>
         ${learnedNote(models.map(([m]) => m))}
         <div class="vfoot"><span class="btn" data-addmodel>${ico('plus')}手動加模型</span>${v.provider !== 'claude_cli' ? `<span class="btn" data-fetchmodels>${ico('download')}從 API 取得模型</span>` : ''}${(discOf(v) || {}).has_key ? `<span class="btn" data-refreshmodels>${ico('download')}重新檢索</span>` : ''}<span class="btn" data-probe>${ico('play')}測試連線</span><span class="grow"></span>${FIXED_VENDORS.has(v.id) ? (v.key_pool && S.cfg.keys.some((k) => k.pool === v.key_pool) ? `<span class="btn danger" data-delkey>${ico('trash')}刪除 API key</span>` : '') : `<span class="btn danger" data-delvendor>${ico('trash')}刪除模型商</span>`}</div>

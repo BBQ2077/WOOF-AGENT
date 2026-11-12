@@ -2,7 +2,8 @@
 
 單價填在模型設定的 price = [輸入, 輸出, 快取讀取]；快取讀取沒填就照輸入價。
 沒填單價的模型不算錢（顯示「未設單價」）。
-預算在 config 的 [budget]：daily、monthly（美元，0＝不限）、action：warn｜pause｜fallback。
+預算在 config 的 [budget]：enabled（總開關，預設關）、daily、monthly（美元，0＝不限）、action：warn｜pause｜fallback。
+關閉時不算金額、不檢查預算，模型設定也不顯示單價欄。
 """
 from __future__ import annotations
 
@@ -59,12 +60,12 @@ def spent(cfg: dict, since: float, sid: str | None = None) -> dict:
 def budget(cfg: dict) -> dict:
     b = cfg.get("budget") or {}
     act = str(b.get("action") or "warn")
-    return {"daily": float(b.get("daily") or 0), "monthly": float(b.get("monthly") or 0),
-            "action": act if act in ACTIONS else "warn"}
+    return {"enabled": bool(b.get("enabled")), "daily": float(b.get("daily") or 0),
+            "monthly": float(b.get("monthly") or 0), "action": act if act in ACTIONS else "warn"}
 
 
 def clean_budget(body: dict) -> dict:
-    out = {}
+    out = {"enabled": bool(body.get("enabled"))}
     for k in ("daily", "monthly"):
         try:
             v = float(body.get(k) or 0)
@@ -85,6 +86,8 @@ def status(cfg: dict) -> dict:
     day0 = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     mon0 = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp()
     b = budget(cfg)
+    if not b["enabled"]:
+        return {**b, "today": 0.0, "month": 0.0, "over": [], "fallback": (cfg.get("aux") or {}).get("fallback") or ""}
     today = spent(cfg, day0)["total"]
     month = spent(cfg, mon0)["total"]
     over = []

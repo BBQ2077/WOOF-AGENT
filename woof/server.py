@@ -110,6 +110,9 @@ async def usage_api(range: str = "today", sid: str = ""):
     cfg = wcfg.load_config()
     mid = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     since = {"today": mid, "7d": mid - 6 * 86400, "30d": mid - 29 * 86400}.get(range, 0.0)
+    u["budget"] = cost.status(cfg)
+    if not u["budget"]["enabled"]:
+        return u
     sp = cost.spent(cfg, since, sid or None)
     u["cost"] = sp["total"]
     u["unpriced"] = sp["unpriced"]
@@ -117,7 +120,6 @@ async def usage_api(range: str = "today", sid: str = ""):
         m["cost"] = sp["by_model"].get(m["model"])
     for d in u["daily"]:
         d["cost"] = sp["by_day"].get(d["day"], 0.0)
-    u["budget"] = cost.status(cfg)
     return u
 
 
@@ -664,6 +666,7 @@ async def get_settings():
         "disabled_tools": cfg.get("disabled_tools") or [],
         "redact_secrets": cfg.get("redact_secrets", True) is not False,
         "keys_encrypted": dpapi.available(),
+        "cost_on": bool((cfg.get("budget") or {}).get("enabled")),
     }
 
 
