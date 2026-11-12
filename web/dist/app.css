@@ -1591,3 +1591,19 @@ body.pane2 #paneA{padding:0}
 .sugrow{display:flex;flex-wrap:wrap;gap:6px}
 .sugbtn.fix{border-style:dashed;color:var(--dim);background:transparent}
 .sugbtn.fix:hover{border-style:solid;color:var(--acc)}
+
+/* 寵物：兩排快速回覆與輸入框對齊（跟使用者給的圖一致：同樣高度、同樣膠囊、同樣留白） */
+.petsug{display:flex;flex-direction:column;gap:10px;padding:2px 0 10px}
+.sugrow{display:flex;flex-wrap:wrap;gap:8px}
+.sugbtn{height:38px;padding:0 12px;font-size:12.5px;max-width:100%;line-height:1;display:inline-flex;
+  align-items:center;justify-content:center;border:1px solid var(--line2);
+  background:var(--panel2);color:var(--text);border-radius:999px;transition:none}
+.sugbtn.fix{border-style:solid;color:var(--text);background:var(--panel2)}
+.sugbtn.fix:hover{border-color:var(--acc);color:var(--acc);background:var(--acc-soft)}
+.petin{display:flex;gap:8px;align-items:stretch}
+.petin input{height:40px;padding:0 20px;border-radius:20px;font-size:13px;background:var(--panel2)}
+.petSend{height:40px;padding:0 22px;border-radius:20px;font-size:13px;
+  border:1px solid var(--line2);background:var(--panel2);color:var(--text)}
+
+.sugrow .sugbtn{flex:1 1 0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sugrow{width:100%}
