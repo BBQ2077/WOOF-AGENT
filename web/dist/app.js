@@ -5987,9 +5987,13 @@ function petPaint() {
   const sb = $('#petSug');
   if (sb) {
     const sug = (PET.st && PET.st.sug) || [];
-    sb.innerHTML = sug.length
-      ? sug.map((x) => `<button class="sugbtn" data-pet="sug" data-say="${esc(x)}">${esc(x)}</button>`).join('')
-      : '';
+    const quick = (PET.cfg && PET.cfg.quick) || [];
+    sb.innerHTML = (sug.length
+      ? `<div class="sugrow">${sug.map((x) => `<button class="sugbtn" data-pet="sug" data-say="${esc(x)}">${esc(x)}</button>`).join('')}</div>`
+      : '')
+      + (quick.length
+        ? `<div class="sugrow fixed">${quick.map((x) => `<button class="sugbtn fix" data-pet="sug" data-say="${esc(x)}">${esc(x)}</button>`).join('')}</div>`
+        : '');
   }
   const h = $('#petHist');
   if (h) {
@@ -6140,6 +6144,8 @@ function renderPetSec(box) {
         <input type="number" min="300" max="20000" step="100" value="${c.peek}" data-petf="peek"></div>
       <div class="frow"><div><b>牠自己的記憶上限</b><small>${Number(c.ctx).toLocaleString()} tokens，超過八成自己壓縮，留最近 ${c.keep} 則原文。跟主對話的壓縮分開。</small></div>
         <input type="number" min="4000" max="200000" step="1000" value="${c.ctx}" data-petf="ctx"></div>
+      <div class="frow"><div><b>固定回覆</b><small>永遠在輸入框上方的那幾句通用回覆，用 | 分隔（最多四個）。模型每次給的建議是上面另一排，會變。</small></div>
+        <input data-petf="quick" value="${esc((c.quick || []).join('|'))}"></div>
       <div class="frow"><div><b>允許牠在主對話留一句</b><small>預設關，也就是完全唯讀：牠只看得到你的對話，不能寫進去。打開後牠講的話才會用腳印（🐾）出現在對話裡。</small></div>
         <div class="fctl"><span class="sw${c.speak_up ? ' on' : ''}" data-petf="speak_up"></span></div></div>
     </div>
@@ -6174,6 +6180,7 @@ function renderPetSec(box) {
       const el = e.target.closest('[data-petf]');
       if (!el) return;
       const k = el.dataset.petf;
+      if (k === 'quick') { petSave({ quick: el.value }).then(() => renderPetSec(box)); return; }
       if (['char', 'model', 'max_out', 'every_sec', 'peek', 'ctx'].includes(k)) {
         petSave({ [k]: el.value }).then(() => renderPetSec(box));
       }

@@ -42,6 +42,7 @@ DEFAULTS = {
     "every_sec": 10,
     "peek": 1500,
     "speak_up": False,
+    "quick": ["怎麼了？", "繼續說"],   # 固定的兩顆通用回覆，永遠在
 }
 
 PERSONAS = {
@@ -199,6 +200,14 @@ def clean(patch: dict) -> dict:
             out["char"] = v
     if "effort" in patch:
         out["effort"] = "on" if patch["effort"] == "on" else "off"
+    if "quick" in patch:
+        q = patch["quick"]
+        if isinstance(q, str):
+            q = re.split(r"[\n|｜]", q)
+        if isinstance(q, list):
+            vals = [str(x).strip()[:20] for x in q if str(x).strip()][:4]
+            if vals:
+                out["quick"] = vals
     for k, lo, hi in (("max_out", 40, 800), ("ctx", 4000, 200000), ("keep", 2, 60),
                       ("every_sec", 3, 600), ("peek", 300, 20000)):
         if k in patch:

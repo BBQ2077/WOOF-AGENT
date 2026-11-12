@@ -1297,6 +1297,13 @@ class Pet(unittest.TestCase):
         self.assertEqual(p.clean({"char": "fish"})["char"], "fish")
         self.assertNotIn("char", p.clean({"char": "cat"}))
 
+    def test_clean_quick(self):
+        p = self.up()
+        self.assertEqual(p.clean({"quick": "嗯嗯|然後呢"})["quick"], ["嗯嗯", "然後呢"])
+        self.assertEqual(p.clean({"quick": ["a", "b", "c", "d", "e"]})["quick"], ["a", "b", "c", "d"])
+        self.assertNotIn("quick", p.clean({"quick": "  "}))
+        self.assertIn("quick", p.cfg())
+
     def test_parse_sug(self):
         p = self.up()
         got = p.parse('{"say":"去睡吧","face":"gentle","mood":"心疼","sug":["好，晚安","你也早點睡"]}')
