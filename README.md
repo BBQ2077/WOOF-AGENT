@@ -122,11 +122,14 @@ tests/         測試腳本（`.venv/Scripts/python tests/unit_test.py` 跑單�
 .venv/Scripts/python tests/eval_test.py            # 評測：假模型跑 20 題小任務，自動判分
 .venv/Scripts/python tests/eval_test.py --only sub_read,compact_continue
 .venv/Scripts/python tests/eval_test.py --model <模型 id>   # 換模型跑同一批題目
+.venv/Scripts/python tests/eval_test.py --model nvidia-nemotron-lightning --limit 3   # 真模型跑前 3 題
 ```
 
 評測在暫存資料夾裡開一個乾淨的 WOOF_DATA，只載入 files、terminal、tasks、subagent、context 這幾個插件，
 用腳本化的假模型跑題庫，逐題檢查工具呼叫、檔案結果、權限擋下、子代理、背景指令與壓縮後續作。
 結果寫進 `data/eval/`（已被 .gitignore 忽略），JSON 與 Markdown 各一份，方便改提示詞或插件前後比較。
+
+真模型模式（`--model` 給 config.toml 裡的模型 id）會讀本體的 `config.toml`（副本沒有時可用 `--config-root` 指定），工作目錄換成暫存資料夾，金鑰從 `keys.toml` 在記憶體裡解開，不寫暫存檔也不印出來；模型與輔助模型都指向同一個模型，所以會真的花 token。預設跳過只有腳本假模型才做得出來的題目（參數被截斷、同一個失敗重複三次、找不到工具），要全跑加 `--all`；每題有 `--timeout` 秒上限（預設 180）。報告另記模型 id、工具步數、token、耗時與失敗原因。
 
 
 ## 內建插件

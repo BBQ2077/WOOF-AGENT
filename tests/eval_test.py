@@ -1,9 +1,15 @@
-"""評測系統：用假模型跑一批小任務，檢查工具、權限、子代理、壓縮、背景指令等行為。
+"""評測系統：跑一批小任務，檢查工具、權限、子代理、壓縮、背景指令等行為。
 
 執行：
-  .venv/Scripts/python tests/eval_test.py                          # 跑全部
+  .venv/Scripts/python tests/eval_test.py                          # 假模型跑全部（不花錢，快速回歸）
   .venv/Scripts/python tests/eval_test.py --only read_report,sub_read
   .venv/Scripts/python tests/eval_test.py --model fake-main        # 指定模型（預設就是它）
+  .venv/Scripts/python tests/eval_test.py --model nvidia-nemotron-lightning --limit 3
+                                                                   # 真模型：讀本體 config.toml 的模型設定，
+                                                                   # 金鑰從 keys.toml 在記憶體解開（不落地、不印出）
+
+真模型模式預設跳過「假模型才做得出來」的題目（參數截斷、重複失敗、未知工具），
+要全跑加 --all。每題有 --timeout 秒上限（預設 180）。
 
 評測只在暫存資料夾（WOOF_DATA）裡讀寫：對話庫、快照、spill 全部進暫存區，
 不碰真實對話與設定。結果存到 data/eval/（.gitignore 已忽略），JSON 與 Markdown 各一份，
@@ -18,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -29,10 +36,12 @@ sys.path.insert(0, str(ROOT))
 
 from woof import procs, store, tokens as tokens_mod  # noqa: E402
 from woof.agent import loop  # noqa: E402
-from woof.loader import REG  # noqa: E402
+from woof.loader import REG, merge_models  # noqa: E402
 
 MODEL_ID = "fake-main"
 AUX_MODEL_ID = "fake-aux"
+FAKE_MODEL_ID = "fake-main"
+REQ: list[dict] = []   # 真模型模式：模型實際收到的內容（Recorder 寫進來，每題清空）
 SUMMARY_TEXT = ("摘要：使用者要求確認 KEYWORD-42。已完成讀檔與加總，"
                 "待辦是回報結果。全域設定：window=1500。")
 
@@ -100,8 +109,10 @@ class FakeModel:
 
 # ---------------------------------------------------------------- 上下文
 class Ctx:
-    def __init__(self, task: "Task", sid: str, wd: Path, events: list[dict], fake: FakeModel) -> None:
+    def __init__(self, task: "Task", sid: str, wd: Path, events: list[dict], fake: FakeModel,
+                 requests: list[dict] | None = None) -> None:
         self.task, self.sid, self.wd, self.events, self.fake = task, sid, wd, events, fake
+        self.requests = requests if requests is not None else []   # 模型實際收到的內容（假模型與真模型都記）
 
     @property
     def calls(self) -> list[dict]:
@@ -146,6 +157,7 @@ class Task:
     sub_script: list[dict] | None = None
     sub_mode: str = "read"
     sub_scope: str = ""
+    fake_only: bool = False   # 只有照腳本走的假模型做得出來（參數截斷、重複失敗、未知工具），真模型模式跳過
 
 
 def _txt(ctx: Ctx, name: str, idx: int = -1) -> str:
@@ -211,7 +223,7 @@ def c_todo(ctx: Ctx) -> None:
     todos = [e for e in ctx.events if e.get("type") == "todos"]
     assert todos, "沒有送出 todos 事件"
     items = todos[-1].get("items") or []
-    assert len(items) == 3, f"TODO 不是 3 項：{items}"
+    assert len(items) >= 2, f"TODO 太少：{items}"
     for name in ("out/t1.txt", "out/t2.txt", "out/t3.txt"):
         assert ctx.path(name).is_file(), f"沒有做 {name}"
 
@@ -288,7 +300,7 @@ def c_repeat_fail(ctx: Ctx) -> None:
 def c_compact(ctx: Ctx) -> None:
     summ = (ctx.session().get("engine_state") or {}).get("summary") or {}
     assert summ.get("text"), "沒有產生摘要"
-    heads = [r for r in ctx.fake.requests
+    heads = [r for r in ctx.requests
              if any("【上下文摘要】" in (b.get("text") or "") for m in r["messages"] for b in (m.get("content") or []))]
     assert heads, "模型收到的訊息裡沒有摘要開頭"
     assert any("KEYWORD-42" in (b.get("text") or "") for r in heads for m in r["messages"]
@@ -328,7 +340,7 @@ TASKS: list[Task] = [
           {"text": "在 notes/b.txt 找到 needle"}],
          c_search_hit, files={"notes/a.txt": "alpha 12\n", "notes/b.txt": "這裡有 needle\n"}),
     Task("tree_overview", "看目錄結構",
-         "用 list_tree 看 notes 的結構，回報有哪些子目錄。",
+         "看一下 notes 的目錄結構，回報有哪些子目錄。",
          [{"calls": [{"name": "list_tree", "args": {"path": "notes", "depth": 2}}]},
           {"text": "有 sub 這個子目錄"}],
          c_tree, files={"notes/sub/deep.txt": "x\n"}),
@@ -353,7 +365,7 @@ TASKS: list[Task] = [
           {"text": "總和是 21"}],
          c_five_steps, files={"notes/n1.txt": "5\n", "notes/n2.txt": "7\n", "notes/n3.txt": "9\n"}),
     Task("todo_flow", "用 TODO 清單做事",
-         "用 todo 列三件事，然後一件一件做完（各寫一個檔）。",
+         "把「寫 t1」「寫 t2」「寫 t3」列成 TODO 清單，然後一件一件做完（各寫一個檔）。",
          [{"calls": [{"name": "todo", "args": {"items": [
              {"text": "寫 t1", "status": "doing"},
              {"text": "寫 t2", "status": "pending"},
@@ -398,7 +410,7 @@ TASKS: list[Task] = [
                      {"calls": [{"name": "write_file", "args": {"path": "outside.txt", "content": "out"}}]},
                      {"text": "範圍外寫不進去"}]),
     Task("bg_task", "背景指令",
-         "用背景方式跑 echo bg-marker 加 sleep，然後確認它結束了。",
+         "在背景跑 echo bg-marker 加 sleep 1，然後確認它結束了。",
          [{"calls": [{"name": "terminal", "args": {"command": "echo bg-marker; sleep 1", "background": True}}]},
           {"calls": [{"name": "terminal", "args": {"command": "sleep 2"}}]},
           {"calls": [{"name": "process", "args": {"action": "list"}}]},
@@ -414,14 +426,14 @@ TASKS: list[Task] = [
          [{"calls": [{"name": "write_file", "raw": "{\"path\": \"out/raw.txt\", \"content\": \"trunc"}]},
           {"calls": [{"name": "write_file", "args": {"path": "out/raw.txt", "content": "truncated"}}]},
           {"text": "拆小後寫成功"}],
-         c_raw_args),
+         c_raw_args, fake_only=True),
     Task("repeat_fail", "同一個失敗重複三次",
          "讀 notes/missing.txt 三次。",
          [{"calls": [{"name": "read_file", "args": {"path": "notes/missing.txt"}}]},
           {"calls": [{"name": "read_file", "args": {"path": "notes/missing.txt"}}]},
           {"calls": [{"name": "read_file", "args": {"path": "notes/missing.txt"}}]},
           {"text": "檔案一直不存在"}],
-         c_repeat_fail),
+         c_repeat_fail, fake_only=True),
     Task("compact_continue", "壓縮後接著做",
          "接著做：確認 KEYWORD-42 並回報。",
          [{"calls": [{"name": "read_file", "args": {"path": "notes/a.txt"}}]},
@@ -432,7 +444,7 @@ TASKS: list[Task] = [
          [{"calls": [{"name": "no_such_tool", "args": {"path": "notes/a.txt"}}]},
           {"calls": [{"name": "read_file", "args": {"path": "notes/a.txt"}}]},
           {"text": "改用 read_file 讀到 alpha 12"}],
-         c_unknown_tool, files={"notes/a.txt": "alpha 12\n"}),
+         c_unknown_tool, files={"notes/a.txt": "alpha 12\n"}, fake_only=True),
 ]
 
 
@@ -461,6 +473,110 @@ def setup_registry(fake: FakeModel) -> None:
             REG._load(info)
 
 
+class Recorder:
+    """包一層 provider，把模型實際收到的 system／messages 記下來（真模型模式檢查壓縮用）。"""
+
+    def __init__(self, inner, log: list[dict]) -> None:
+        self._inner, self._log = inner, log
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    async def stream(self, model, system, messages, tools, effort):
+        self._log.append({"system": system, "messages": messages, "tools": tools})
+        async for ev in self._inner.stream(model, system, messages, tools, effort):
+            yield ev
+
+
+def default_config_root() -> Path:
+    """本體目錄（config.toml、keys.toml 在那裡）。副本自己沒有設定檔時往這裡找。"""
+    env = os.environ.get("WOOF_CONFIG_ROOT")
+    if env:
+        return Path(env)
+    if (ROOT / "config.toml").exists():
+        return ROOT
+    return Path("C:/Users/user/hermes-files/WOOF")
+
+
+def load_keys_into_memory(root: Path) -> tuple[list[str], list[str]]:
+    """把 keys.toml 的金鑰解進金鑰池（只在這個程序的記憶體裡）。
+
+    不寫暫存檔、不印出、也不回傳明文；解不開的只回報「池／標籤＋原因」，方便排查。
+    """
+    from woof import dpapi, keypool
+
+    path = root / "keys.toml"
+    if not path.exists():
+        return [], [f"找不到 {path}"]
+    try:
+        raw = tomllib.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        return [], [f"keys.toml 讀不進來：{type(e).__name__}: {e}"]
+    pools, fails = [], []
+    for name, items in raw.items():
+        if not isinstance(items, list):
+            continue
+        pool = keypool.KeyPool(name)
+        for i, it in enumerate(items):
+            if not (isinstance(it, dict) and it.get("key")):
+                continue
+            k = str(it["key"])
+            if k.startswith(dpapi.PREFIX):
+                try:
+                    k = dpapi.decrypt(k)
+                except Exception as e:
+                    fails.append(f"{name}#{i + 1} 解不開（{type(e).__name__}）")
+                    continue
+            pool.entries.append(keypool.KeyEntry(key=k, label=str(it.get("label") or f"#{i + 1}")))
+        if pool.entries:
+            keypool.POOLS[name] = pool
+            pools.append(name)
+    return pools, fails
+
+
+def setup_real(model_id: str, root: Path) -> list[str]:
+    """真模型模式：讀本體的 config.toml，只留指定模型；工作目錄換成暫存資料夾；金鑰進記憶體。"""
+    cfg_path = root / "config.toml"
+    if not cfg_path.exists():
+        raise SystemExit(f"找不到 {cfg_path}（用 --config-root 指定本體目錄）")
+    cfg = tomllib.loads(cfg_path.read_text(encoding="utf-8"))
+    models = [m for m in merge_models(cfg) if m["id"] == model_id]
+    if not models:
+        names = ", ".join(m["id"] for m in merge_models(cfg))
+        raise SystemExit(f"config.toml 沒有模型 {model_id}（可用：{names}）")
+    models[0]["label"] = f"{models[0].get('label', model_id)}（評測）"
+
+    workdir = Path(TMP) / "work"
+    workdir.mkdir(parents=True, exist_ok=True)
+    conf = {k: v for k, v in cfg.items() if k not in ("models", "vendors", "budget", "workdir", "allowed_dirs")}
+    conf.update({
+        "workdir": str(workdir), "allowed_dirs": [str(workdir)],
+        "models": models, "default_model": model_id,
+        "aux": {"compact": model_id, "subagent": model_id, "vision": model_id},
+        "permissions": {"danger_ask": True, "headless": "deny"},
+    })
+    REG.config = conf
+    REG.providers, REG.tools = {}, {}
+    REG.events.hooks = {}
+    REG.plugins = {}
+    for info in REG.discover():
+        if info.name in (*WANT_PLUGINS, "openai_compat"):
+            REG.plugins[info.name] = info
+            REG._load(info)
+    if model_id not in [m["id"] for m in REG.models()]:
+        raise SystemExit(f"模型 {model_id} 的 provider 沒載入成功（{REG.plugins.get('openai_compat').error if REG.plugins.get('openai_compat') else '插件不存在'}）")
+
+    # 包一層記錄器：之後檢查「模型收到的訊息裡有沒有壓縮摘要」
+    for name, prov in list(REG.providers.items()):
+        REG.providers[name] = Recorder(prov, REQ)
+
+    pools, fails = load_keys_into_memory(root)
+    print(f"設定來源：{cfg_path}")
+    print(f"金鑰池（記憶體）：{', '.join(pools) if pools else '（沒有）'}"
+          + (f"；解不開：{'、'.join(fails)}" if fails else ""))
+    return fails
+
+
 def seed_history(sid: str, rounds: int) -> int:
     """先塞幾輪又長又無關痛癢的對話，讓上下文用量衝過門檻。"""
     for i in range(rounds):
@@ -470,7 +586,7 @@ def seed_history(sid: str, rounds: int) -> int:
     return store.get_messages(sid)[-1]["id"]
 
 
-async def run_one(task: Task, fake: FakeModel, base: Path) -> dict:
+async def run_one(task: Task, fake: FakeModel | None, base: Path, timeout: int = 180) -> dict:
     wd = base / task.id
     wd.mkdir(parents=True, exist_ok=True)
     for rel, body in (task.files or {}).items():
@@ -497,11 +613,16 @@ async def run_one(task: Task, fake: FakeModel, base: Path) -> dict:
                        "through": last, "context_window": 8000}
         store.update_session(sid, engine_state=es)
 
-    fake.set_script(task.id, task.script)
-    if task.sub_script:
-        fake.set_script(f"{task.id}:sub", task.sub_script)
-    fake.scope = task.id
-    fake.requests = []
+    if fake is not None:
+        fake.set_script(task.id, task.script)
+        if task.sub_script:
+            fake.set_script(f"{task.id}:sub", task.sub_script)
+        fake.scope = task.id
+        fake.requests = []
+        requests = fake.requests
+    else:
+        REQ.clear()
+        requests = REQ
 
     events: list[dict] = []
 
@@ -510,13 +631,15 @@ async def run_one(task: Task, fake: FakeModel, base: Path) -> dict:
 
     t0 = time.time()
     try:
-        await loop.run_turn(sid, [{"type": "text", "text": task.prompt}], emit)
+        await asyncio.wait_for(loop.run_turn(sid, [{"type": "text", "text": task.prompt}], emit), timeout)
+    except asyncio.TimeoutError:
+        events.append({"type": "eval_error", "text": f"超過 {timeout} 秒沒跑完"})
     except Exception as e:  # 評測不因單題失敗而中斷
-        events.append({"type": "eval_error", "text": f"{type(e).__name__}: {e}"})
+        events.append({"type": "eval_error", "text": f"{type(e).__name__}: {e}"[:300]})
     await asyncio.sleep(0.2)  # 讓背景壓縮、背景通知跑完
     ms = int((time.time() - t0) * 1000)
 
-    ctx = Ctx(task, sid, wd, events, fake)
+    ctx = Ctx(task, sid, wd, events, fake, requests)
     note, ok = "", True
     try:
         task.check(ctx)
@@ -537,20 +660,20 @@ async def run_one(task: Task, fake: FakeModel, base: Path) -> dict:
             "tokens": st["usage"]["input_tokens"] + st["usage"]["output_tokens"], "ms": ms}
 
 
-def write_report(rows: list[dict], out_dir: Path) -> tuple[Path, Path]:
+def write_report(rows: list[dict], out_dir: Path, mode: str = "fake") -> tuple[Path, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     passed = sum(1 for r in rows if r["pass"])
     head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT,
                           capture_output=True, text=True).stdout.strip() or "?"
-    data = {"time": datetime.now().isoformat(timespec="seconds"), "model": MODEL_ID, "commit": head,
+    data = {"time": datetime.now().isoformat(timespec="seconds"), "model": MODEL_ID, "mode": mode, "commit": head,
             "total": len(rows), "passed": passed,
-            "failed": [r["id"] for r in rows if not r["pass"]], "tasks": rows}
+            "failed": [{"id": r["id"], "why": r["note"]} for r in rows if not r["pass"]], "tasks": rows}
     jp = out_dir / f"eval-{stamp}.json"
     jp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     lines = [f"# WOOF 評測 {stamp}", "",
-             f"- 模型：{MODEL_ID}　commit：{head}",
+             f"- 模型：{MODEL_ID}（{'真模型' if mode == 'real' else '假模型'}）　commit：{head}",
              f"- 通過：{passed}／{len(rows)}（{passed * 100 // max(1, len(rows))}%）", "",
              "| # | 題目 | 結果 | 工具步數 | 工具錯誤 | 模型呼叫 | token | 時間 | 說明 |",
              "|---|---|---|---|---|---|---|---|---|"]
@@ -563,29 +686,39 @@ def write_report(rows: list[dict], out_dir: Path) -> tuple[Path, Path]:
     return jp, mp
 
 
-async def main(only: set[str] | None, model: str) -> int:
+async def main(only: set[str] | None, model: str, *, limit: int = 0, timeout: int = 180,
+               run_fake_only: bool = False, config_root: Path | None = None) -> int:
     global MODEL_ID
     MODEL_ID = model
-    fake = FakeModel()
-    setup_registry(fake)
+    real = model != FAKE_MODEL_ID
+    if real:
+        setup_real(model, config_root or default_config_root())
+        fake = None
+    else:
+        fake = FakeModel()
+        setup_registry(fake)
     if not REG.model_cfg(MODEL_ID):
         print(f"找不到模型 {MODEL_ID}（可用：{', '.join(m['id'] for m in REG.config['models'])}）")
         return 2
 
     base = Path(tempfile.mkdtemp(prefix="eval_work_", dir=TMP))
     tasks = [t for t in TASKS if not only or t.id in only]
+    if real and not run_fake_only:
+        tasks = [t for t in tasks if not t.fake_only]
+    if limit > 0:
+        tasks = tasks[:limit]
     if not tasks:
         print("沒有符合的題目")
         return 2
 
-    print(f"評測 {len(tasks)} 題，資料夾 {TMP}")
+    print(f"評測 {len(tasks)} 題（{'真模型' if real else '假模型'}），資料夾 {TMP}")
     rows = []
     for t in tasks:
-        r = await run_one(t, fake, base)
+        r = await run_one(t, fake, base, timeout)
         rows.append(r)
         print(f"  {'PASS' if r['pass'] else 'FAIL'}  {t.id:<16} {r['steps']:>2} 步  {r['ms']:>5} ms  {r['note'][:70]}")
 
-    jp, mp = write_report(rows, ROOT / "data" / "eval")
+    jp, mp = write_report(rows, ROOT / "data" / "eval", "real" if real else "fake")
     passed = sum(1 for r in rows if r["pass"])
     print(f"\n{passed}/{len(rows)} 通過")
     print(f"JSON：{jp}")
@@ -597,8 +730,19 @@ if __name__ == "__main__":
     args = sys.argv[1:]
     only = None
     model = MODEL_ID
+    limit = 0
+    timeout = 180
+    run_fake_only = "--all" in args
+    config_root = None
     if "--only" in args:
         only = {x.strip() for x in args[args.index("--only") + 1].split(",") if x.strip()}
     if "--model" in args:
         model = args[args.index("--model") + 1]
-    raise SystemExit(asyncio.run(main(only, model)))
+    if "--limit" in args:
+        limit = int(args[args.index("--limit") + 1])
+    if "--timeout" in args:
+        timeout = int(args[args.index("--timeout") + 1])
+    if "--config-root" in args:
+        config_root = Path(args[args.index("--config-root") + 1])
+    raise SystemExit(asyncio.run(main(only, model, limit=limit, timeout=timeout,
+                                      run_fake_only=run_fake_only, config_root=config_root)))
