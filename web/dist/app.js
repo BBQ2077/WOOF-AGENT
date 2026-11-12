@@ -4,8 +4,10 @@ const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 // 後端位址與 token 由 prefs.js 準備好（桌面版來自 preload，埠每次隨機；瀏覽器版同主機＋網址上的 token）
 const CONN = window.WOOF_CONN || { base: '', token: new URLSearchParams(location.search).get('token') || '' };
-const TOKEN = CONN.token;
-const BASE = CONN.base;
+const REMOTE_KEY = 'woof.remoteBase';
+const LOGIN_KEY = 'woof.login';
+let TOKEN = CONN.token;
+let BASE = CONN.base;
 const D = window.woofDesktop || null;
 const NL = String.fromCharCode(10);
 const ico = (name, cls = '') => `<svg class="${cls}"><use href="#i-${name}"/></svg>`;
@@ -158,11 +160,15 @@ $('#tabbar').addEventListener('click', (e) => {
 });
 
 // ------------------------------------------------------------------ 共用
-async function api(method, path, body) {
+async function api(method, path, body, retry = true) {
   const r = await fetch(BASE + path, {
     method, headers: { 'x-woof-token': TOKEN, ...(body ? { 'content-type': 'application/json' } : {}) },
     body: body ? JSON.stringify(body) : undefined,
   });
+  if (r.status === 401 && retry && path !== '/api/login') {
+    const tok = await askLogin('這個主機要密碼，登入後會繼續。');
+    if (tok) return api(method, path, body, false);
+  }
   if (!r.ok) {
     const raw = await r.text();
     let msg = raw;
@@ -172,6 +178,81 @@ async function api(method, path, body) {
   return r.json();
 }
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+// ---- 後端連線：登入憑證、改連到別台電腦
+// 憑證存在這台裝置（localStorage），換裝置或過期會再登入；後端只留雜湊。
+function loginGet() {
+  try { return JSON.parse(localStorage.getItem(LOGIN_KEY) || 'null'); } catch { return null; }
+}
+function loginSet(token, exp, base) {
+  if (!token) { localStorage.removeItem(LOGIN_KEY); return; }
+  localStorage.setItem(LOGIN_KEY, JSON.stringify({ token, exp: exp || 0, base: base || '' }));
+}
+function loginRestore() {
+  const s = loginGet();
+  if (!s || !s.token) return;
+  if (s.base && s.base !== BASE) return;                      // 換了主機，憑證不能沿用
+  if (s.exp && s.exp * 1000 <= Date.now()) { loginSet(''); return; }
+  TOKEN = s.token;
+}
+async function askLogin(desc) {
+  let token = '';
+  const ok = await modal({
+    title: '登入 WOOF',
+    desc: desc || '這個主機要密碼才能使用。',
+    body: '<label class="fld"><span>密碼</span><input type="password" data-lp autocomplete="current-password">'
+      + '<small>登入後這台裝置會記住，直到憑證過期；很久沒用或換裝置會再問一次。</small></label>',
+    ok: '登入', cancel: '',
+    onOk: async (m) => {
+      const pw = $('[data-lp]', m).value;
+      if (!pw) { notify('warn', '請輸入密碼'); return false; }
+      const btn = $('[data-m="ok"]', m);
+      btn.classList.add('busy');
+      try {
+        const r = await fetch(BASE + '/api/login', {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: pw }),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          notify('error', '登入失敗', typeof j.detail === 'string' ? j.detail : `HTTP ${r.status}`);
+          return false;
+        }
+        if (!j.token) { notify('warn', '這台主機沒有設密碼'); return false; }
+        token = j.token;
+        TOKEN = token;
+        loginSet(token, j.expires, BASE);
+        notify('ok', '已登入');
+        return true;
+      } catch (e) {
+        notify('error', '連不上後端', e.message);
+        return false;
+      } finally {
+        btn.classList.remove('busy');
+      }
+    },
+  });
+  return ok ? token : '';
+}
+function remoteBase() {
+  if (window.WOOF_CONN && window.WOOF_CONN.remote) return window.WOOF_CONN.base || '';
+  try { return (localStorage.getItem(REMOTE_KEY) || '').trim().replace(/\/+$/, ''); } catch { return ''; }
+}
+async function connectRemote() {
+  const now = remoteBase();
+  const v = await promptBox('連線到…', '後端位址', now || (BASE ? BASE : ''), {
+    desc: '別台電腦上的 WOOF，例如 http://192.168.1.10:8000 或 https://woof.example.com。'
+      + '留空＝用本機後端。改了會重新載入畫面。',
+    placeholder: 'http://192.168.1.10:8000', mono: true,
+  });
+  if (v === null) return;
+  const url = (v || '').trim().replace(/\/+$/, '');
+  if (url && !/^https?:\/\/[^\s]+$/i.test(url)) { notify('warn', '位址格式不對，要像 http://192.168.1.10:8000'); return; }
+  // 桌面版寫進 data/desktop-conn.json（主程序據此決定要不要啟動本機後端）；瀏覽器版存這台裝置
+  if (D && D.remoteSet) { await D.remoteSet(url); }
+  else if (url) localStorage.setItem(REMOTE_KEY, url); else localStorage.removeItem(REMOTE_KEY);
+  loginSet('');
+  location.reload();
+}
 // ---- 通知：右上角堆疊。錯誤不會自己消失，可展開詳細、可複製。
 function notify(type, title, detail = '', ms) {
   const box = $('#notes');
@@ -3719,15 +3800,18 @@ const SECTIONS = [
   ['general', '一般', '工作目錄、終端機、可預覽的資料夾，以及執行中按 Enter 的行為。'],
   ['appearance', '外觀', '顏色、縮放與字級。只存在這台電腦，拉了立即生效。'],
   ['mcp', 'MCP 伺服器', 'WOOF 對外提供 MCP 工具，也可以連外部的 MCP 伺服器。'],
-  ['snapshots', '檔案還原', '模型改檔前先存一份原檔，之後可以在對話的「檔案」分頁還原。'],  ['about', '關於', ''],
+  ['snapshots', '檔案還原', '模型改檔前先存一份原檔，之後可以在對話的「檔案」分頁還原。'],
+  ['remote', '連線', '目前連到哪一台 WOOF。桌面版可以改連到別台電腦（家裡主機、雲端主機、WSL）；用瀏覽器開遠端網址時就是那台。'],
+  ['about', '關於', ''],
 ];
 // 側欄分組：同一類放一個框，項目長短不一也整齊
 const SET_GROUPS = [
   ['模型', ['vendors', 'aux', 'keys']],
   ['對話', ['prompts', 'styles', 'compress']],
   ['能力', ['perms', 'presets', 'tools', 'skills']],
-  ['環境', ['general', 'appearance']],
-  ['進階', ['mcp', 'snapshots', 'about']],];
+  ['環境', ['general', 'appearance', 'remote']],
+  ['進階', ['mcp', 'snapshots', 'about']],
+];
 async function renderMcpSec(box) {
   box.innerHTML = '<div class="blank">讀取中…</div>';
   let info;
@@ -4134,7 +4218,7 @@ function renderSettings() {
   const box = $('#setList');
   box.onclick = null;
   box.className = 'sec-' + sec[0];
-  ({ mcp: renderMcpSec, aux: renderAux, compress: renderCompressSec, prompts: renderPromptsSec, vendors: renderVendors, keys: renderKeyEditor, appearance: renderAppearance, general: renderGeneral, perms: renderPermsSec, presets: renderPresetsSec, about: renderAbout, styles: renderStylesSec, snapshots: renderSnapshotsSec, tools: renderToolsSet, skills: renderSkillsSet })[sec[0]](box);}
+  ({ mcp: renderMcpSec, aux: renderAux, compress: renderCompressSec, prompts: renderPromptsSec, vendors: renderVendors, keys: renderKeyEditor, appearance: renderAppearance, general: renderGeneral, perms: renderPermsSec, presets: renderPresetsSec, remote: renderRemoteSec, about: renderAbout, styles: renderStylesSec, snapshots: renderSnapshotsSec, tools: renderToolsSet, skills: renderSkillsSet })[sec[0]](box);}
 $('#setNav').onclick = (e) => { const d = e.target.closest('[data-sec]'); if (!d) return; setFindClear(); S.setSec = d.dataset.sec; localStorage.setItem('woof.setSec', S.setSec); renderSettings(); };
 $('#setQ').oninput = (e) => { S.setQ = e.target.value; renderSettings(); };
 $('#setQ').onkeydown = (e) => {
@@ -4648,6 +4732,36 @@ function renderGeneral(box) {
   </div>`;
   box.querySelectorAll('[data-open]').forEach((b) => (b.onclick = async () => { if (D) D.openPath((await D.root()) + '\\' + b.dataset.open); }));
   $('#devtools', box).onclick = () => D && D.win('devtools');
+}
+
+// ---- 連線
+// 桌面版可以改連到別台電腦；瀏覽器版就是用開啟它的那個位址，這裡只顯示目前連到哪、順便登出。
+function renderRemoteSec(box) {
+  const rb = remoteBase();
+  const here = rb || BASE || location.origin;
+  const rows = [
+    ['目前連線', `<span class="mono">${esc(here)}</span>${rb ? ' <span class="tag t-ok">遠端</span>' : ' <span class="tag t-off">本機</span>'}`],
+  ];
+  box.innerHTML = `<div class="card">
+    <div class="frow"><div><b>連線到…</b><small>別台電腦上的 WOOF。填位址後會重新載入畫面，再用那台的密碼登入。</small></div>
+      <div class="fctl"><span class="btn primary" id="rmConnect">連線到…</span>${rb ? '<span class="btn" id="rmLocal">改回本機</span>' : ''}</div></div>
+    <div class="frow"><div><b>目前連到</b><small>${D ? '桌面版預設連自己啟動的後端。' : '瀏覽器版：直接開那台電腦的網址即可，例如 http://192.168.1.10:8000。'}</small></div>
+      <div class="fctl">${rows.map(([k, v]) => `<span class="tag t-off">${k}</span> ${v}`).join(' ')}</div></div>
+    <div class="frow"><div><b>這台裝置的登入</b><small>登入憑證存在這個瀏覽器的本機儲存，換裝置要重新登入。</small></div>
+      <div class="fctl"><span class="btn" id="rmLogout">登出</span></div></div>
+  </div>
+  <div class="card">
+    <div class="frow"><div><b>讓別台電腦連進來</b><small>後端預設只聽本機。要開放區網或外網，在後端電腦的 config.toml 設定 [server] bind、密碼與 HTTPS，再啟動 <span class="mono">python -m woof</span>。做法見 README 的「讓別台電腦連進來」。</small></div></div>
+  </div>`;
+  $('#rmConnect').onclick = connectRemote;
+  const back = $('#rmLocal');
+  if (back) back.onclick = async () => {
+    if (!await confirmBox('改回本機後端', '會回到這台電腦自己啟動的後端，並重新載入畫面。')) return;
+    localStorage.removeItem(REMOTE_KEY);
+    loginSet('');
+    location.reload();
+  };
+  $('#rmLogout').onclick = () => { loginSet(''); location.reload(); };
 }
 
 // ---- 外觀
@@ -5557,6 +5671,7 @@ if (D) {
 
 // ------------------------------------------------------------------ 啟動
 (async () => {
+  loginRestore();
   try {
     await refreshState();
     await loadSessions();

@@ -24,6 +24,8 @@ contextBridge.exposeInMainWorld('woofDesktop', {
   onWinState: (fn) => ipcRenderer.on('win-state', (_e, s) => fn(s)),
   onBackendExit: (fn) => ipcRenderer.on('backend-exit', (_e, c) => fn(c)),
   appInfo: () => ipcRenderer.invoke('app-info'),
+  remote: () => ipcRenderer.invoke('remote'),
+  remoteSet: (base) => ipcRenderer.invoke('remote-set', base),
   shortcut: (where) => ipcRenderer.invoke('shortcut', where),
   onBoot: (fn) => ipcRenderer.on('boot', (_e, t) => fn(t)),
   retryBoot: () => ipcRenderer.invoke('boot-retry'),

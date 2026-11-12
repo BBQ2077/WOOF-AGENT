@@ -22,7 +22,7 @@ os.environ["WOOF_DATA"] = TMP
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from woof import cost, cron, effort, perms, snapshot, store, tokens  # noqa: E402
+from woof import cost, cron, effort, perms, remote as rconn, snapshot, store, tokens  # noqa: E402
 from woof.loader import REG  # noqa: E402
 
 
@@ -1059,6 +1059,110 @@ class ConfigPathsByProfile(unittest.TestCase):
                 pass
         else:
             config.REGISTRY.write_text(text, encoding="utf-8")
+
+
+class RemoteConn(unittest.TestCase):
+    """對外連線：預設只綁本機、密碼只存雜湊、登入換憑證、憑證會過期、沒登入就擋。"""
+
+    def setUp(self):
+        self.real_secret = rconn._SECRET
+        rconn._SECRET = b"t" * 32          # 固定金鑰，測試不寫 data/server_secret
+        rconn.reset()
+
+    def tearDown(self):
+        rconn._SECRET = self.real_secret
+        rconn.reset()
+
+    def test_default_bind_is_local(self):
+        st = rconn.configure({})
+        self.assertEqual(st["bind"], "local")
+        self.assertFalse(st["open_mode"])
+        self.assertEqual(rconn.bind_host("local"), "127.0.0.1")
+        self.assertEqual(rconn.startup_error(st), "")   # 只綁本機不用密碼也不用 HTTPS
+
+    def test_local_mode_keeps_machine_token(self):
+        rconn.configure({})
+        self.assertTrue(rconn.check(False, "/api/state", "abc", "abc"))
+        self.assertFalse(rconn.check(False, "/api/state", "abc", "別的"))
+        self.assertTrue(rconn.check(False, "/api/state", "", ""))   # 後端沒拿到 TOKEN 時跟以前一樣全放行
+
+    def test_password_is_hashed(self):
+        h = rconn.hash_password("密碼 horse battery")
+        self.assertTrue(h.startswith("pbkdf2_sha256$"))
+        self.assertNotIn("horse", h)
+        self.assertTrue(rconn.verify_password("密碼 horse battery", h))
+        self.assertFalse(rconn.verify_password("錯的密碼", h))
+        self.assertFalse(rconn.verify_password("密碼 horse battery", "壞掉的字串"))
+        self.assertFalse(rconn.verify_password("", h))
+
+    def test_token_roundtrip_and_expiry(self):
+        tok, exp = rconn.issue(30)
+        self.assertGreater(exp, time.time())
+        self.assertIsNotNone(rconn.verify(tok))
+        self.assertIsNone(rconn.verify(tok[:-4] + "AAAA"))   # 簽章被動過就不認
+        real = rconn.time
+
+        class Later:
+            @staticmethod
+            def time():
+                return real.time() + 40 * 86400
+
+        rconn.time = Later
+        try:
+            self.assertIsNone(rconn.verify(tok), "過了期限的憑證要失效")
+        finally:
+            rconn.time = real
+
+    def test_open_mode_blocks_without_login(self):
+        st = rconn.configure({"server": {"bind": "lan", "password_hash": rconn.hash_password("pw-12345678")}})
+        self.assertTrue(st["open_mode"])
+        self.assertFalse(rconn.check(True, "/api/state", "", "machine"))
+        self.assertFalse(rconn.check(True, "/api/state", "亂打的", "machine"))
+        self.assertTrue(rconn.check(True, "/api/login", "", "machine"))     # 登入端點本身要進得去
+        self.assertTrue(rconn.check(True, "/api/session", "", "machine"))
+        tok, _ = rconn.issue(1)
+        self.assertTrue(rconn.check(True, "/api/state", tok, "machine"))
+
+    def test_refuse_open_without_setup(self):
+        st = rconn.configure({"server": {"bind": "lan"}})
+        self.assertIn("密碼", rconn.startup_error(st))
+        st = rconn.configure({"server": {"bind": "public", "password_hash": rconn.hash_password("pw-12345678")}})
+        self.assertIn("HTTPS", rconn.startup_error(st))
+        st = rconn.configure({"server": {"bind": "public", "password_hash": rconn.hash_password("pw-12345678"),
+                                         "trust_proxy": True}})
+        self.assertEqual(rconn.startup_error(st), "")
+        self.assertEqual(rconn.bind_host("public"), "0.0.0.0")
+
+
+class RemoteHttp(unittest.TestCase):
+    """真的打 API：沒登入被擋、密碼對才發憑證。"""
+
+    def setUp(self):
+        from fastapi.testclient import TestClient
+        from woof import server
+
+        self.server = server
+        self.real_secret = rconn._SECRET
+        rconn._SECRET = b"t" * 32
+        self.pw = "pw-12345678"
+        rconn.configure({"server": {"bind": "public", "password_hash": rconn.hash_password(self.pw),
+                                    "trust_proxy": True}})
+        self.c = TestClient(server.app)
+
+    def tearDown(self):
+        rconn._SECRET = self.real_secret
+        rconn.reset()
+
+    def test_login_flow(self):
+        self.assertEqual(self.c.get("/api/state").status_code, 401)                 # 沒帶憑證
+        self.assertEqual(self.c.get("/api/session").status_code, 200)               # 開場問要不要登入
+        self.assertTrue(self.c.get("/api/session").json()["open"])
+        self.assertEqual(self.c.post("/api/login", json={"password": "錯的"}).status_code, 401)
+        r = self.c.post("/api/login", json={"password": self.pw})
+        self.assertEqual(r.status_code, 200)
+        tok = r.json()["token"]
+        self.assertTrue(tok)
+        self.assertTrue(rconn.check(True, "/api/state", tok, ""))                   # 拿到的憑證能過
 
 
 if __name__ == "__main__":

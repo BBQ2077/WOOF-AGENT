@@ -20,7 +20,7 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import cron, keypool, procs, store
+from . import cron, keypool, procs, remote, store
 from .agent.loop import (flush_steer, mark_interrupted, peek_steer, pending_approvals, pop_steer, push_steer,
                          requeue_steer, reset_allow_all,
                          resolve_approval, resume_session, run_turn)
@@ -41,16 +41,22 @@ TURN_LOCK = asyncio.Lock()
 
 
 def _check(req_token: str | None) -> None:
-    if TOKEN and req_token != TOKEN:
+    st = remote.state()
+    if not remote.check(bool(st["open_mode"]), "/", req_token, TOKEN):
         raise HTTPException(401, "token 錯誤")
+
+
+def _authed(request: Request) -> bool:
+    """只看「有沒有過關」，不限定用哪一種憑證。"""
+    st = remote.state()
+    tok = request.headers.get("x-woof-token") or request.query_params.get("token")
+    return remote.check(bool(st["open_mode"]), request.url.path, tok, TOKEN)
 
 
 @app.middleware("http")
 async def auth(request: Request, call_next):
-    if request.url.path.startswith("/api/"):
-        tok = request.headers.get("x-woof-token") or request.query_params.get("token")
-        if TOKEN and tok != TOKEN:
-            return JSONResponse({"detail": "token 錯誤"}, status_code=401)
+    if request.url.path.startswith("/api/") and not _authed(request):
+        return JSONResponse({"detail": "token 錯誤"}, status_code=401)
     return await call_next(request)
 
 
@@ -88,6 +94,56 @@ async def broadcast(ev: dict) -> None:
 
 
 # ---------------------------------------------------------------- REST
+_LOGIN_FAILS: dict[str, list[float]] = {}   # 來源 IP → 最近幾次失敗的時間（每 5 分鐘最多 8 次）
+_LOGIN_LOCK: dict[str, float] = {}          # 來源 IP → 鎖到什麼時候
+
+
+def _client_ip(request: Request) -> str:
+    """trust_proxy 打開時才看 X-Forwarded-For（反向代理會帶真實來源）。"""
+    if remote.state()["trust_proxy"]:
+        fwd = request.headers.get("x-forwarded-for") or ""
+        if fwd:
+            return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "?"
+
+
+def _login_blocked(ip: str) -> float:
+    """回傳還要等幾秒；0＝可以試。"""
+    until = _LOGIN_LOCK.get(ip, 0)
+    return max(0, int(until - time.time()))
+
+
+@app.get("/api/session")
+async def session_info():
+    """介面開場先問這個：要不要登入。不需登入時也回目前連線方式。"""
+    st = remote.state()
+    return {"open": bool(st["open_mode"]), "bind": st["bind"],
+            "password": bool(st["password_hash"])}
+
+
+@app.post("/api/login")
+async def login(body: dict, request: Request):
+    st = remote.state()
+    if not st["open_mode"]:
+        return {"token": "", "expires": 0}
+    ip = _client_ip(request)
+    wait = _login_blocked(ip)
+    if wait:
+        raise HTTPException(429, f"登入失敗次數太多，請 {wait} 秒後再試")
+    if not remote.verify_password(str(body.get("password") or ""), st["password_hash"]):
+        fails = [t for t in _LOGIN_FAILS.get(ip, []) if t > time.time() - 300]
+        fails.append(time.time())
+        _LOGIN_FAILS[ip] = fails
+        if len(fails) >= 8:
+            _LOGIN_LOCK[ip] = time.time() + 300
+            _LOGIN_FAILS.pop(ip, None)
+        raise HTTPException(401, "密碼不對")
+    _LOGIN_FAILS.pop(ip, None)
+    _LOGIN_LOCK.pop(ip, None)
+    token, exp = remote.issue(int(st["session_days"]))
+    return {"token": token, "expires": exp}
+
+
 @app.get("/api/state")
 async def state():
     return {
@@ -1598,7 +1654,7 @@ async def pty_close(tid: str):
 @app.websocket("/ws/pty/{tid}")
 async def pty_ws(ws: WebSocket, tid: str):
     from . import pty
-    if TOKEN and ws.query_params.get("token") != TOKEN:
+    if not remote.check(bool(remote.state()["open_mode"]), "/ws", ws.query_params.get("token"), TOKEN):
         await ws.close(code=4401)
         return
     t = pty.TERMS.get(tid)
@@ -1988,7 +2044,7 @@ async def compact_session(sid: str):
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
-    if TOKEN and ws.query_params.get("token") != TOKEN:
+    if not remote.check(bool(remote.state()["open_mode"]), "/ws", ws.query_params.get("token"), TOKEN):
         await ws.close(code=4401)
         return
     await ws.accept()

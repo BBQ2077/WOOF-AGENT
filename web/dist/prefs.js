@@ -8,7 +8,18 @@
 (function () {
   var D = window.woofDesktop || null;
   var qs = new URLSearchParams(location.search);
-  var conn = (D && D.conn) || { base: '', token: qs.get('token') || '' };
+  // 要連哪台後端：桌面版由主程序決定（data/desktop-conn.json 有設就連那台），瀏覽器版用 localStorage
+  // 的 woof.remoteBase（「設定 → 連線 → 連線到…」寫入），沒設就是用開啟它的那個位址。
+  var remote = (D && D.conn && D.conn.remote) ? D.conn.base : '';
+  if (!remote) {
+    try { remote = (localStorage.getItem('woof.remoteBase') || '').trim().replace(/\/+$/, ''); } catch (e) {}
+  }
+  var login = null;
+  try { login = JSON.parse(localStorage.getItem('woof.login') || 'null'); } catch (e) {}
+  var token = (login && login.token && (!login.base || login.base === remote)) ? login.token : '';
+  if (!token && !remote && D && D.conn) token = D.conn.token;
+  if (!token) token = qs.get('token') || '';
+  var conn = { base: remote || (D && D.conn && !D.conn.remote ? D.conn.base : ''), token: token, remote: !!remote };
   window.WOOF_CONN = conn;
 
   var SHARED = ['woof.theme', 'woof.look', 'woof.model', 'woof.pins', 'woof.mgrpOpen', 'woof.effortWant',

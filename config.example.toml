@@ -75,3 +75,20 @@ default_mode = "ask"
 danger_ask = true
 # 排程等沒人在旁邊的對話，碰到要先問的工具：deny（擋下）/ approve（直接放行）
 headless = "deny"
+
+
+# ── 對外連線 ──
+# 預設只聽本機（127.0.0.1，埠號隨機），不用改這一節。要讓別台電腦連進來才需要：
+# 先 python -m woof set-password 設密碼，再把 bind 改掉。做法見 README「在另一台電腦跑」。
+[server]
+# local（只聽本機）/ lan（區網）/ public（外網）
+bind = "local"
+# 登入密碼的雜湊，執行 python -m woof set-password 產生（這裡不要寫明文密碼）
+# password_hash = "pbkdf2_sha256$..."
+# 登入後拿到的憑證可以用幾天
+# session_days = 30
+# public 一定要 HTTPS：填憑證檔，或放在反向代理後面
+# https_cert = "C:/certs/fullchain.pem"
+# https_key = "C:/certs/privkey.pem"
+# 前面有 nginx、Caddy 之類的反向代理在處理 HTTPS 時設 true
+# trust_proxy = false

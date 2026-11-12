@@ -58,6 +58,26 @@ let tray = null;
 let backend = null;
 let port = null;
 let quitting = false;
+// 桌面版可以改連到別台電腦的後端：data/desktop-conn.json 存 { base }，有設就以它為準、不啟動本機後端。
+const CONN_FILE = ROOT ? path.join(ROOT, 'data', 'desktop-conn.json') : null;
+function readRemote() {
+  if (!CONN_FILE) return '';
+  try {
+    const j = JSON.parse(fs.readFileSync(CONN_FILE, 'utf8').replace(/^\uFEFF/, ''));
+    const b = String((j && j.base) || '').trim().replace(/\/+$/, '');
+    return /^https?:\/\/[^\s]+$/i.test(b) ? b : '';
+  } catch { return ''; }
+}
+function writeRemote(base) {
+  if (!CONN_FILE) return false;
+  try {
+    fs.mkdirSync(path.dirname(CONN_FILE), { recursive: true });
+    const tmp = `${CONN_FILE}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ version: 1, base: String(base || '') }, null, 1));
+    fs.renameSync(tmp, CONN_FILE);
+    return true;
+  } catch (e) { log('寫入連線設定失敗', e.message); return false; }
+}
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();
@@ -157,8 +177,14 @@ function writePrefs(changes) {
 }
 ipcMain.on('prefs:snapshot', (e) => { e.returnValue = readPrefs(); });
 ipcMain.on('prefs:write', (_e, changes) => writePrefs(changes));
-// 畫面要連的後端（埠每次啟動隨機）
-ipcMain.on('conn', (e) => { e.returnValue = port ? { base: `http://127.0.0.1:${port}`, token: TOKEN } : null; });
+// 畫面要連的後端：預設是自己啟動的那個（埠每次隨機）；設了遠端位址就連那台，token 由登入換取
+ipcMain.on('conn', (e) => {
+  const remote = readRemote();
+  if (remote) { e.returnValue = { base: remote, token: '', remote: true }; return; }
+  e.returnValue = port ? { base: `http://127.0.0.1:${port}`, token: TOKEN } : null;
+});
+ipcMain.handle('remote', () => readRemote());
+ipcMain.handle('remote-set', (_e, base) => writeRemote(base));
 // 啟動畫面與視窗底色：照偏好檔裡畫面算好的配色（woof.look），開啟時不閃白
 function readLook() {
   const dflt = { dark: false, bg: '#fcfdff', text: '#1f2328', dim: '#5f6878' };
@@ -231,6 +257,7 @@ function showSplash(message) {
 }
 async function boot() {
   port = null;
+  if (readRemote()) { win.loadURL('woof://app/index.html'); return; }
   try {
     await startBackend();
   } catch (e) {
