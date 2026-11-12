@@ -26,7 +26,7 @@ localStorage.removeItem('woof.perm'); localStorage.removeItem('woof.effortWant')
 const S = {
   draft: {}, follow: true,
   models: [], vendors: [], backends: [], plugins: [], keys: {}, sessions: [], sid: null, msgs: [],
-  running: new Set(), live: {}, tools: {}, errors: {}, usage: {}, attach: [], plugFilter: '全部', ws: null, approvals: {}, asks: {}, todos: {}, planOn: {}, gate: {}, subOpen: new Set(),
+  running: new Set(), live: {}, tools: {}, errors: {}, usage: {}, attach: [], plugFilter: '全部', ws: null, approvals: {}, asks: {}, todos: {}, planOn: {}, gate: {}, subOpen: new Set(), groups: [], drag: null,
   modelId: null, workdir: '', tasks: [], queue: {}, srvQ: {}, resumeHide: {}, interrupting: {},
   pins: new Set(JSON.parse(localStorage.getItem('woof.pins') || '[]')),
   profile: null,
@@ -59,6 +59,56 @@ function restoreTabs() {
   const i = Number(localStorage.getItem('woof.tab'));
   S.tab = Number.isInteger(i) && i >= 0 && i < S.tabs.length ? i : 0;
 }
+// ── 並排兩個對話：右半邊是同一支畫面的 iframe（網址帶 ?pane=2&sid=…），
+//    它只顯示對話區，後端位址與 token 由母視窗帶過去（iframe 拿不到桌面版 preload）。
+const PANE2 = new URLSearchParams(location.search).get('pane') === '2';
+if (PANE2) document.body.classList.add('pane2');
+
+function ensurePanes() {
+  let panes = $('#panes');
+  if (panes) return panes;
+  const chatEl = $('#chat'), compEl = $('.composer'), view = $('#chatView');
+  panes = document.createElement('div'); panes.id = 'panes'; panes.className = 'panes';
+  const a = document.createElement('div'); a.id = 'paneA'; a.className = 'pane';
+  view.insertBefore(panes, chatEl);
+  panes.appendChild(a);
+  a.appendChild(chatEl);
+  a.appendChild(compEl);
+  return panes;
+}
+
+function closeSplit() {
+  const b = $('#paneB');
+  if (b) b.remove();
+  S.split = null;
+  renderTabbar();
+}
+
+function openSplit(sid) {
+  if (!sid) return;
+  const panes = ensurePanes();
+  let b = $('#paneB');
+  if (!b) { b = document.createElement('div'); b.id = 'paneB'; b.className = 'pane'; panes.appendChild(b); }
+  const s = S.sessions.find((x) => x.id === sid);
+  const conn = window.WOOF_CONN || {};
+  const q = new URLSearchParams({ pane: '2', sid, token: conn.token || '', base: conn.base || '' });
+  b.innerHTML = `<div class="phead">${ico('chat')}<span class="ptitle"></span>`
+    + `<span class="pclose" data-splitclose title="關閉並排">${ico('x')}</span></div>`
+    + `<iframe src="index.html?${esc(q.toString())}" title="並排對話"></iframe>`;
+  $('.ptitle', b).textContent = (s && s.title) || '新對話';
+  S.split = sid;
+  renderTabbar();
+}
+
+function toggleSplit() {
+  if (S.split) { closeSplit(); return; }
+  // 用「不是目前這個」的分頁來並排；只有一個分頁就並排自己（例如邊看邊問）
+  const other = S.tabs.filter((t) => t.sid && t.sid !== S.sid).pop();
+  const sid = other ? other.sid : S.sid;
+  if (!sid) { notify('info', '還沒有對話', '先開一個有訊息的對話，再按並排。'); return; }
+  openSplit(sid);
+}
+
 function renderTabbar() {
   const bar = $('#tabbar'); if (!bar) return;
   bar.innerHTML = S.tabs.map((t, i) => {
@@ -69,7 +119,8 @@ function renderTabbar() {
     return `<div class="tab${i === S.tab ? ' on' : ''}" data-tab="${i}" title="${esc(title)}">`
       + (run ? '<i class="run"></i>' : wait ? '<i class="wait"></i>' : '')
       + `<span class="tt">${esc(title)}</span><span class="tx" data-tabx="${i}" title="關閉分頁">${ico('x')}</span></div>`;
-  }).join('') + '<span class="tabnew" data-tabnew title="新分頁">＋</span>';
+  }).join('') + '<span class="tabnew" data-tabnew title="新分頁">＋</span>'
+    + `<span class="tabsp${S.split ? ' on' : ''}" data-split title="並排另一個對話">${ico('split')}</span>`;
 }
 // 切到某個分頁：第一次或換過對話才抓訊息，之後整組重畫
 async function showTab(i, fresh) {
@@ -155,6 +206,8 @@ $('#tabbar').addEventListener('click', (e) => {
   const x = e.target.closest('[data-tabx]');
   if (x) { closeTab(Number(x.dataset.tabx)); return; }
   if (e.target.closest('[data-tabnew]')) { newTab(); return; }
+  if (e.target.closest('[data-split]')) { toggleSplit(); return; }
+  if (e.target.closest('[data-splitclose]')) { closeSplit(); return; }
   const t = e.target.closest('[data-tab]');
   if (t) switchTab(Number(t.dataset.tab));
 });
@@ -255,6 +308,7 @@ async function connectRemote() {
 }
 // ---- 通知：右上角堆疊。錯誤不會自己消失，可展開詳細、可複製。
 function notify(type, title, detail = '', ms) {
+  if (PANE2) return;   // 並排的第二個畫面不再跳通知，母視窗已經跳過一次
   const box = $('#notes');
   const el = document.createElement('div');
   el.className = 'note ' + type;
@@ -326,7 +380,7 @@ function modal({ title, desc = '', body = '', ok = '確定', cancel = '取消', 
     const f = $('input:not([type=checkbox]),textarea', m); if (f) { f.focus(); if (f.select) f.select(); }
   });
 }
-const confirmBox = (title, desc, opts = {}) => modal({ title, desc, ok: opts.ok || '確定', danger: !!opts.danger });
+const confirmBox = (title, desc, opts = {}) => modal({ title, desc, ok: opts.ok || '確定', cancel: opts.cancel === undefined ? '取消' : opts.cancel, danger: !!opts.danger });
 async function promptBox(title, label, value = '', opts = {}) {
   let out = null;
   const ok = await modal({
@@ -572,7 +626,11 @@ async function refreshState() {
   renderModelSelect(); renderPlugins(); renderKeys(); renderSessions(); renderComposer();
 }
 async function refreshKeys() { try { S.keys = (await api('GET', '/api/state')).keys; renderKeys(); } catch {} }
-async function loadSessions() { S.sessions = await api('GET', '/api/sessions'); renderSessions(); }
+async function loadSessions() { S.sessions = await api('GET', '/api/sessions'); await loadGroups(); }
+async function loadGroups() {
+  try { S.groups = await api('GET', '/api/groups'); } catch { S.groups = S.groups || []; }
+  renderSessions();
+}
 async function loadWorkdir() {
   const sid = S.sid || '';
   try { S.wd = await api('GET', `/api/workspace?session_id=${encodeURIComponent(sid)}`); S.workdir = S.wd.workdir || ''; } catch {}
@@ -628,6 +686,8 @@ function descIds(sid) {
   }
   return out;
 }
+function grpById(gid) { return (S.groups || []).find((g) => g.id === gid); }
+
 function renderSessions() {
   renderTabbar();
   const q = $('#search').value.trim().toLowerCase();
@@ -636,42 +696,72 @@ function renderSessions() {
   for (const s of S.sessions) if (s.parent && ids.has(s.parent)) (kids[s.parent] = kids[s.parent] || []).push(s);
   const match = (s) => !q || (s.title || '').toLowerCase().includes(q);
   const cur = S.sessions.find((x) => x.id === S.sid);
-  const list = [];
-  const archived = S.sessions.filter((s) => s.archived && !(s.parent && ids.has(s.parent)));
-  const arcOpen = !!q || S.showArchived;
-  for (const s of [...S.sessions.filter((x) => !x.archived), ...(arcOpen ? archived : [])]) {
-    if (s.parent && ids.has(s.parent)) continue;
+  const groups = S.groups || [];
+
+  // 一則對話連同它的子代理，可能長出好幾列
+  const nodesOf = (s) => {
+    const out = [];
     const all = kids[s.id] || [];
     const ks = all.filter(match);
-    if (match(s) || ks.length) {
-      list.push(s);
-      if (!all.length) continue;
-      // 子代理預設收合；搜尋時、或目前正在看其中一個子代理時自動展開
-      const open = !!q || S.subOpen.has(s.id) || (cur && cur.parent === s.id);
-      list.push({ _tog: true, parent: s.id, n: all.length, open });
-      if (open) for (const k of ks.reverse()) list.push(k);
-    }
-  }
-  let html = '', last = '';
-  for (const s of list) {
-    if (s._tog) {
-      html += `<div class="subtog" data-subtog="${esc(s.parent)}">${s.open ? '▾' : '▸'} 子代理 ${s.n} 個</div>`;
-      continue;
-    }
+    if (!(match(s) || ks.length)) return out;
+    out.push(s);
+    if (!all.length) return out;
+    // 子代理預設收合；搜尋時、或目前正在看其中一個子代理時自動展開
+    const open = !!q || S.subOpen.has(s.id) || (cur && cur.parent === s.id);
+    out.push({ _tog: true, parent: s.id, n: all.length, open });
+    if (open) for (const k of ks.reverse()) out.push(k);
+    return out;
+  };
+  const row = (s) => {
     const child = s.parent && ids.has(s.parent);
-    if (!child) {
-      const g = s.archived ? '已封存' : s.pinned ? '已釘選' : dayGroup(s.updated || s.created);
-      if (g !== last) { html += g === '已封存' && !q ? `<div class="arctog" data-arctog>▾ 已封存 ${archived.length} 個</div>` : `<div class="grp">${g}</div>`; last = g; }
-    }
     const m = modelOf(s.model);
     const wait = Object.values(S.approvals).some((a) => a.session_id === s.id);
-    html += `<div class="item${s.id === S.sid ? ' on' : ''}${child ? ' child' : ''}" data-sid="${s.id}">`
+    return `<div class="item${s.id === S.sid ? ' on' : ''}${child ? ' child' : ''}" data-sid="${s.id}"${child ? '' : ' draggable="true"'}>`
       + `<span class="t">${S.running.has(s.id) ? '<i class="run"></i>' : ''}${s.pinned ? `<span class="pin">${ico('pin')}</span>` : ''}${esc(s.title || '新對話')}</span>`
       + `<small>${wait ? '等你確認 · ' : ''}${(s.engine_state || {}).forked_from ? '分支 · ' : ''}${esc(m ? m.label : s.model || '')}</small><span class="del" title="刪除">${ico('x')}</span></div>`;
+  };
+  const flat = (arr) => arr.flatMap(nodesOf).map((s) => (s._tog
+    ? `<div class="subtog" data-subtog="${esc(s.parent)}">${s.open ? '▾' : '▸'} 子代理 ${s.n} 個</div>`
+    : row(s))).join('');
+
+  const roots = S.sessions.filter((s) => !(s.parent && ids.has(s.parent)));
+  const pinned = roots.filter((s) => !s.archived && s.pinned);
+  const archived = roots.filter((s) => s.archived);
+  const arcOpen = !!q || S.showArchived;
+  const gids = new Set(groups.map((g) => g.id));
+  const inGrp = (s) => !s.archived && !s.pinned && s.grp && gids.has(s.grp);
+  const loose = roots.filter((s) => !s.archived && !s.pinned && !inGrp(s));
+
+  let html = '';
+  if (pinned.length) html += '<div class="grp">已釘選</div>' + flat(pinned);
+  for (const g of groups) {
+    const items = roots.filter((s) => inGrp(s) && s.grp === g.id);
+    const body = flat(items);
+    if (q && !body && !g.name.toLowerCase().includes(q)) continue;
+    const n = S.sessions.filter((s) => s.grp === g.id && !s.archived).length;
+    html += `<div class="ghead${g.collapsed ? ' closed' : ''}" data-gid="${esc(g.id)}" data-drop="${esc(g.id)}">`
+      + `<span class="gcar">${ico('down')}</span><span class="gname">${esc(g.name)}</span><span class="gnum">${n}</span>`
+      + `<span class="gmenu" data-gmenu="${esc(g.id)}" title="群組選項">${ico('more')}</span></div>`;
+    if (!g.collapsed || q) html += `<div class="gbody">${body}</div>`;
   }
-  if (!q && archived.length && !S.showArchived) html += `<div class="arctog" data-arctog>▸ 已封存 ${archived.length} 個</div>`;
+  if (groups.length) {
+    // 有群組時，剩下的對話集中成「未分組」；拖到這裡就是移出群組
+    if (loose.length) html += `<div class="ghead plain" data-drop=""><span class="gcar">${ico('down')}</span><span class="gname">未分組</span><span class="gnum">${loose.length}</span></div><div class="gbody">${flat(loose)}</div>`;
+  } else {
+    let last = '';
+    for (const s of loose) {
+      const g = dayGroup(s.updated || s.created);
+      if (g !== last) { html += `<div class="grp">${g}</div>`; last = g; }
+      html += flat([s]);
+    }
+  }
+  if (archived.length) {
+    html += `<div class="arctog" data-arctog>${arcOpen ? '▾' : '▸'} 已封存 ${archived.length} 個</div>`;
+    if (arcOpen) html += flat(archived);
+  }
   if (q) html += `<div class="grp">對話內容</div><div id="ftsBox">${S.fts && S.fts.q === q ? ftsHtml(S.fts) : '<div class="sempty">搜尋中…</div>'}</div>`;
-  $('#sessionList').innerHTML = html || `<div class="sempty">還沒有對話</div>`;
+  $('#sessionList').innerHTML = html || '<div class="sempty">還沒有對話</div>';
+  if ($('#grpMenu') && $('#grpMenu').classList.contains('on')) syncGrpMenu();
   if (q && (!S.fts || S.fts.q !== q)) ftsQueue(q);
 }
 // 側邊欄搜尋：標題直接比對；對話內容走後端全文檢索（/api/search），停手 250ms 再查
@@ -2031,8 +2121,8 @@ document.addEventListener('click', (e) => {
 
 // ── 介面語言：選 English 時，把畫面上的介面中文換成 i18n_en.js 的對照；切回中文就還原。
 // 對話內容、思考、使用者訊息、對話標題、程式碼、輸入框裡的字不翻。
-// 工具說明、輸出風格內文是送給模型的內容，照原文顯示
-const I18N_SKIP = '.md, .bubble, .tx, pre, code, textarea, [contenteditable], #sessionList .t, .th .arg, .trow .d, .sty-main p, .noi18n';
+// 工具說明、輸出風格內文也是介面上看得到的字，一樣要翻（.noi18n 是模型名稱這類不該翻的）
+const I18N_SKIP = '.md, .bubble, .tx, pre, code, textarea, [contenteditable], #sessionList .t, .th .arg, .noi18n';
 const I18N_ATTRS = ['title', 'placeholder', 'aria-label'];
 const I18N_HAN = /[\u4e00-\u9fff]/;
 const I18N_EN = window.WOOF_EN || {};
@@ -5697,3 +5787,168 @@ $('#taskBar').addEventListener('click', (e) => {
 });
 
 i18nApply();   // 介面語言：開啟時套用一次，之後新出現的畫面由 MutationObserver 接手
+
+
+// ---- 對話群組：分類、拖曳、改名、刪除（刪群組連對話一起刪會問兩次）
+function syncGrpMenu() {
+  const m = $('#grpMenu');
+  if (!m || !m.dataset.gid) return;
+  const g = grpById(m.dataset.gid);
+  if (!g) { closePops(); return; }
+  m.innerHTML = `<div class="mi" data-gact="rename">${ico('edit')}<span>改名</span></div>`
+    + `<div class="mi danger" data-gact="del">${ico('trash')}<span>刪除群組…</span></div>`;
+}
+
+function openGrpMenu(anchor) {
+  const gid = anchor.dataset.gmenu;
+  const g = grpById(gid);
+  if (!g) return;
+  let m = $('#grpMenu');
+  if (!m) { m = document.createElement('div'); m.id = 'grpMenu'; m.className = 'pop'; document.body.appendChild(m); }
+  if (m.classList.contains('on') && m.dataset.gid === gid) { closePops(); return; }
+  closePops();
+  m.dataset.gid = gid;
+  m.classList.add('on');
+  syncGrpMenu();
+  const a = (anchor.closest('.ghead') || anchor).getBoundingClientRect();
+  m.style.position = 'fixed';
+  m.style.width = '152px';
+  m.style.left = Math.round(Math.max(8, a.right - 152)) + 'px';
+  m.style.top = Math.round(a.bottom + 4) + 'px';
+  m.style.bottom = 'auto';
+}
+
+async function newGroup() {
+  const name = await promptBox('新增群組', '群組名稱（之後可以改）', '', { ok: '建立' });
+  if (!name || !name.trim()) return;
+  try { await api('POST', '/api/groups', { name: name.trim().slice(0, 40) }); await loadGroups(); }
+  catch (e) { notify('error', '建立群組失敗', e.message); }
+}
+
+async function renameGroup(gid) {
+  const g = grpById(gid);
+  if (!g) return;
+  const name = await promptBox('群組改名', '群組名稱', g.name, { ok: '儲存' });
+  if (!name || !name.trim() || name.trim() === g.name) return;
+  try { await api('PATCH', `/api/groups/${gid}`, { name: name.trim().slice(0, 40) }); await loadGroups(); }
+  catch (e) { notify('error', '改名失敗', e.message); }
+}
+
+async function deleteGroupFlow(gid) {
+  const g = grpById(gid);
+  if (!g) return;
+  const n = S.sessions.filter((s) => s.grp === gid && !s.archived).length;
+  const first = await confirmBox(`刪除群組「${g.name}」？`,
+    n ? `這個群組裡有 ${n} 個對話。下一步會再問一次，要不要連對話一起刪掉。`
+      : '這是空群組，刪掉不會影響任何對話。', { ok: '下一步' });
+  if (!first) return;
+  let withSessions = false;
+  if (n) {
+    withSessions = !!(await confirmBox(`「${g.name}」裡的 ${n} 個對話要一起刪掉嗎？`,
+      '選「連對話一起刪掉」＝這些對話永久消失，救不回來。選「只刪群組」＝對話留著，回到未分組。',
+      { ok: '連對話一起刪掉', cancel: '只刪群組', danger: true }));
+  }
+  try {
+    await api('DELETE', `/api/groups/${gid}?sessions=${withSessions ? 1 : 0}`);
+    await loadSessions();
+    if (S.sid && !S.sessions.some((s) => s.id === S.sid)) openNew();
+    if (S.split && !S.sessions.some((s) => s.id === S.split)) closeSplit();
+    if (withSessions) notify('ok', '群組與對話已刪除', `「${g.name}」和 ${n} 個對話都刪了。`);
+    else if (n) notify('ok', '群組已刪除', `「${g.name}」刪了，${n} 個對話回到未分組。`);
+    else notify('ok', '群組已刪除', '空群組已刪除。');
+  } catch (e) { notify('error', '刪除群組失敗', e.message); }
+}
+
+async function toggleGroup(gid) {
+  const g = grpById(gid);
+  if (!g) return;
+  g.collapsed = !g.collapsed;
+  renderSessions();
+  try { await api('PATCH', `/api/groups/${gid}`, { collapsed: g.collapsed }); } catch {}
+}
+
+function moveSessionToGroup(sid, gid) {
+  const s = S.sessions.find((x) => x.id === sid);
+  if (!s || (s.grp || '') === gid) return;
+  const before = s.grp || '';
+  s.grp = gid;
+  renderSessions();
+  api('PATCH', `/api/sessions/${sid}`, { grp: gid })
+    .then(() => loadGroups())
+    .catch((e) => { s.grp = before; renderSessions(); notify('error', '搬到群組失敗', e.message); });
+}
+
+(function initGroupsUI() {
+  const list = $('#sessionList');
+  if (!list || !$('#grpNew')) return;
+  $('#grpNew').addEventListener('click', newGroup);
+
+  list.addEventListener('click', (e) => {
+    const gm = e.target.closest('[data-gmenu]');
+    if (gm) { e.preventDefault(); e.stopPropagation(); openGrpMenu(gm); return; }
+    const head = e.target.closest('.ghead');
+    if (head && head.dataset.gid) { e.stopPropagation(); toggleGroup(head.dataset.gid); }
+  }, true);
+
+  document.addEventListener('click', (e) => {
+    const item = e.target.closest('#grpMenu [data-gact]');
+    if (item) {
+      const gid = $('#grpMenu').dataset.gid;
+      const act = item.dataset.gact;
+      closePops();
+      if (act === 'rename') renameGroup(gid); else deleteGroupFlow(gid);
+    }
+  }, true);
+
+  list.addEventListener('dragstart', (e) => {
+    const it = e.target.closest('.item[data-sid]');
+    if (!it) return;
+    S.drag = it.dataset.sid;
+    it.classList.add('dragging');
+    try { e.dataTransfer.setData('text/plain', it.dataset.sid); e.dataTransfer.effectAllowed = 'move'; } catch {}
+  });
+
+  const clearDrop = () => list.querySelectorAll('[data-drop].drop').forEach((x) => x.classList.remove('drop'));
+  list.addEventListener('dragend', () => {
+    S.drag = null;
+    clearDrop();
+    list.querySelectorAll('.item.dragging').forEach((x) => x.classList.remove('dragging'));
+  });
+  list.addEventListener('dragover', (e) => {
+    const t = e.target.closest('[data-drop]');
+    if (!t || !S.drag) return;
+    e.preventDefault();
+    try { e.dataTransfer.dropEffect = 'move'; } catch {}
+    clearDrop();
+    t.classList.add('drop');
+  });
+  list.addEventListener('dragleave', (e) => {
+    const t = e.target.closest('[data-drop]');
+    if (t && !t.contains(e.relatedTarget)) t.classList.remove('drop');
+  });
+  list.addEventListener('drop', (e) => {
+    const t = e.target.closest('[data-drop]');
+    if (!t || !S.drag) return;
+    e.preventDefault();
+    const sid = S.drag;
+    S.drag = null;
+    clearDrop();
+    const gid = t.dataset.drop || '';
+    const g = gid && grpById(gid);
+    if (g && g.collapsed) { g.collapsed = false; renderSessions(); }
+    moveSessionToGroup(sid, gid);
+  });
+})();
+
+// 並排視窗的關閉鈕（在 #paneB 裡，不歸分頁列管）
+document.addEventListener('click', (e) => {
+  if (e.target.closest('[data-splitclose]')) closeSplit();
+}, true);
+
+// 第二個畫面：載入後直接打開網址帶的那個對話
+if (PANE2) {
+  const sid2 = new URLSearchParams(location.search).get('sid') || '';
+  const go2 = () => { if (sid2) openSession(sid2).catch(() => {}); };
+  if (document.readyState === 'complete') setTimeout(go2, 400);
+  else window.addEventListener('load', () => setTimeout(go2, 400));
+}

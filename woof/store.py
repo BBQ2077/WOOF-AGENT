@@ -77,6 +77,9 @@ if "parent" not in _cols:
     _db.execute("ALTER TABLE sessions ADD COLUMN parent TEXT")
 if "archived" not in _cols:
     _db.execute("ALTER TABLE sessions ADD COLUMN archived INTEGER DEFAULT 0")
+if "grp" not in _cols:
+    _db.execute("ALTER TABLE sessions ADD COLUMN grp TEXT")
+_db.execute("CREATE TABLE IF NOT EXISTS groups(id TEXT PRIMARY KEY, name TEXT NOT NULL, pos INTEGER DEFAULT 0, collapsed INTEGER DEFAULT 0, created REAL)")
 _db.commit()
 
 # ---- 跨對話全文檢索：trigram 分詞（中文可用；不足 3 字的關鍵字改用 LIKE）
@@ -170,6 +173,7 @@ def _session_row(r: sqlite3.Row) -> dict:
     d["pinned"] = bool(d.get("pinned"))
     d["archived"] = bool(d.get("archived"))
     d["perm"] = d.get("perm") or "auto"
+    d["grp"] = d.get("grp") or ""
     return d
 
 
@@ -206,6 +210,50 @@ def update_session(sid: str, **fields) -> dict | None:
         _db.execute(f"UPDATE sessions SET {cols} WHERE id=?", (*fields.values(), sid))
         _db.commit()
     return get_session(sid)
+
+
+def list_groups() -> list[dict]:
+    """對話群組：介面側欄的分類。pos 小的排前面。"""
+    with _lock:
+        rows = _db.execute("SELECT * FROM groups ORDER BY pos, created").fetchall()
+        cnt = {gid: n for gid, n in _db.execute(
+            "SELECT grp, COUNT(*) FROM sessions WHERE grp IS NOT NULL AND archived=0 GROUP BY grp").fetchall()}
+    return [{"id": r["id"], "name": r["name"], "pos": r["pos"],
+             "collapsed": bool(r["collapsed"]), "n": cnt.get(r["id"], 0)} for r in rows]
+
+
+def create_group(name: str) -> dict:
+    gid = uuid.uuid4().hex[:8]
+    with _lock:
+        pos = (_db.execute("SELECT COALESCE(MAX(pos), -1) + 1 FROM groups").fetchone()[0]) or 0
+        _db.execute("INSERT INTO groups(id, name, pos, collapsed, created) VALUES(?,?,?,0,?)",
+                    (gid, name, pos, time.time()))
+        _db.commit()
+    return {"id": gid, "name": name, "pos": pos, "collapsed": False, "n": 0}
+
+
+def update_group(gid: str, **fields) -> dict | None:
+    if "collapsed" in fields:
+        fields["collapsed"] = 1 if fields["collapsed"] else 0
+    if not fields:
+        return None
+    cols = ",".join(f"{k}=?" for k in fields)
+    with _lock:
+        _db.execute(f"UPDATE groups SET {cols} WHERE id=?", (*fields.values(), gid))
+        _db.commit()
+    return next((g for g in list_groups() if g["id"] == gid), None)
+
+
+def delete_group(gid: str) -> None:
+    with _lock:
+        _db.execute("UPDATE sessions SET grp=NULL WHERE grp=?", (gid,))
+        _db.execute("DELETE FROM groups WHERE id=?", (gid,))
+        _db.commit()
+
+
+def group_session_ids(gid: str) -> list[str]:
+    with _lock:
+        return [r[0] for r in _db.execute("SELECT id FROM sessions WHERE grp=?", (gid,)).fetchall()]
 
 
 def child_ids(sid: str) -> list[str]:

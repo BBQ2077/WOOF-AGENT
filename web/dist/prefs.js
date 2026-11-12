@@ -19,7 +19,9 @@
   var token = (login && login.token && (!login.base || login.base === remote)) ? login.token : '';
   if (!token && !remote && D && D.conn) token = D.conn.token;
   if (!token) token = qs.get('token') || '';
-  var conn = { base: remote || (D && D.conn && !D.conn.remote ? D.conn.base : ''), token: token, remote: !!remote };
+  // 並排的第二個畫面是 iframe，拿不到桌面版的 preload，後端位址由母視窗用網址帶進來
+  var qbase = (qs.get('base') || '').replace(/\/+$/, '');
+  var conn = { base: remote || qbase || (D && D.conn && !D.conn.remote ? D.conn.base : ''), token: token, remote: !!remote };
   window.WOOF_CONN = conn;
 
   var SHARED = ['woof.theme', 'woof.look', 'woof.model', 'woof.pins', 'woof.mgrpOpen', 'woof.effortWant',

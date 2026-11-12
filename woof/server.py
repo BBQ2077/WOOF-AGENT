@@ -697,6 +697,48 @@ async def apply_template(sid: str, body: dict):
     return {"ok": True, "off": off, "template": tid or None}
 
 
+# ---------------------------------------------------------------- 對話群組
+@app.get("/api/groups")
+async def groups_list():
+    return store.list_groups()
+
+
+@app.post("/api/groups")
+async def groups_add(body: dict):
+    name = (str(body.get("name") or "")).strip()[:40]
+    if not name:
+        raise HTTPException(400, "群組要有名稱")
+    g = store.create_group(name)
+    await broadcast({"type": "groups_changed"})
+    return g
+
+
+@app.patch("/api/groups/{gid}")
+async def groups_patch(gid: str, body: dict):
+    allowed = {k: v for k, v in body.items() if k in ("name", "collapsed", "pos")}
+    if "name" in allowed:
+        allowed["name"] = str(allowed["name"] or "").strip()[:40]
+        if not allowed["name"]:
+            raise HTTPException(400, "群組要有名稱")
+    g = store.update_group(gid, **allowed)
+    if g is None:
+        raise HTTPException(404)
+    await broadcast({"type": "groups_changed"})
+    return g
+
+
+@app.delete("/api/groups/{gid}")
+async def groups_delete(gid: str, sessions: int = 0):
+    """刪群組。sessions=1 連裡面的對話一起刪（介面會先二次確認）。"""
+    if not any(g["id"] == gid for g in store.list_groups()):
+        raise HTTPException(404)
+    ids = store.group_session_ids(gid) if sessions else []
+    store.delete_group(gid)
+    n = await _purge_sessions(ids) if ids else 0
+    await broadcast({"type": "groups_changed"})
+    return {"ok": True, "deleted": n}
+
+
 @app.get("/api/sessions")
 async def sessions():
     return store.list_sessions()
@@ -721,7 +763,10 @@ async def create_session(body: dict):
 
 @app.patch("/api/sessions/{sid}")
 async def patch_session(sid: str, body: dict):
-    allowed = {k: v for k, v in body.items() if k in ("title", "model", "effort", "pinned", "perm", "archived")}
+    allowed = {k: v for k, v in body.items() if k in ("title", "model", "effort", "pinned", "perm", "archived", "grp")}
+    if "grp" in allowed:
+        gid = str(allowed["grp"] or "")
+        allowed["grp"] = gid if gid and any(g["id"] == gid for g in store.list_groups()) else None
     for k in ("pinned", "archived"):
         if k in allowed:
             allowed[k] = 1 if allowed[k] else 0
@@ -736,12 +781,14 @@ async def patch_session(sid: str, body: dict):
     return s
 
 
-@app.delete("/api/sessions/{sid}")
-async def delete_session(sid: str):
-    # 刪主對話時，底下的子代理對話（含更深一層）一起刪
+async def _purge_sessions(ids: list[str]) -> int:
+    """把這幾個對話（含子代理）整個刪掉：先停掉在跑的東西、關程序、清還原點。"""
     from woof.agent import tasks as _tasks
 
-    ids = [sid, *store.child_ids(sid)]
+    for x in list(ids):
+        for cid in store.child_ids(x):
+            if cid not in ids:
+                ids.append(cid)
     for x in ids:
         t = RUNS.get(x)
         if t and not t.done():
@@ -759,7 +806,13 @@ async def delete_session(sid: str):
         snapshot.drop(x)
         if s:
             await REG.events.emit("on_session", "delete", s)
-    return {"ok": True, "deleted": len(ids)}
+    return len(ids)
+
+
+@app.delete("/api/sessions/{sid}")
+async def delete_session(sid: str):
+    # 刪主對話時，底下的子代理對話（含更深一層）一起刪
+    return {"ok": True, "deleted": await _purge_sessions([sid])}
 
 
 @app.post("/api/sessions/{sid}/fork")

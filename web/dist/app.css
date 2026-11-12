@@ -1483,3 +1483,49 @@ body.side-off .side,body.side-off .resizer[data-rs=side]{display:none}
 .mcdef:hover{color:var(--text);background:var(--hover)}
 .mcdef.on{color:var(--text);background:var(--hover);font-weight:600}
 .pform .mchk{max-width:none}
+
+/* 側欄：對話群組（分類＋拖曳） */
+.listbar{display:flex;align-items:center;justify-content:space-between;padding:9px 10px 3px;color:var(--faint);font-size:11px;font-weight:600;letter-spacing:.02em}
+.gnew{display:flex;align-items:center;gap:4px;font-weight:500;color:var(--faint);padding:3px 9px 3px 6px;border-radius:999px;cursor:pointer;border:1px solid transparent}
+.gnew:hover{color:var(--text);background:var(--hover);border-color:var(--line)}
+.gnew svg{width:12px;height:12px}
+.ghead{display:flex;align-items:center;gap:6px;padding:7px 8px;margin-top:6px;border-radius:var(--r-sm);cursor:pointer;color:var(--dim);font-size:12px;font-weight:600;user-select:none}
+.ghead:hover{background:var(--hover)}
+.ghead .gcar{display:grid;place-items:center;width:14px;height:14px;flex:none;color:var(--faint);transition:transform .15s}
+.ghead .gcar svg{width:13px;height:13px}
+.ghead.closed .gcar{transform:rotate(-90deg)}
+.ghead .gname{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ghead .gnum{font-size:11px;color:var(--faint);font-weight:500}
+.ghead .gmenu{display:none;place-items:center;width:20px;height:20px;border-radius:5px;color:var(--faint);flex:none}
+.ghead:hover .gmenu{display:grid}
+.ghead .gmenu:hover{background:var(--hover);color:var(--text)}
+.ghead .gmenu svg{width:14px;height:14px}
+.ghead.plain{font-weight:500;color:var(--faint);margin-top:2px}
+.ghead.drop{background:var(--acc-soft);box-shadow:inset 0 0 0 1px var(--acc);color:var(--text)}
+.gbody{padding-bottom:2px}
+.gbody .item{margin-left:8px}
+.gitem-drag{opacity:.45}
+.item.dragging{opacity:.45}
+#grpMenu{min-width:148px}
+#grpMenu .mi svg{width:14px;height:14px;color:var(--faint)}
+#grpMenu .mi:hover{background:var(--hover)}
+#grpMenu .mi.danger,#grpMenu .mi.danger svg{color:var(--bad)}
+
+/* 並排兩個對話：母視窗右半邊是 iframe，裡面是同一支畫面但只留對話區 */
+.panes{flex:1;min-height:0;display:flex;min-width:0}
+.pane{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;position:relative}
+#paneB{flex:0 0 50%;border-left:1px solid var(--line);background:var(--bg)}
+#paneB .phead{height:35px;flex:none;display:flex;align-items:center;gap:8px;padding:0 8px 0 14px;border-bottom:1px solid var(--line);background:var(--panel);font-size:12px;color:var(--dim)}
+#paneB .ptitle{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#paneB .pclose{display:grid;place-items:center;width:22px;height:22px;border-radius:5px;cursor:pointer;color:var(--faint);flex:none}
+#paneB .pclose:hover{background:var(--hover);color:var(--text)}
+#paneB .pclose svg{width:13px;height:13px}
+#paneB iframe{flex:1;width:100%;border:0;background:var(--bg);min-height:0}
+.tabsp{display:grid;place-items:center;width:26px;height:24px;border-radius:var(--r-sm);color:var(--faint);cursor:pointer;flex:none;margin-left:2px}
+.tabsp:hover{background:var(--hover);color:var(--text)}
+.tabsp.on{color:var(--acc);background:var(--acc-soft)}
+.tabsp svg{width:14px;height:14px}
+/* 第二個畫面（iframe）：只留對話區 */
+body.pane2 .titlebar,body.pane2 .side,body.pane2 .resizer,body.pane2 #right,body.pane2 #rightRs,body.pane2 #tabbar,body.pane2 .statusbar,body.pane2 .ctxpanel,body.pane2 #notes,body.pane2 .toast,body.pane2 .page{display:none!important}
+body.pane2 .win{height:100%}
+body.pane2 #paneA{padding:0}

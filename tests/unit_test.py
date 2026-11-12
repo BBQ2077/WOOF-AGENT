@@ -1165,5 +1165,68 @@ class RemoteHttp(unittest.TestCase):
         self.assertTrue(rconn.check(True, "/api/state", tok, ""))                   # 拿到的憑證能過
 
 
+class Groups(unittest.TestCase):
+    """對話群組：建立、排序、改名、收合、歸屬、刪群組時對話的處置。"""
+
+    def setUp(self):
+        from woof import store
+        self.store = store
+        self.made = []
+
+    def tearDown(self):
+        for gid in self.made:
+            self.store.delete_group(gid)
+
+    def mk(self, name):
+        g = self.store.create_group(name)
+        self.made.append(g["id"])
+        return g
+
+    def test_create_and_order(self):
+        a = self.mk("第一個")
+        b = self.mk("第二個")
+        names = [g["name"] for g in self.store.list_groups()]
+        self.assertLess(names.index("第一個"), names.index("第二個"))
+        self.assertEqual(a["n"], 0)
+        self.assertFalse(a["collapsed"])
+        self.assertNotEqual(a["id"], b["id"])
+
+    def test_rename_and_collapse(self):
+        g = self.mk("舊名字")
+        self.assertEqual(self.store.update_group(g["id"], name="新名字")["name"], "新名字")
+        self.assertTrue(self.store.update_group(g["id"], collapsed=True)["collapsed"])
+        self.assertFalse(self.store.update_group(g["id"], collapsed=False)["collapsed"])
+
+    def test_session_belongs(self):
+        g = self.mk("暫存")
+        sid = self.store.create_session("m", "high")["id"]
+        self.store.update_session(sid, grp=g["id"])
+        self.assertEqual(self.store.get_session(sid)["grp"], g["id"])
+        self.assertEqual([x["n"] for x in self.store.list_groups() if x["id"] == g["id"]], [1])
+        self.assertEqual(self.store.group_session_ids(g["id"]), [sid])
+        # 搬回未分組
+        self.store.update_session(sid, grp=None)
+        self.assertEqual(self.store.get_session(sid)["grp"], "")
+        self.assertEqual(self.store.group_session_ids(g["id"]), [])
+        self.store.delete_session(sid)
+
+    def test_delete_group_keeps_sessions(self):
+        g = self.mk("散掉的群組")
+        sid = self.store.create_session("m", "high")["id"]
+        self.store.update_session(sid, grp=g["id"])
+        self.store.delete_group(g["id"])
+        self.assertNotIn(g["id"], [x["id"] for x in self.store.list_groups()])
+        self.assertEqual(self.store.get_session(sid)["grp"], "")
+        self.store.delete_session(sid)
+
+    def test_archived_not_counted(self):
+        g = self.mk("封存的")
+        sid = self.store.create_session("m", "high")["id"]
+        self.store.update_session(sid, grp=g["id"])
+        self.store.update_session(sid, archived=True)
+        self.assertEqual([x["n"] for x in self.store.list_groups() if x["id"] == g["id"]], [0])
+        self.store.delete_session(sid)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
