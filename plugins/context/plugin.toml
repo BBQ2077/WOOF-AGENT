@@ -12,12 +12,7 @@ label = "壓縮用的上下文大小（token）。0＝照模型本身的上下�
 [settings.trigger]
 type = "number"
 default = 70
-label = "用量超過上下文窗口的百分之幾就壓縮"
-
-[settings.early]
-type = "number"
-default = 50
-label = "用量超過百分之幾就在背景先壓縮（不等滿）"
+label = "用量超過上下文窗口的百分之幾就壓縮：回合結束後在背景先做，不用等；回合進行中超過也會先壓縮"
 
 [settings.keep]
 type = "number"

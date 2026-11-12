@@ -3862,7 +3862,7 @@ async function pfSave(auto) {
   } catch (e) { const d = $('#pfDirty'); if (d) d.innerHTML = `<span class="qerr">沒存到：${esc(e.message)}</span>`; }
 }
 // ---- 壓縮（設定存在 context 插件，儲存後插件會重新載入）
-const CMP_KEYS = ['window', 'method', 'parallel', 'ratio', 'trigger', 'early', 'keep'];
+const CMP_KEYS = ['window', 'method', 'parallel', 'ratio', 'trigger', 'keep'];
 // 壓縮用的上下文大小（設定頁填的）；0＝照模型。用量圈、上下文面板都用它算百分比
 async function loadCtxCap() {
   try { const p = (await api('GET', '/api/plugins')).find((r) => r.name === 'context'); S.ctxCap = p && p.enabled ? Number((p.settings || {}).window) || 0 : 0; }
@@ -3894,9 +3894,8 @@ async function renderCompressSec(box) {
     </div>
     <div class="cmp-h">什麼時候壓縮</div>
     <div class="card cmp">
-      ${row('上下文大小', `0＝照模型本身的上下文窗口。填 100000 就當作只有 10 萬：觸發門檻、提前壓縮、對話框的用量圈都用它算。比模型本身大時以模型為準。${capNow}`, num('window', 0, 10000000, 'token', 'wide'))}
-      ${row('觸發門檻', '用量達到上下文大小的百分之幾，就壓縮較早的對話。', num('trigger', 10, 95, '%'))}
-      ${row('提前壓縮', '用量達到這個百分比，回合結束後就在背景先壓縮，不等滿。', num('early', 20, 95, '%'))}
+      ${row('上下文大小', `0＝照模型本身的上下文窗口。填 100000 就當作只有 10 萬：壓縮門檻和對話框的用量圈都用它算。比模型本身大時以模型為準。${capNow}`, num('window', 0, 10000000, 'token', 'wide'))}
+      ${row('壓縮門檻', '用量達到上下文大小的這個百分比，就把較早的對話摘要起來。平常是回合結束後在背景做，你看回覆時就壓好了；同一回合工具結果疊太多、超過門檻時，會先壓縮再繼續。', num('trigger', 10, 95, '%'))}
     </div>
     <div class="cmp-h">怎麼壓縮</div>
     <div class="card cmp">
@@ -4071,34 +4070,86 @@ function renderGeneral(box) {
 }
 
 // ---- 外觀
+// 外觀的各區域：key 對應 theme.js 的 AREAS
+const THEME_AREAS = [
+  ['main', '主畫面', '對話區與設定頁的背景'],
+  ['side', '左側欄', '對話清單、新對話與設定入口'],
+  ['setnav', '設定選單', '設定頁左邊的分類清單'],
+  ['right', '右側面板', '檔案、終端機、工作等面板'],
+  ['card', '卡片與輸入框', '設定卡片、輸入框、按鈕、選單'],
+  ['bubble', '你的訊息', '對話裡你送出的那則的底色'],
+  ['code', '程式碼', '程式碼區塊與工具輸出'],
+];
 function renderAppearance(box) {
   const t = WoofTheme.read();
   const slider = (key, label, min, max, unit, cls, hint) => `<div class="frow"><div><b>${label}</b><small>${hint}</small></div>`
     + `<div class="slide"><input type="range" class="${cls}" data-t="${key}" min="${min}" max="${max}" value="${t[key]}"><span class="sv" data-tv="${key}">${t[key]}${unit}</span></div></div>`;
+  const areaRow = ([k, name, hint]) => {
+    const c = WoofTheme.area(t, k), own = !!t.areas[k];
+    return `<div class="frow" data-arow="${k}"><div><div class="ar-h"><i class="ar-sw" data-asw="${k}"></i><b>${name}</b><span class="ar-tag${own ? ' own' : ''}" data-atag="${k}">${own ? '自訂' : '跟著整體'}</span></div><small>${hint}</small></div>
+      <div class="ar-ctl">
+        <div class="slide"><em>色相</em><input type="range" class="hue" data-ta="${k}" data-tk="h" min="0" max="360" value="${c.h}"><span class="sv" data-atv="${k}-h">${c.h}°</span></div>
+        <div class="slide"><em>濃度</em><input type="range" class="tint" data-ta="${k}" data-tk="s" min="0" max="100" value="${c.s}" style="--h:${c.h}"><span class="sv" data-atv="${k}-s">${c.s}</span></div>
+        <div class="ar-foot"${own ? '' : ' hidden'} data-afoot="${k}"><span class="btn" data-tafollow="${k}">改回跟著整體</span></div>
+      </div></div>`;
+  };
   box.innerHTML = `<div class="card">
     <div class="frow"><div><b>介面語言</b><small>介面的按鈕、選單、設定與提示，以及模型回覆用的語言；已經寫好的對話內容不翻</small></div><div class="seg">${[['zh', '繁體中文'], ['en', 'English']].map(([v, n]) => `<b class="${uiLang() === v ? 'on' : ''}" data-lang="${v}">${n}</b>`).join('')}</div></div>
     <div class="frow"><div><b>色彩模式</b><small>淺色、深色或跟著 Windows</small></div>
       <div class="seg">${[['light', '淺色'], ['dark', '深色'], ['system', '跟隨系統']].map(([v, n]) => `<b class="${t.mode === v ? 'on' : ''}" data-mode="${v}">${n}</b>`).join('')}</div></div>
-    <div class="frow"><div><b>配色</b><small>一鍵套用，之後可以再用下面拉桿微調</small></div>
+    <div class="frow"><div><b>配色</b><small>一鍵套用整組顏色（各區域會改回跟著整體），之後可以再用下面拉桿微調</small></div>
       <div class="presets">${Object.entries(WoofTheme.presets).map(([n, p]) => `<span data-preset="${esc(n)}" style="--ph:${p.hue};--pt:${p.tint};--pa:${p.accent};--ps:${p.accentSat ?? 100}"><i></i>${esc(n)}</span>`).join('')}</div></div>
-    ${slider('hue', '底色色相', 0, 360, '°', 'hue', '背景帶哪種顏色')}
-    ${slider('tint', '底色濃度', 0, 100, '', 'tint', '0 是純白，越大顏色越明顯')}
+    </div>
+    <div class="cmp-h">整體底色</div>
+    <div class="card">
+    ${slider('hue', '整體色相', 0, 360, '°', 'hue', '沒有單獨調整的區域都跟著它')}
+    ${slider('tint', '整體濃度', 0, 100, '', 'tint', '0 是純白，越大顏色越明顯')}
+    </div>
+    <div class="cmp-h">各區域</div>
+    <div class="card">${THEME_AREAS.map(areaRow).join('')}</div>
+    <div class="cmp-h">強調色</div>
+    <div class="card">
     ${slider('accentSat', '強調色濃度', 0, 100, '', '', '0 是黑白（跟標誌一致），越大越接近彩色')}
     ${slider('accent', '強調色', 0, 360, '°', 'hue', '按鈕、選取、連結的顏色；濃度 0 時不作用')}
     </div>
     <div class="card">
     ${slider('scale', '介面縮放', 80, 130, '%', '', '整個視窗的大小')}
     ${slider('chatSize', '對話字級', 12, 18, 'px', '', '只影響訊息與輸入框')}
-    <div class="frow"><div><b>預覽</b><small>即時反映目前設定</small></div><div class="tprev"><div class="tp-side"><i class="on"></i><i></i><i></i></div><div class="tp-main"><div class="tp-user">幫我看這段程式</div><div class="tp-bot">好，問題在第 12 行。</div><div class="tp-box"><span></span><b></b></div></div></div></div>
+    <div class="frow"><div><b>預覽</b><small>即時反映目前設定</small></div><div class="tprev"><div class="tp-side"><i class="on"></i><i></i><i></i></div><div class="tp-main"><div class="tp-user">幫我看這段程式</div><div class="tp-bot">好，問題在第 12 行。</div><div class="tp-code"></div><div class="tp-box"><span></span><b></b></div></div><div class="tp-right"></div></div></div>
     <div class="frow"><div></div><div><span class="btn" id="themeReset">恢復預設</span></div></div></div>`;
   $('input[data-t="tint"]', box).style.setProperty('--h', t.hue);
+  refreshAreas(box, t);
 }
+// 拉桿拖動時不重畫整頁（會中斷拖動），只更新色塊、數值、標籤
+function refreshAreas(box, t) {
+  t = t || WoofTheme.read();
+  const dark = WoofTheme.isDark(t.mode);
+  for (const [k] of THEME_AREAS) {
+    const c = WoofTheme.area(t, k), own = !!t.areas[k];
+    const sw = $(`[data-asw="${k}"]`, box); if (!sw) continue;
+    sw.style.background = WoofTheme.areaColor(t, k, dark);
+    const tag = $(`[data-atag="${k}"]`, box); tag.textContent = own ? '自訂' : '跟著整體'; tag.classList.toggle('own', own);
+    $(`[data-afoot="${k}"]`, box).hidden = !own;
+    const h = $(`input[data-ta="${k}"][data-tk="h"]`, box), s = $(`input[data-ta="${k}"][data-tk="s"]`, box);
+    if (document.activeElement !== h) h.value = c.h;
+    if (document.activeElement !== s) s.value = c.s;
+    s.style.setProperty('--h', c.h);
+    $(`[data-atv="${k}-h"]`, box).textContent = c.h + '°';
+    $(`[data-atv="${k}-s"]`, box).textContent = c.s;
+  }
+}
+function onAreaInput(el) {
+  const t = WoofTheme.setArea(el.dataset.ta, { [el.dataset.tk]: Number(el.value) });
+  refreshAreas(el.closest('.card').parentElement, t);
+}
+
 function onThemeInput(el) {
   const key = el.dataset.t;
   const t = WoofTheme.set({ [key]: Number(el.value) });
   const unit = { hue: '°', accent: '°', scale: '%', chatSize: 'px' }[key] || '';
   const sv = $(`[data-tv="${key}"]`); if (sv) sv.textContent = el.value + unit;
   const tint = $('input[data-t="tint"]'); if (tint) tint.style.setProperty('--h', t.hue);
+  if (key === 'hue' || key === 'tint') refreshAreas(el.closest('.card').parentElement, t);
 }
 
 // ---- 模型商
@@ -4484,7 +4535,8 @@ $('#setList').addEventListener('click', (e) => {
   if (apb && S.cfg.default_model) { S.cfg.aux[apb.dataset.auxprim] = S.cfg.default_model; setDirty(true); renderSettings(); return; }
   if (S.setSec === 'appearance') {
     const md2 = e.target.closest('[data-mode]'); if (md2) { WoofTheme.set({ mode: md2.dataset.mode }); renderSettings(); }
-    const pr = e.target.closest('[data-preset]'); if (pr) { WoofTheme.set(WoofTheme.presets[pr.dataset.preset]); renderSettings(); }
+    const pr = e.target.closest('[data-preset]'); if (pr) { WoofTheme.set({ ...WoofTheme.presets[pr.dataset.preset], areas: {} }); renderSettings(); }
+    const fo = e.target.closest('[data-tafollow]'); if (fo) { WoofTheme.setArea(fo.dataset.tafollow, null); refreshAreas(fo.closest('.card').parentElement); }
     if (e.target.closest('#themeReset')) { WoofTheme.reset(); renderSettings(); }
   }
 });
@@ -4492,6 +4544,7 @@ $('#setList').addEventListener('input', (e) => {
   const el = e.target;
   if (el.id === 'vgalQ') { S.vgalQ = el.value; $('#vgBody').innerHTML = vendorGalleryBody(); return; }
   if (el.dataset.t) { onThemeInput(el); return; }
+  if (el.dataset.ta) { onAreaInput(el); return; }
   if (el.dataset.aux) {
     if (el.value) S.cfg.aux[el.dataset.aux] = el.value; else delete S.cfg.aux[el.dataset.aux];
     setDirty(true); renderSettings(); return;

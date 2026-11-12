@@ -40,7 +40,7 @@ kbd{font-family:var(--mono);font-size:10px;color:var(--faint);border:1px solid v
 .body{flex:1;display:flex;min-height:0}
 
 /* ---------- 側欄 ---------- */
-.side{width:260px;flex:none;background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column}
+.side{width:260px;flex:none;background:var(--side,var(--panel));border-right:1px solid var(--line);display:flex;flex-direction:column}
 .side-top{padding:10px 10px 6px;display:flex;flex-direction:column;gap:6px}
 .newbtn{display:flex;align-items:center;gap:8px;padding:0 10px;height:34px;border-radius:var(--r);cursor:pointer;font-weight:600;color:var(--text)}
 .newbtn:hover{background:var(--hover)}
@@ -302,7 +302,7 @@ input[readonly]{background:var(--panel);color:var(--dim)}
 /* 設定 */
 .settings.on{display:flex}
 .settings{overflow:hidden}
-.setnav{width:208px;flex:none;padding:20px 12px;border-right:1px solid var(--line);display:flex;flex-direction:column;gap:10px;background:var(--panel);overflow-y:auto}
+.setnav{width:208px;flex:none;padding:20px 12px;border-right:1px solid var(--line);display:flex;flex-direction:column;gap:10px;background:var(--setnav,var(--panel));overflow-y:auto}
 .setnav .snh{font-size:11px;color:var(--faint);font-weight:600;padding:0 6px}
 .setnav .sng{display:flex;flex-direction:column;gap:2px;padding:4px;border:1px solid var(--line);border-radius:var(--r-lg);background:var(--panel2)}
 .setnav .sng-h{font-size:10.5px;color:var(--faint);font-weight:600;letter-spacing:.06em;padding:5px 10px 3px}
@@ -335,7 +335,7 @@ input[readonly]{background:var(--panel);color:var(--dim)}
 .slide input::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;border-radius:50%;background:#fff;border:2px solid var(--acc);box-shadow:0 1px 4px rgb(0 0 0 / .2);cursor:grab}
 .slide .sv{width:52px;text-align:right;font-family:var(--mono);font-size:12px;color:var(--dim)}
 .tprev{display:flex;height:120px;border:1px solid var(--line);border-radius:var(--r);overflow:hidden;background:var(--bg)}
-.tp-side{width:28%;background:var(--panel);border-right:1px solid var(--line);padding:10px 8px;display:flex;flex-direction:column;gap:6px}
+.tp-side{width:28%;background:var(--side,var(--panel));border-right:1px solid var(--line);padding:10px 8px;display:flex;flex-direction:column;gap:6px}
 .tp-side i{height:12px;border-radius:4px;background:var(--hover)}
 .tp-side i.on{background:var(--sel)}
 .tp-main{flex:1;padding:10px 12px;display:flex;flex-direction:column;gap:6px;font-size:11px}
@@ -383,7 +383,7 @@ input[readonly]{background:var(--panel);color:var(--dim)}
 .lrow{display:flex;align-items:center;gap:12px;padding:12px 16px}
 
 /* ---------- 右側面板 ---------- */
-.right{width:320px;flex:none;border-left:1px solid var(--line);background:var(--panel);display:flex;flex-direction:column}
+.right{width:320px;flex:none;border-left:1px solid var(--line);background:var(--right-bg,var(--panel));display:flex;flex-direction:column}
 .right.hide{display:none!important}
 .tabs{display:flex;padding:0 10px;border-bottom:1px solid var(--line);flex:none;gap:2px}
 .tabs div{padding:0 10px;height:38px;display:flex;align-items:center;cursor:pointer;color:var(--dim);border-bottom:2px solid transparent;font-size:12.5px;margin-bottom:-1px}
@@ -1387,3 +1387,16 @@ body.side-off .side,body.side-off .resizer[data-rs=side]{display:none}
 .msg.user .unote{align-self:flex-end;max-width:80%;font-size:11.5px;color:var(--faint);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .think.hidden{color:var(--dim);font-size:12px}
 .think.hidden small{color:var(--faint);margin-left:4px}
+/* 外觀：各區域各自的色相、濃度 */
+.ar-h{display:flex;align-items:center;gap:8px}
+.ar-sw{width:22px;height:22px;border-radius:6px;border:1px solid var(--line2);flex:none}
+.ar-tag{font-size:11px;padding:1px 7px;border-radius:999px;background:var(--hover);color:var(--dim);font-weight:400}
+.ar-tag.own{background:var(--acc-soft);color:var(--acc2)}
+.ar-ctl{display:flex;flex-direction:column;gap:10px}
+.ar-ctl .slide em{width:30px;font-style:normal;font-size:11.5px;color:var(--faint);flex:none}
+.ar-foot{display:flex;justify-content:flex-end}
+.ar-foot[hidden]{display:none}
+.ar-foot .btn{height:24px;font-size:11.5px;padding:0 9px}
+.tp-main{background:var(--bg)}
+.tp-code{height:14px;border-radius:4px;background:var(--code);border:1px solid var(--line)}
+.tp-right{width:18%;background:var(--right-bg,var(--panel));border-left:1px solid var(--line)}

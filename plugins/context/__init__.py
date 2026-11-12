@@ -8,8 +8,7 @@
 
 設定（插件 context）：
   window    壓縮用的上下文大小（token）；0＝照模型的 context_window
-  trigger   用量達到上下文大小的幾 % 才壓縮
-  early     用量達到幾 % 就在背景先壓縮（不等滿）
+  trigger   用量達到上下文大小的幾 % 就壓縮：回合結束後在背景做；回合進行中、送出前超過也會先壓縮
   keep      保留最近幾輪不壓縮（使用者一則＋模型回覆＝一輪）
   ratio     摘要長度佔原文的百分比（壓縮幅度）
   method    壓縮方式：單次（預設，一次摘要）／多工（依字數分段同時摘要，最後合併）
@@ -94,8 +93,8 @@ def register(woof):
             return 1
         return max(1, min(int(woof.settings.get("parallel") or 4), 8))
 
-    def _early() -> float:
-        return max(20, min(int(woof.settings.get("early") or 50), 95)) / 100
+    def _trigger() -> float:
+        return max(10, min(int(woof.settings.get("trigger") or 70), 95)) / 100
 
     async def _call(model: dict, system: str, text: str) -> str:
         from woof.agent.loop import aux_model, complete
@@ -131,7 +130,7 @@ def register(woof):
 
     async def _precompact(session_id: str, model: dict, registry, emit) -> None:
         job = SimpleNamespace(session_id=session_id, model_cfg=model, registry=registry, emit=emit,
-                              force_compact=False, is_bg=True, threshold=_early(), compact_reason="", compact_count=0)
+                              force_compact=False, is_bg=True, threshold=_trigger(), compact_reason="", compact_count=0)
         try:
             await prepare_turn(job)
         except Exception as e:
@@ -150,7 +149,7 @@ def register(woof):
             return
 
         used = tokens.current(ctx.session_id)["used"]
-        if used / window < _early():
+        if used / window < _trigger():
             return
         if ctx.session_id in _bg and not _bg[ctx.session_id].done():
             return
@@ -180,7 +179,7 @@ def register(woof):
         st = store.get_session(ctx.session_id) or {}
         # 上次模型實際回報的用量＋之後新增訊息的估計（剛貼進來的長文也算得到）
         used = tokens.current(ctx.session_id)["used"]
-        trigger = getattr(ctx, "threshold", None) or max(10, min(int(woof.settings.get("trigger") or 70), 95)) / 100
+        trigger = getattr(ctx, "threshold", None) or _trigger()
         if not force and (not used or used / window < trigger):
             return
 
