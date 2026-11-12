@@ -115,6 +115,19 @@ data/          對話資料庫、日誌、上傳的圖片
 tests/         測試腳本（`.venv/Scripts/python tests/unit_test.py` 跑單元測試，用暫存資料夾，不碰你的對話）
 ```
 
+### 測試與評測
+
+```
+.venv/Scripts/python tests/unit_test.py            # 純函式單元測試（排程、快照、權限、思考強度）
+.venv/Scripts/python tests/eval_test.py            # 評測：假模型跑 20 題小任務，自動判分
+.venv/Scripts/python tests/eval_test.py --only sub_read,compact_continue
+.venv/Scripts/python tests/eval_test.py --model <模型 id>   # 換模型跑同一批題目
+```
+
+評測在暫存資料夾裡開一個乾淨的 WOOF_DATA，只載入 files、terminal、tasks、subagent、context 這幾個插件，
+用腳本化的假模型跑題庫，逐題檢查工具呼叫、檔案結果、權限擋下、子代理、背景指令與壓縮後續作。
+結果寫進 `data/eval/`（已被 .gitignore 忽略），JSON 與 Markdown 各一份，方便改提示詞或插件前後比較。
+
 
 ## 內建插件
 

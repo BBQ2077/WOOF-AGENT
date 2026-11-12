@@ -12,6 +12,7 @@ import threading
 import time
 import types
 import unittest
+import unittest.mock
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -21,7 +22,7 @@ os.environ["WOOF_DATA"] = TMP
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from woof import cost, cron, effort, perms, store, tokens  # noqa: E402
+from woof import cost, cron, effort, perms, snapshot, store, tokens  # noqa: E402
 from woof.loader import REG  # noqa: E402
 
 
@@ -54,6 +55,42 @@ class Perms(unittest.TestCase):
     def test_headless(self):
         self.assertEqual(self.d("ask", "write_file", headless=True), "deny")
 
+    def test_categories(self):
+        self.assertEqual(perms.category("read_file"), "read")
+        self.assertEqual(perms.category("memory"), "write")
+        self.assertEqual(perms.category("delegate_task"), "agent")
+        self.assertEqual(perms.category("web_search"), "network")
+        self.assertEqual(perms.category("mcp_foo_bar"), "mcp")
+        self.assertEqual(perms.category("沒分類的工具"), "other")
+
+    def test_denylist_beats_allowlist(self):
+        REG.config["permissions"]["deny_cmds"] = ["shutdown now"]
+        self.assertEqual(self.d("ask", "terminal", {"command": "echo hi; shutdown now"}), "deny")
+
+    def test_custom_mode(self):
+        REG.config["permissions"]["custom"] = {"read": "deny", "write": "auto"}
+        self.assertEqual(self.d("custom", "read_file"), "deny")
+        self.assertEqual(self.d("custom", "write_file"), "auto")
+        self.assertEqual(self.d("custom", "terminal", {"command": "ls"}), "ask")  # 沒列的類別用預設
+
+    def test_unknown_mode_falls_back_to_auto(self):
+        self.assertEqual(self.d("根本沒有這個模式", "terminal", {"command": "ls"}), "auto")
+
+    def test_danger_off(self):
+        REG.config["permissions"]["danger_ask"] = False
+        self.assertEqual(self.d("auto", "terminal", {"command": "rm -rf build"}), "auto")
+
+    def test_headless_approve(self):
+        REG.config["permissions"]["headless"] = "approve"
+        self.assertEqual(self.d("ask", "write_file", headless=True), "auto")
+        self.assertEqual(self.d("auto", "terminal", {"command": "rm -rf build"}, headless=True), "auto")
+
+    def test_describe_and_loosened(self):
+        text = perms.describe("readonly")
+        self.assertIn("唯讀", text)
+        self.assertIn("一律擋下", text)
+        self.assertIn("寫入檔案", perms.loosened("readonly", "edits"))
+
 
 class Effort(unittest.TestCase):
     def test_resolve(self):
@@ -63,6 +100,15 @@ class Effort(unittest.TestCase):
         self.assertEqual(effort.resolve(["off", "on"], "high"), "on")
         self.assertEqual(effort.resolve(["off", "on"], "off"), "off")
         self.assertIsNone(effort.resolve([], "high"))
+
+    def test_default_and_off(self):
+        self.assertEqual(effort.resolve(["low", "medium", "high"], None, "medium"), "medium")
+        self.assertEqual(effort.resolve(["low", "medium", "high"], None, "xhigh"), "high")
+        self.assertEqual(effort.resolve(["off", "low", "high"], "off"), "off")
+        self.assertEqual(effort.resolve(["low", "high"], "none"), "low")  # 想關閉但模型不能關 → 最低一檔
+        self.assertEqual(effort.resolve(["minimal", "low"], "max"), "low")  # 往下都沒有 → 最低
+        self.assertEqual(effort.resolve(["low", "high"], "on"), "high")  # 不在檔位表裡（例如 on）→ 沿用模型預設
+        self.assertEqual(effort.resolve(["minimal", "max"], "xhigh"), "minimal")  # 往下只剩 minimal
 
 
 class Cron(unittest.TestCase):
@@ -78,6 +124,125 @@ class Cron(unittest.TestCase):
     def test_bad_expr(self):
         with self.assertRaises(Exception):
             cron.parse("61 * * * *")
+
+    def test_next_edges(self):
+        def at(expr, *args):
+            return datetime.fromtimestamp(cron.next_after(expr, datetime(*args).timestamp()))
+
+        nxt = at("0 9 * * *", 2026, 11, 12, 9, 30)  # 今天的時間過了 → 明天
+        self.assertEqual((nxt.day, nxt.hour), (13, 9))
+        nxt = at("*/20 * * * *", 2026, 11, 12, 9, 41)
+        self.assertEqual((nxt.hour, nxt.minute), (10, 0))
+        nxt = at("0 9 1 * *", 2026, 11, 12, 9, 30)  # 每月 1 號
+        self.assertEqual((nxt.month, nxt.day), (12, 1))
+        nxt = at("30 8 15 * *", 2026, 11, 12, 9, 30)  # 本月 15 號還沒到
+        self.assertEqual((nxt.month, nxt.day, nxt.minute), (11, 15, 30))
+        nxt = at("0 9 * * 0", 2026, 11, 12, 9, 30)  # 週日（7 也等於週日）
+        self.assertEqual((nxt.day, nxt.weekday()), (15, 6))
+        nxt = at("0 9 * * 7", 2026, 11, 12, 9, 30)
+        self.assertEqual(nxt.day, 15)
+        nxt = at("0 9 20 * 5", 2026, 11, 12, 9, 30)  # 日與週都限定：取聯集，最近的週五先到
+        self.assertEqual(nxt.day, 13)
+
+    def test_parse_lists_and_ranges(self):
+        mi, hr, dom, mon, dow = cron.parse("0,30 9-11 1,15 * 1-5")
+        self.assertEqual(sorted(mi), [0, 30])
+        self.assertEqual(sorted(hr), [9, 10, 11])
+        self.assertEqual(sorted(dom), [1, 15])
+        self.assertEqual(sorted(dow), [1, 2, 3, 4, 5])
+
+    def test_bad_expr_detail(self):
+        for bad in ("0 9 * *", "0 24 * * *", "0 9 0 * *", "0 9 * 13 *", "*/0 * * * *", "0 9 * * 8", "a * * * *", ""):
+            with self.assertRaises(ValueError):
+                cron.parse(bad)
+
+    def test_describe(self):
+        self.assertEqual(cron.describe("*/15 * * * *"), "每 15 分鐘")
+        self.assertEqual(cron.describe("* * * * *"), "每分鐘")
+        self.assertEqual(cron.describe("0 * * * *"), "每個整點")
+        self.assertEqual(cron.describe("0 */2 * * *"), "每 2 小時（:00）")
+        self.assertEqual(cron.describe("0 9 * * *"), "每天 09:00")
+        self.assertEqual(cron.describe("0 9 * * 1-5"), "工作日 09:00")
+        self.assertEqual(cron.describe("0 9 * * 0,6"), "週末 09:00")
+        self.assertEqual(cron.describe("0 9 * * 3"), "每週三 09:00")
+        self.assertEqual(cron.describe("0 9 1 * *"), "每月 1 日 09:00")
+        self.assertEqual(cron.describe("0 9 * *"), "0 9 * *")  # 欄數不對：原樣顯示
+
+    def test_normalize(self):
+        j = cron.normalize({"name": "每天早上", "prompt": "整理進度", "schedule": "daily"})
+        self.assertEqual(j["schedule"], "0 9 * * *")
+        self.assertEqual(j["name"], "每天早上")
+        self.assertTrue(j["enabled"])
+        self.assertNotIn("history", j)
+        self.assertTrue(j["next_run"] > time.time())
+        with self.assertRaises(ValueError):
+            cron.normalize({"prompt": "要打掃", "schedule": "0 9 * * 9"})
+
+
+class WorkspaceSnapshot(unittest.TestCase):
+    """工作區快照：改檔前存一份、還原到某一則訊息之前、撤銷還原。用暫存資料夾，不碰真正的對話。"""
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="woof_snap_"))
+        self.turn = types.SimpleNamespace(root_session_id="s1", turn_mid=1)
+        self.ctx = types.SimpleNamespace(turn=self.turn)
+        snapshot.before_write(self.ctx, self.dir / "a.txt")  # 這回合第一次寫 a.txt：存原檔（不存在）
+        (self.dir / "a.txt").write_text("第一版\n", encoding="utf-8")
+
+    def test_first_write_then_restore_removes_new_file(self):
+        cps = snapshot.checkpoints("s1")
+        self.assertEqual([c["mid"] for c in cps], [1])
+        self.assertEqual(cps[0]["files"][0]["state"], "created")
+        r = snapshot.restore("s1", 1)
+        self.assertIn(str((self.dir / "a.txt").resolve()), r["restored"])
+        self.assertFalse((self.dir / "a.txt").exists())  # 原本不存在 → 還原成刪掉
+
+    def test_only_second_file_same_turn(self):
+        snapshot.before_write(self.ctx, self.dir / "a.txt")  # 同一回合同一個檔只記第一次
+        (self.dir / "a.txt").write_text("第二版\n", encoding="utf-8")
+        self.assertEqual(len(snapshot.checkpoints("s1")[0]["files"]), 1)
+        r = snapshot.restore("s1", 1)
+        self.assertFalse((self.dir / "a.txt").exists())
+
+    def test_undo_restore(self):
+        (self.dir / "a.txt").write_text("第二版\n", encoding="utf-8")
+        snapshot.restore("s1", 1)
+        self.assertFalse((self.dir / "a.txt").exists())
+        r = snapshot.undo("s1")
+        self.assertIn(str((self.dir / "a.txt").resolve()), r["restored"])
+        self.assertEqual((self.dir / "a.txt").read_text(encoding="utf-8"), "第二版\n")
+
+    def test_restore_to_earlier_message_keeps_later_state(self):
+        (self.dir / "a.txt").write_text("第二版\n", encoding="utf-8")
+        self.turn.turn_mid = 2
+        snapshot.before_write(self.ctx, self.dir / "a.txt")
+        (self.dir / "a.txt").write_text("第三版\n", encoding="utf-8")
+        r = snapshot.restore("s1", 2)  # 回到第 2 則訊息之前：用第 2 個檢查點存的第二版
+        self.assertIn(str((self.dir / "a.txt").resolve()), r["restored"])
+        self.assertEqual((self.dir / "a.txt").read_text(encoding="utf-8"), "第二版\n")
+        # 還原後這兩個檢查點收進 _undo，只剩第 1 個
+        self.assertEqual([c["mid"] for c in snapshot.checkpoints("s1") if isinstance(c["mid"], int)], [1])
+
+    def test_skipped_and_disabled(self):
+        (self.dir / "sub").mkdir()
+        snap = snapshot.settings()
+        with unittest.mock.patch.object(snapshot, "settings", lambda: {**snap, "max_file_mb": 0}):
+            self.turn.turn_mid = 3
+            snapshot.before_write(self.ctx, self.dir / "sub")  # 資料夾不存
+            snapshot.before_write(self.ctx, self.dir / "a.txt")  # 超過上限 → 略過
+        last = [c for c in snapshot.checkpoints("s1") if c["mid"] == 3][0]
+        states = {Path(f["path"]).name: f for f in last["files"]}
+        self.assertEqual(states["sub"]["skipped"], "資料夾")
+        self.assertTrue(states["a.txt"]["skipped"])  # 檔案太大：沒有 sha 可還原
+        self.assertTrue(any("略過" in n for n in snapshot.restore("s1", 3)["notes"]))
+        with unittest.mock.patch.object(snapshot, "settings", lambda: {**snap, "enabled": False}):
+            self.turn.turn_mid = 4
+            snapshot.before_write(self.ctx, self.dir / "off.txt")
+        self.assertNotIn(4, [c["mid"] for c in snapshot.checkpoints("s1")])
+
+    def test_drop(self):
+        snapshot.drop("s1")
+        self.assertEqual(snapshot.checkpoints("s1"), [])
 
 
 class Cost(unittest.TestCase):
