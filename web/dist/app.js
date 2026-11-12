@@ -5851,7 +5851,7 @@ async function deleteGroupFlow(gid) {
   try {
     await api('DELETE', `/api/groups/${gid}?sessions=${withSessions ? 1 : 0}`);
     await loadSessions();
-    if (S.sid && !S.sessions.some((s) => s.id === S.sid)) openNew();
+    if (S.sid && !S.sessions.some((s) => s.id === S.sid)) newSession();
     if (S.split && !S.sessions.some((s) => s.id === S.split)) closeSplit();
     if (withSessions) notify('ok', '群組與對話已刪除', `「${g.name}」和 ${n} 個對話都刪了。`);
     else if (n) notify('ok', '群組已刪除', `「${g.name}」刪了，${n} 個對話回到未分組。`);
