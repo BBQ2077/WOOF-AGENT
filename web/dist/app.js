@@ -4665,11 +4665,11 @@ function subagentRowHtml(n, tag) {
   const def = S.cfg.aux.subagent || '';
   const dm = S.cfg.models.find((x) => x.id === (def || S.cfg.default_model));
   const names = list.map((id) => (S.cfg.models.find((x) => x.id === id) || {}).label || id);
-  const now = `預設：${def ? (dm ? dm.label || dm.id : def) : `跟隨主模型${dm ? `（${dm.label || dm.id}）` : ''}`}`
-    + (names.length ? `　可指派：${names.join('、')}` : '　可指派：只用預設');
+  const now = `<span>預設：</span>${esc(def ? (dm ? dm.label || dm.id : def) : '跟隨主模型')}${!def && dm ? `（${esc(dm.label || dm.id)}）` : ''}`
+    + `<span>　可指派：</span>${esc(names.length ? names.join('、') : '只用預設')}`;
   return `<div class="auxrow auxwide" data-f="aux:subagent"><div><b>${n}<i>${tag}</i></b>`
     + '<small>勾選子代理可以用的模型（可多選），主代理派工時依任務從勾選的裡面挑；沒指定時用標「預設」的那個，沒設預設就跟隨主模型。需要 API 型連線（Claude Code CLI 不行）。建議只勾便宜或免費的。</small>'
-    + `<div class="now">${esc(now)}</div></div>`
+    + `<div class="now">${now}</div></div>`
     + mchkHtml('aux:subagent', list, {
       filter: (x) => auxFits('subagent', x), def,
       set: (sel, d) => {
@@ -4691,7 +4691,7 @@ function auxRowHtml(k, n, tag, d) {
   const off = k === 'fallback' || k === 'review';
   const follow = k === 'fallback' ? '不設備用（出錯就停下）' : k === 'review' ? '不使用（照權限問你）' : '跟隨主模型';
   const now = m ? `目前：${m.label || m.id}` : `目前：${follow}${dm && !off ? `（${dm.label || dm.id}）` : ''}`;
-  return `<div class="auxrow" data-f="aux:${k}"><div><b>${n}<i>${tag}</i></b><small>${d}</small><div class="now">${esc(now)}</div></div>`
+  return `<div class="auxrow" data-f="aux:${k}"><div><b>${n}<i>${tag}</i></b><small>${d}</small><div class="now">${now}</div></div>`
     + mpPairHtml('aux:' + k, cur, {
       filter: (x) => auxFits(k, x),
       blank: follow,

@@ -127,8 +127,8 @@ def set_last(pid: str) -> None:
 
 
 def _new_id(name: str, doc: dict) -> str:
-    base = _SAFE.sub("-", name).strip("-").lower() or "profile"
-    base = base[:24].strip("-") or "profile"
+    base = _SAFE.sub("-", name).strip("-").lower()
+    base = base[:24].strip("-") or "group"  # 中文名稱取不到英文就給 group，後面自動編號
     used = {r["id"] for r in doc["profiles"]}
     if base not in used:
         return base
