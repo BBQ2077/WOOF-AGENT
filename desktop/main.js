@@ -26,12 +26,28 @@ app.setPath('userData', path.join(app.getPath('appData'), 'woof-desktop'));
 // 畫面的來源固定不變，後端埠每次隨機也不影響。Electron 官方建議用自訂協定取代 file://。
 const WEB = ROOT ? path.join(ROOT, 'web', 'dist') : '';
 protocol.registerSchemesAsPrivileged([{ scheme: 'woof', privileges: { standard: true, secure: true, supportFetchAPI: true } }]);
+// 首頁：js／css 的 ?v= 自動換成檔案修改時間，改了檔不用手動改版號，也不會吃到舊快取（和後端 woof/server.py 一致）
+function indexHtml() {
+  const html = fs.readFileSync(path.join(WEB, 'index.html'), 'utf8');
+  return html.replace(/([\w./-]+\.(?:js|css))\?v=\w+/g, (all, name) => {
+    try {
+      const file = path.resolve(WEB, name);
+      if (!file.startsWith(WEB + path.sep)) return all;
+      return `${name}?v=${Math.floor(fs.statSync(file).mtimeMs / 1000)}`;
+    } catch { return all; }
+  });
+}
 function registerWebProtocol() {
   protocol.handle('woof', (req) => {
     const u = new URL(req.url);
     let rel = decodeURIComponent(u.pathname).replace(/^\/+/, '') || 'index.html';
     const file = path.resolve(WEB, rel);
     if (u.host !== 'app' || !file.startsWith(WEB + path.sep)) return new Response('not found', { status: 404 });
+    if (rel === 'index.html') {
+      try {
+        return new Response(indexHtml(), { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' } });
+      } catch { return new Response('not found', { status: 404 }); }
+    }
     return net.fetch(pathToFileURL(file).toString());
   });
 }
