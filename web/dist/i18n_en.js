@@ -1920,7 +1920,7 @@ window.WOOF_EN = {
 "唯讀": "Read-only",
 "住在旁邊的小狗。自己的對話窗、自己的檔、自己的壓縮；對你的對話唯讀——看得到，但不會插話、不會動工具、不會改任何東西。": "A little dog living beside you. Its own chat, its own file, its own compression — and read-only towards your chats: it can look, but cannot speak up, use tools, or change anything.",
 "允許牠在主對話留一句": "Let it leave a line in the chat",
-"預設關，也就是完全唯讀：牠只看得到你的對話，不能寫進去。打開後牠講的話才會用腳印（🐾）出現在對話裡。": "Off by default, which means fully read-only: it can read your chats but never write. When on, its lines appear in the chat with a paw print (🐾).",
+"預設關，也就是完全唯讀：牠只看得到你的對話，不能寫進去。打開後牠講的話會以牠的招牌表情開頭，出現在對話裡。": "Off by default, which means fully read-only: it can read your chats but never write. When on, its lines appear in the chat, prefixed with its signature emoji.",
 "牠會看著你開著的對話，偶爾說一兩句。": "It watches the chat you have open and chimes in now and then.",
 "想找牠說話，直接打字就好。": "Want to talk to it? Just type below.",
 "編輯寵物檔": "Edit pet file",
@@ -1939,4 +1939,9 @@ window.WOOF_EN = {
 "牠自己的記憶": "Its own memory",
 "跟主對話的壓縮完全分開，不會互相影響。": "Compression is fully separate from the main chat.",
 "壓縮後留幾則": "Keep after compressing",
+"永遠在輸入框上方的通用回覆，用 | 分隔（最多四個）。上面那一顆會變的是模型給的建議。": "Fixed replies that always sit above the input, separated by | (up to four). The one above them changes: that's the model's suggestion.",
+"按表情": "React",
+"收回": "Remove",
+"沒按到": "Reaction failed",
+"DeepSeek 藍鯨女僕。慵懶、貪吃、嘴硬心軟。": "DeepSeek's blue-whale maid. Lazy, greedy, all bark and a soft heart.",
 };

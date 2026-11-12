@@ -471,7 +471,7 @@ function onEvent(ev) {
   const sid = ev.session_id;
   switch (ev.type) {
     case 'pet':
-      petEvent(ev.pet);
+      petEvent(ev.pet, ev.history);
       break;
     case 'run_start':
       S.running.add(sid); S.live[sid] = { thinking: '', text: '' }; delete S.errors[sid];
@@ -5960,8 +5960,10 @@ if (PANE2) {
 }
 
 // ---- 寵物：側邊自己的對話窗（訊息、提示詞、壓縮都跟主對話分開）
+// 版面由上而下：對話紀錄 → 頭頂泡泡（牠最新的一則）→ 牠 → 一顆模型建議 → 固定回覆 → 輸入框
+// 雙方都能對對方的訊息按表情；牠一次可以連發幾則，前端一則一則冒出來。
 const PET = { cfg: null, st: { face: 'happy', say: '', mood: '', at: 0 }, hist: [], faces: [],
-  busy: false, model: '', label: '' };
+  busy: false, model: '', label: '', lastPetId: '', reveal: null, revealTimer: 0 };
 
 document.addEventListener('input', (e) => {
   if (e.target && e.target.id === 'petIn') petGrow();
@@ -5970,53 +5972,105 @@ function petSprite(face) {
   const ch = (PET.st && PET.st.char) || (PET.cfg && PET.cfg.char) || 'dog';
   return `${BASE}/api/pet/sprite/${encodeURIComponent(face || 'happy')}?char=${encodeURIComponent(ch)}&token=${encodeURIComponent(TOKEN)}`;
 }
+function petReacts() {
+  return (PET.st && PET.st.reacts) || ['❤️', '😂', '🥺', '👍', '😮', '🔥', '😴'];
+}
+function petLines(m) {
+  return String((m && m.text) || '').split('\n').map((x) => x.trim()).filter(Boolean);
+}
+// 最後一則是牠講的 → 放泡泡；其餘放紀錄
+function petSplit() {
+  const list = PET.hist.slice(-40);
+  const last = list[list.length - 1];
+  if (last && last.role === 'pet' && petLines(last).length) return { rows: list.slice(0, -1), top: last };
+  return { rows: list, top: null };
+}
+// 新的一則：第一句馬上出現，後面的照字數一句一句冒（像真人連發）
+function petMaybeReveal(animate) {
+  const lastPet = [...PET.hist].reverse().find((m) => m.role === 'pet');
+  const id = lastPet ? lastPet.id : '';
+  if (!id || id === PET.lastPetId) return;
+  PET.lastPetId = id;
+  clearTimeout(PET.revealTimer);
+  const lines = petLines(lastPet);
+  if (!animate || lines.length < 2) { PET.reveal = null; return; }
+  PET.reveal = { id, shown: 1 };
+  const step = () => {
+    if (!PET.reveal || PET.reveal.id !== id) return;
+    PET.reveal.shown += 1;
+    if (PET.reveal.shown >= lines.length) PET.reveal = null;
+    petPaintStage();
+    if (PET.reveal) PET.revealTimer = setTimeout(step, 450 + Math.min(lines[PET.reveal.shown].length * 45, 1200));
+  };
+  PET.revealTimer = setTimeout(step, 450 + Math.min(lines[1].length * 45, 1200));
+}
 
-function petPaint() {
+const PET_DOTS = '<span class="dots"><i></i><i></i><i></i></span>';
+function petRx(m) {
+  // 訊息下面那顆小表情：使用者訊息顯示牠按的，牠的訊息顯示你按的
+  if (m.role === 'pet') {
+    return m.ureact ? `<button class="rx mine" data-pet="unrx" data-mid="${esc(m.id || '')}" title="收回">${esc(m.ureact)}</button>` : '';
+  }
+  return m.react ? `<span class="rx">${esc(m.react)}</span>` : '';
+}
+function petRow(m) {
+  if (m.role !== 'pet') {
+    return `<div class="pmsg u"><div class="petline">${esc(m.text)}</div>${petRx(m)}</div>`;
+  }
+  const lines = petLines(m);
+  if (!lines.length) return '';
+  return `<div class="pmsg p" data-mid="${esc(m.id || '')}">${lines.map((x) => `<div class="petline">${esc(x)}</div>`).join('')}`
+    + `<span class="rxadd" data-pet="rxpick" data-mid="${esc(m.id || '')}" title="按表情">☺</span>${petRx(m)}</div>`;
+}
+function petPaintStage() {
   const img = $('#petImg');
   if (!img) return;
-  img.src = petSprite(PET.st && PET.st.face);
-  const bub = $('#petBub');
-  if (bub) {
-    const s = String((PET.st && PET.st.say) || '').trim();
-    bub.textContent = s;
-    bub.classList.toggle('on', !!s);
-  }
+  const src = petSprite(PET.st && PET.st.face);
+  if (img.getAttribute('src') !== src) img.src = src;
   const mood = $('#petMood');
   if (mood) mood.textContent = (PET.st && PET.st.mood) || '';
-  const nm = $('#petName');
+  const bub = $('#petBub');
+  if (!bub) return;
+  const { top } = petSplit();
+  let html = '';
+  if (top) {
+    const lines = petLines(top);
+    const n = PET.reveal && PET.reveal.id === top.id ? PET.reveal.shown : lines.length;
+    html = lines.slice(0, n).map((x) => `<div class="bub">${esc(x)}</div>`).join('');
+    if (n < lines.length) html += `<div class="bub typing">${PET_DOTS}</div>`;
+    html = `<div class="pmsg p top" data-mid="${esc(top.id || '')}">${html}`
+      + `<span class="rxadd" data-pet="rxpick" data-mid="${esc(top.id || '')}" title="按表情">☺</span>${petRx(top)}</div>`;
+  }
+  if (PET.busy) html = `<div class="pmsg p top"><div class="bub typing">${PET_DOTS}</div></div>`;
+  bub.innerHTML = html;
+  bub.classList.toggle('on', !!html);
+}
+function petPaint() {
+  if (!$('#petImg')) return;
   const pname = (PET.st && PET.st.name) || '沃夫';
+  const nm = $('#petName');
   if (nm) nm.textContent = pname;
   const inp = $('#petIn');
   if (inp) inp.placeholder = uiLang() === 'en' ? `Talk to ${pname}…` : `跟${pname}說話…`;
   const sb = $('#petSug');
   if (sb) {
-    const sug = (PET.st && PET.st.sug) || [];
+    const sug = PET.busy ? [] : ((PET.st && PET.st.sug) || []).slice(0, 1);
     const quick = (PET.cfg && PET.cfg.quick) || [];
     sb.innerHTML = (sug.length
-      ? `<div class="sugrow model">${sug.map((x) => {
-        const t = x.length > 40 ? `${x.slice(0, 40)}…` : x;
-        return `<button class="sugbtn" data-pet="sug" data-say="${esc(x)}">${esc(t)}</button>`;
-      }).join('')}</div>`
-      : '')
+      ? `<button class="sugbtn one" data-pet="sug" data-say="${esc(sug[0])}">${esc(sug[0])}</button>` : '')
       + (quick.length
-        ? `<div class="sugrow quick">${quick.map((x) => `<button class="sugbtn fix" data-pet="sug" data-say="${esc(x)}">${esc(x)}</button>`).join('')}</div>`
+        ? `<div class="sugrow">${quick.map((x) => `<button class="sugbtn fix" data-pet="sug" data-say="${esc(x)}">${esc(x)}</button>`).join('')}</div>`
         : '');
   }
   const h = $('#petHist');
   if (h) {
-    const list = PET.hist.slice(-40);
-    h.innerHTML = list.length
-      ? list.map((m) => {
-        if (m.role !== 'pet') {
-          const r = m.react ? `<span class="petreact">${esc(m.react)}</span>` : '';
-          return `<div class="petline u${r ? ' hasreact' : ''}">${esc(m.text)}${r}</div>`;
-        }
-        return String(m.text || '').split('\n').filter((x) => x.trim())
-          .map((line) => `<div class="petline p">${esc(line)}</div>`).join('');
-      }).join('')
+    const { rows, top } = petSplit();
+    h.innerHTML = rows.length || top || PET.busy
+      ? rows.map(petRow).join('')
       : '<div class="pethint">牠會看著你開著的對話，偶爾說一兩句。<br>想找牠說話，直接打字就好。</div>';
     h.scrollTop = h.scrollHeight;
   }
+  petPaintStage();
 }
 
 async function petLoad() {
@@ -6025,13 +6079,15 @@ async function petLoad() {
     PET.cfg = d.cfg; PET.st = d.state || PET.st; PET.faces = d.faces || [];
     PET.model = d.model; PET.label = d.label; PET.hist = d.history || [];
     PET.chars = d.chars || [];
+    petMaybeReveal(false);
     petPaint();
   } catch (e) { /* 後端還沒好就算了，下次再讀 */ }
 }
 
-function petEvent(p) {
+function petEvent(p, hist) {
   if (!p) return;
   PET.st = p;
+  if (Array.isArray(hist) && !PET.busy) { PET.hist = hist; petMaybeReveal(true); }
   petPaint();
 }
 
@@ -6040,6 +6096,7 @@ function petGrow() {
   if (!inp) return;
   inp.style.height = 'auto';
   inp.style.height = `${Math.min(inp.scrollHeight || 44, 132)}px`;
+  inp.style.overflowY = inp.scrollHeight > 132 ? 'auto' : 'hidden';
 }
 
 async function petSay(forced) {
@@ -6047,22 +6104,81 @@ async function petSay(forced) {
   if (!inp || PET.busy) return;
   const text = String(forced || inp.value).trim();
   if (!text) return;
-  PET.busy = true; inp.value = ''; petGrow(); inp.disabled = true;
-  PET.hist.push({ role: 'user', text });
+  petRxClose();
+  PET.busy = true; inp.value = ''; petGrow();
+  PET.hist.push({ role: 'user', text, id: '' });
   petPaint();
   try {
     const d = await api('POST', '/api/pet/say', { text, session_id: S.sid || '' });
     PET.st = d; PET.hist = d.history || PET.hist;
+    PET.busy = false;
+    petMaybeReveal(true);
     petPaint();
   } catch (e) {
     PET.hist.pop();
+    PET.busy = false;
     petPaint();
     notify('error', '牠沒聽到', e.message);
     inp.value = text;
   } finally {
-    PET.busy = false; inp.disabled = false; petGrow();
+    PET.busy = false; petGrow();
     if (document.activeElement !== inp) inp.focus();
   }
+}
+
+async function petReact(mid, emoji) {
+  if (!mid) return;
+  petRxClose();
+  // 先畫上去，不等伺服器
+  const m = PET.hist.find((x) => x.id === mid);
+  const before = m ? m.ureact : undefined;
+  if (m) m.ureact = m.ureact === emoji ? '' : emoji;
+  petPaint();
+  try {
+    const d = await api('POST', '/api/pet/react', { id: mid, emoji });
+    PET.st = d.state || PET.st; PET.hist = d.history || PET.hist;
+    petPaint();
+  } catch (e) {
+    if (m) m.ureact = before;
+    petPaint();
+    notify('error', '沒按到', e.message);
+  }
+}
+
+function petRxClose() {
+  const old = $('#petRxPick');
+  if (old) old.remove();
+}
+function petRxPick(anchor, mid) {
+  const old = $('#petRxPick');
+  if (old) { const same = old.dataset.mid === mid; old.remove(); if (same) return; }
+  const m = PET.hist.find((x) => x.id === mid);
+  const cur = m ? m.ureact : '';
+  const box = document.createElement('div');
+  box.id = 'petRxPick';
+  box.dataset.mid = mid;
+  box.innerHTML = petReacts().map((e) => `<span class="${e === cur ? 'on' : ''}" data-e="${esc(e)}">${esc(e)}</span>`).join('');
+  document.body.appendChild(box);
+  const r = anchor.getBoundingClientRect();
+  const w = box.offsetWidth;
+  const pane = $('#panePet').getBoundingClientRect();
+  box.style.left = `${Math.max(pane.left + 6, Math.min(r.left - w / 2, pane.right - w - 6))}px`;
+  box.style.top = `${Math.max(8, r.top - box.offsetHeight - 6)}px`;
+  box.addEventListener('click', (ev) => {
+    const it = ev.target.closest('[data-e]');
+    if (it) petReact(mid, it.dataset.e);
+  });
+  const close = (ev) => {
+    if (ev && (box.contains(ev.target) || anchor.contains(ev.target))) return;
+    petRxClose();
+    document.removeEventListener('mousedown', close, true);
+    document.removeEventListener('keydown', onKey, true);
+  };
+  const onKey = (ev) => { if (ev.key === 'Escape') close(); };
+  setTimeout(() => {
+    document.addEventListener('mousedown', close, true);
+    document.addEventListener('keydown', onKey, true);
+  }, 0);
 }
 
 async function petPoke() {
@@ -6070,6 +6186,7 @@ async function petPoke() {
   try {
     const d = await api('POST', '/api/pet/glance', { session_id: S.sid });
     PET.st = d.state || PET.st;
+    if (d.history) { PET.hist = d.history; petMaybeReveal(true); }
     petPaint();
     if (!d.spoke) notify('info', '牠看了一眼', '這次沒什麼想說的。');
   } catch (e) { notify('error', '失敗', e.message); }
@@ -6080,6 +6197,7 @@ async function petSave(patch) {
     const d = await api('PUT', '/api/pet', patch);
     PET.cfg = d.cfg; PET.st = d.state || PET.st; PET.chars = d.chars || PET.chars;
     PET.hist = d.history || [];
+    PET.lastPetId = ''; petMaybeReveal(false);
     petPaint();
     return d;
   } catch (e) { notify('error', '存不起來', e.message); return null; }
@@ -6101,12 +6219,12 @@ function petMenu(anchor) {
     if (ev && m.contains(ev.target)) return;
     m.remove();
     document.removeEventListener('click', close, true);
-    document.removeEventListener('keydown', esc);
+    document.removeEventListener('keydown', onKey);
   };
-  const esc = (ev) => { if (ev.key === 'Escape') close(); };
+  const onKey = (ev) => { if (ev.key === 'Escape') close(); };
   setTimeout(() => {
     document.addEventListener('click', close, true);
-    document.addEventListener('keydown', esc);
+    document.addEventListener('keydown', onKey);
   }, 0);
   m.addEventListener('click', (ev) => {
     const it = ev.target.closest('[data-pm]');
@@ -6114,12 +6232,11 @@ function petMenu(anchor) {
     close();
     const k = it.dataset.pm;
     if (k === 'poke') petPoke();
-    if (k === 'set') { openSettings('pet'); }
-    if (k === 'file') { openSettings('pet'); }
+    if (k === 'set' || k === 'file') openSettings('pet');
     if (k === 'reset') {
       confirmBox('清掉牠記得的事？', '牠自己的對話與摘要會清空。主對話完全不受影響。', { ok: '清空', danger: true })
         .then((ok) => ok && api('POST', '/api/pet/reset', {}).then((d) => {
-          PET.st = d.state || PET.st; PET.hist = []; petPaint();
+          PET.st = d.state || PET.st; PET.hist = []; PET.lastPetId = ''; petPaint();
           notify('ok', '牠忘記了', '重新開始。');
         }));
     }
@@ -6134,6 +6251,15 @@ $('#panePet').addEventListener('click', (e) => {
   if (k === 'sug') petSay(b.dataset.say || '');
   if (k === 'menu') petMenu(b);
   if (k === 'poke') petPoke();
+  if (k === 'rxpick') petRxPick(b, b.dataset.mid || '');
+  if (k === 'unrx') { const m = PET.hist.find((x) => x.id === b.dataset.mid); if (m) petReact(m.id, m.ureact); }
+});
+// 雙擊牠的訊息＝按 ❤️（再雙擊收回），跟 Telegram 一樣
+$('#panePet').addEventListener('dblclick', (e) => {
+  const row = e.target.closest('.pmsg.p[data-mid]');
+  if (!row || !row.dataset.mid || e.target.closest('[data-pet]')) return;
+  window.getSelection && window.getSelection().removeAllRanges();
+  petReact(row.dataset.mid, petReacts()[0]);
 });
 $('#panePet').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && e.target.id === 'petIn' && !e.shiftKey && !e.isComposing) { e.preventDefault(); petSay(); }
@@ -6162,9 +6288,9 @@ function renderPetSec(box) {
         <div class="fctl"><input type="number" min="3" max="600" value="${c.every_sec}" data-petf="every_sec"></div></div>
       <div class="frow"><div><b>每次看多少</b><small>從主對話抓最近約 ${Number(c.peek).toLocaleString()} tokens 的片段給牠看。</small></div>
         <div class="fctl"><input type="number" min="300" max="20000" step="100" value="${c.peek}" data-petf="peek"></div></div>
-      <div class="frow"><div><b>允許牠在主對話留一句</b><small>預設關，也就是完全唯讀：牠只看得到你的對話，不能寫進去。打開後牠講的話才會用腳印（🐾）出現在對話裡。</small></div>
+      <div class="frow"><div><b>允許牠在主對話留一句</b><small>預設關，也就是完全唯讀：牠只看得到你的對話，不能寫進去。打開後牠講的話會以牠的招牌表情開頭，出現在對話裡。</small></div>
         <div class="fctl"><span class="sw${c.speak_up ? ' on' : ''}" data-petf="speak_up"></span></div></div>
-      <div class="frow"><div><b>固定回覆</b><small>永遠在輸入框上方的那幾句通用回覆，用 | 分隔（最多四個）。上面那排會變的是模型給的建議。</small></div>
+      <div class="frow"><div><b>固定回覆</b><small>永遠在輸入框上方的通用回覆，用 | 分隔（最多四個）。上面那一顆會變的是模型給的建議。</small></div>
         <div class="fctl wide"><input data-petf="quick" value="${esc((c.quick || []).join('|'))}" placeholder="怎麼了？|繼續說"></div></div>
     </div>
     <div class="card"><div class="card-hd"><b>模型與額度</b><small>牠用自己的模型，不跟主對話共用。</small></div>
@@ -6187,10 +6313,6 @@ function renderPetSec(box) {
       <textarea id="petFile" rows="16" class="mono" spellcheck="false" placeholder="讀取中…"></textarea>
       <div class="frow"><div><b>存檔</b><small>下一次牠講話就用新版。</small></div>
         <div class="fctl"><button class="btn" data-petf="saveFile">儲存寵物檔</button></div></div>
-    </div>
-    <div class="card"><div class="card-hd"><b>牠記得的事</b><small>牠自己的對話與摘要，只有牠看得到。</small></div>
-      <div class="frow"><div><b>${d.state.msgs} 則訊息</b><small>清掉不影響主對話，只是牠會忘記你們聊過什麼。</small></div>
-        <div class="fctl"><button class="btn" data-petf="reset">清空牠的記憶</button></div></div>
     </div>`;
     api('GET', '/api/pet/file').then((f) => { const t = $('#petFile'); if (t) t.value = f.text; });
     box.onclick = (e) => {

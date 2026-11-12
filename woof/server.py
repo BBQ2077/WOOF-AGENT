@@ -719,7 +719,7 @@ async def pet_put(body: dict):
     save_config(cfg)
     REG.config["pet"] = cur
     m = pet.pick_model()
-    await broadcast({"type": "pet", "pet": pet.state()})
+    await broadcast({"type": "pet", "pet": pet.state(), "history": pet.history()[-40:]})
     return {"cfg": pet.cfg(), "state": pet.state(), "faces": pet.FACES, "chars": pet.chars(),
             "model": (m or {}).get("id"), "label": (m or {}).get("label"),
             "history": pet.history()[-40:]}
@@ -751,7 +751,21 @@ async def pet_glance(body: dict):
         raise HTTPException(400, "要指定是哪個對話")
     pet.watching(sid)
     r = await pet.glance(sid, broadcast, force=True)
-    return {"state": pet.state(), "spoke": bool(r)}
+    return {"state": pet.state(), "spoke": bool(r), "history": pet.history()[-40:]}
+
+
+@app.post("/api/pet/react")
+async def pet_react(body: dict):
+    """使用者對牠的某一則按表情；同一個再按一次就收回。"""
+    from . import pet
+
+    mid = str((body or {}).get("id") or "")
+    if not mid:
+        raise HTTPException(400, "要指定是哪一則")
+    r = await pet.user_react(mid, str((body or {}).get("emoji") or ""), broadcast)
+    if r.get("error"):
+        raise HTTPException(404, r["error"])
+    return {"state": r, "history": pet.history()[-40:]}
 
 
 @app.post("/api/pet/reset")
@@ -759,7 +773,7 @@ async def pet_reset():
     from . import pet
 
     pet.reset_chat()
-    await broadcast({"type": "pet", "pet": pet.state()})
+    await broadcast({"type": "pet", "pet": pet.state(), "history": []})
     return {"state": pet.state(), "history": []}
 
 

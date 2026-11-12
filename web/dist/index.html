@@ -7,7 +7,7 @@
 <script src="theme.js?v=15"></script>
 <link rel="icon" type="image/png" href="brand/favicon.png">
 <link rel="stylesheet" href="vendor/hljs.css">
-<link rel="stylesheet" href="app.css?v=100">
+<link rel="stylesheet" href="app.css?v=103">
 </head>
 <body>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
@@ -171,16 +171,16 @@
       </div>
       <div class="pane" id="panePet">
         <div class="petwrap">
-          <div class="pethead"><span class="petttl">寵物</span>
+          <div class="pethead"><span class="petttl">寵物</span><span class="petro">唯讀</span>
             <span class="petmore" data-pet="menu" title="更多">⋯</span></div>
-          <div class="petstage">
-            <div class="petbub" id="petBub"></div>
-            <img id="petImg" alt="" draggable="false">
-            <div class="petname"><b id="petName" class="noi18n">沃夫</b><span id="petMood"></span><span class="petro">唯讀</span></div>
-          </div>
           <div class="pethist" id="petHist"></div>
+          <div class="petstage">
+            <div class="petbubs" id="petBub"></div>
+            <img id="petImg" alt="" draggable="false">
+            <div class="petname"><b id="petName" class="noi18n">沃夫</b><span id="petMood"></span></div>
+          </div>
           <div class="petsug" id="petSug"></div>
-          <div class="petin"><textarea id="petIn" rows="1" placeholder="跟沃夫說話…"></textarea><button class="petSend" data-pet="say">送出</button></div>
+          <div class="petin"><textarea id="petIn" rows="1" placeholder="跟沃夫說話…"></textarea><button class="petSend" data-pet="say" title="送出"><svg viewBox="0 0 24 24"><path d="M12 19V5M5.5 11.5 12 5l6.5 6.5"/></svg></button></div>
         </div>
       </div>
       <div class="pane on" id="paneTasks"></div>
@@ -199,7 +199,7 @@
 <script src="vendor/marked.min.js"></script>
 <script src="vendor/purify.min.js"></script>
 <script src="vendor/highlight.min.js"></script>
-<script src="i18n_en.js?v=31"></script>
-<script src="app.js?v=161"></script>
+<script src="i18n_en.js?v=32"></script>
+<script src="app.js?v=163"></script>
 </body>
 </html>

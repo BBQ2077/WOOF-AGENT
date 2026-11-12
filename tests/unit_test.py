@@ -1272,7 +1272,7 @@ class Pet(unittest.TestCase):
 
     def test_system_lists_every_face(self):
         p = self.up()
-        system = p.build_system({"name": "小麥", "effort": "off"}, "glance")
+        system = p.build_system({"effort": "off"}, "glance")
         for f in p.FACES:
             self.assertIn(f, system)
         self.assertIn("say", system)
@@ -1308,6 +1308,63 @@ class Pet(unittest.TestCase):
         p = self.up()
         self.assertEqual(p.parse('{"say":"汪"}')["react"], "")
 
+    def test_fit_react_only_palette(self):
+        p = self.up()
+        self.assertEqual(p.fit_react("😂", "dog"), "😂")
+        self.assertEqual(p.fit_react("❤", "dog"), "❤️")  # 沒有變體字元也算
+        self.assertEqual(p.fit_react("🐾", "dog"), "🐾")
+        self.assertEqual(p.fit_react("🐾", "fish"), "")  # 狗的招牌魚不能用
+        self.assertEqual(p.fit_react("🍚", "fish"), "🍚")
+        self.assertEqual(p.fit_react("🤖", "dog"), "")
+        self.assertEqual(len(p.palette("dog")), 8)
+
+    def test_length_hint_follows_user(self):
+        p = self.up()
+        self.assertIn("表情", p.length_hint("好"))
+        self.assertIn("表情", p.length_hint("哈哈哈"))
+        self.assertIn("二十", p.length_hint("在幹嘛"))
+        self.assertIn("問你想法", p.length_hint("你覺得這個架構要不要先拆成兩塊？"))
+
+    def test_user_react_toggles_and_changes_face(self):
+        p = self.up()
+        d = p._load()
+        d["msgs"] = [{"id": "u1", "role": "user", "text": "嗨", "at": 1},
+                     {"id": "p1", "role": "pet", "text": "汪！\n你回來了", "at": 2, "face": "happy"}]
+        p._save(d)
+        asyncio.run(p.user_react("p1", "😂"))
+        m = p.history()[-1]
+        self.assertEqual(m["ureact"], "😂")
+        self.assertEqual(p.state()["face"], "laugh")
+        asyncio.run(p.user_react("p1", "😂"))  # 同一個再按＝收回
+        self.assertNotIn("ureact", p.history()[-1])
+        self.assertIn("error", asyncio.run(p.user_react("nope", "😂")))
+        # 牠看得到你按了什麼：寫在你下一句前面
+        d = p._load()
+        d["msgs"][-1]["ureact"] = "❤️"
+        d["msgs"].append({"id": "u2", "role": "user", "text": "好乖", "at": 3})
+        p._save(d)
+        conv = p._own_messages(p.cfg())
+        self.assertEqual(conv[0]["role"], "user")
+        self.assertIn("按了 ❤️", conv[-1]["content"][0]["text"])
+        p.reset_chat()
+
+    def test_personas_follow_new_defaults(self):
+        p = self.up()
+        p._ensure()
+        for cid in p.CHARS:
+            text = (p.CHARS_DIR / (cid + ".md")).read_text(encoding="utf-8")
+            self.assertNotIn("魚片", text)
+            self.assertIn("## 示範", text)
+
+    def test_simplified_leak_becomes_tw(self):
+        p = self.up()
+        g = p.parse('{"say":["这里好乱","然后呢"],"face":"think","mood":"头痛","sug":"先弄登录吧"}')
+        self.assertEqual(g["say"], "這裡好亂\n然後呢")
+        self.assertEqual(g["sug"], ["先弄登錄吧"])
+        self.assertEqual(g["mood"], "頭痛")
+        from woof.zh_tw import to_tw
+        self.assertEqual(to_tw("喂！後面裡面台灣公里"), "喂！後面裡面台灣公里")
+
     def test_clean_quick(self):
         p = self.up()
         self.assertEqual(p.clean({"quick": "嗯嗯|然後呢"})["quick"], ["嗯嗯", "然後呢"])
@@ -1318,13 +1375,13 @@ class Pet(unittest.TestCase):
     def test_parse_sug(self):
         p = self.up()
         got = p.parse('{"say":"去睡吧","face":"gentle","mood":"心疼","sug":["好，晚安","你也早點睡"]}')
-        self.assertEqual(got["sug"], ["好，晚安", "你也早點睡"])
+        self.assertEqual(got["sug"], ["好，晚安"])  # 只留一顆模型建議
         self.assertEqual(p.parse('{"say":"嗨"}')["sug"], [])
         self.assertEqual(p.parse('{"say":"嗨","sug":"單獨一句"}')["sug"], ["單獨一句"])
 
     def test_reply_not_forced_short(self):
         p = self.up()
-        system = p.build_system({"name": "小麥", "effort": "off"}, "talk")
+        system = p.build_system({"effort": "off"}, "talk", p.length_hint("今天好累"))
         self.assertNotIn("三十", system)
         self.assertIn("sug", system)
 
