@@ -31,6 +31,131 @@ const S = {
   openPlugins: new Set(),
 };
 
+// ---- 分頁：一個視窗可以同時開幾個對話。每個分頁各自記住自己的訊息、捲動位置、草稿與附件；
+//      S.sid／S.msgs／S.follow／S.attach／S.draft／S.liveThink 都指向「目前這個分頁」，
+//      所以右側面板、TODO、額度、終端機一律跟著目前的分頁走，不會指錯對話。
+const TAB_MAX = 4;
+S.tabs = []; S.tab = 0;
+const tabNew = (sid) => ({ sid: sid || null, msgs: [], follow: true, attach: [], draft: {}, liveThink: null, top: 0, loaded: false, text: '' });
+const tab = () => S.tabs[S.tab] || (S.tabs[S.tab] = tabNew(null));
+const tabOf = (sid) => (sid ? S.tabs.find((t) => t.sid === sid) : null);
+for (const k of ['sid', 'msgs', 'follow', 'attach', 'draft', 'liveThink']) {
+  Object.defineProperty(S, k, { configurable: true, get: () => tab()[k], set: (v) => { tab()[k] = v; } });
+}
+function saveTabs() {
+  localStorage.setItem('woof.tabs', JSON.stringify(S.tabs.map((t) => t.sid || null)));
+  localStorage.setItem('woof.tab', String(S.tab));
+}
+// 重開程式：把上次開的分頁放回來（對話已經被刪掉的丟掉），作用中的分頁不一定是第一個
+function restoreTabs() {
+  let arr = [];
+  try { const raw = JSON.parse(localStorage.getItem('woof.tabs') || '[]'); if (Array.isArray(raw)) arr = raw; } catch { arr = []; }
+  const ids = new Set(S.sessions.map((s) => s.id));
+  const tabs = arr.slice(0, TAB_MAX).map((sid) => tabNew(typeof sid === 'string' && ids.has(sid) ? sid : null));
+  S.tabs = tabs.length ? tabs : [tabNew(null)];
+  const i = Number(localStorage.getItem('woof.tab'));
+  S.tab = Number.isInteger(i) && i >= 0 && i < S.tabs.length ? i : 0;
+}
+function renderTabbar() {
+  const bar = $('#tabbar'); if (!bar) return;
+  bar.innerHTML = S.tabs.map((t, i) => {
+    const s = t.sid ? S.sessions.find((x) => x.id === t.sid) : null;
+    const title = (t.sid && s && s.title) || '新對話';
+    const run = !!(t.sid && S.running.has(t.sid));
+    const wait = !!(t.sid && (Object.values(S.asks).some((a) => a.session_id === t.sid) || Object.values(S.approvals).some((a) => a.session_id === t.sid)));
+    return `<div class="tab${i === S.tab ? ' on' : ''}" data-tab="${i}" title="${esc(title)}">`
+      + (run ? '<i class="run"></i>' : wait ? '<i class="wait"></i>' : '')
+      + `<span class="tt">${esc(title)}</span><span class="tx" data-tabx="${i}" title="關閉分頁">${ico('x')}</span></div>`;
+  }).join('') + '<span class="tabnew" data-tabnew title="新分頁">＋</span>';
+}
+// 切到某個分頁：第一次或換過對話才抓訊息，之後整組重畫
+async function showTab(i, fresh) {
+  S.tab = i;
+  const t = tab();
+  S.progTop = null; S.lastTop = null;
+  if (fresh) { t.loaded = false; t.top = 0; t.follow = true; }
+  if (t.sid && !t.loaded) await loadTab(t);
+  localStorage.setItem('woof.sid', t.sid || '');
+  showView('chat');
+  renderAll();
+  input.value = t.text || '';
+  autosize();
+  const top = t.top || 0;
+  requestAnimationFrame(() => {
+    const c = $('#chat'); if (!c) return;
+    if (t.follow) stickBottom(); else if (top) c.scrollTop = top;
+    updateToBottom();
+  });
+}
+async function switchTab(i) {
+  if (!S.tabs[i]) return;
+  if (i === S.tab) { const t = tab(); if (!t.loaded) { await loadTab(t); renderAll(); } return; }
+  tab().text = input.value;
+  await showTab(i);
+  $('#input').focus();
+}
+function closeTab(i) {
+  if (!S.tabs[i]) return;
+  S.tabs.splice(i, 1);
+  if (!S.tabs.length) { S.tabs = [tabNew(null)]; S.tab = 0; }
+  else if (S.tab > i) S.tab--;
+  else if (S.tab >= S.tabs.length) S.tab = S.tabs.length - 1;
+  S.progTop = null; S.lastTop = null;
+  const t = tab();
+  localStorage.setItem('woof.sid', t.sid || '');
+  if (t.sid && !t.loaded) loadTab(t).then(renderAll); else renderAll();
+}
+// ＋：開一個新的空白分頁；分頁已滿就沿用目前這個分頁開新對話（舊對話留在側邊欄）
+function newTab() {
+  if (S.tabs.length < TAB_MAX) {
+    const prev = tab();
+    if (prev.sid) prev.top = $('#chat').scrollTop;
+    S.tabs.push(tabNew(null));
+    showTab(S.tabs.length - 1);
+  } else {
+    const i = S.tabs.length - 1;
+    showTab(i);
+    newSession();
+  }
+  $('#input').focus();
+}
+// 刪掉的對話如果開著，把它從分頁列移除
+function dropTabsOf(gone) {
+  const keep = S.tabs.filter((t) => !(t.sid && gone.has(t.sid)));
+  if (keep.length === S.tabs.length) return;
+  S.tabs = keep.length ? keep : [tabNew(null)];
+  S.tab = Math.min(S.tab, S.tabs.length - 1);
+  saveTabs();
+}
+// 側邊欄按 Ctrl／Cmd 點對話：開成一個新分頁
+function openInTab(sid) {
+  const open = tabOf(sid);
+  if (open) { switchTab(S.tabs.indexOf(open)); return; }
+  if (S.tabs.length >= TAB_MAX) { notify('warn', `最多只能開 ${TAB_MAX} 個分頁`, '先關掉一個分頁，再按一下這個對話。'); return; }
+  S.tabs.push(tabNew(sid));
+  showTab(S.tabs.length - 1, true);
+}
+async function loadTab(t) {
+  const sid = t.sid;
+  api('GET', '/api/sessions/' + sid + '/tasks')
+    .then((x) => { S.todos[sid] = x.todos || []; S.planOn[sid] = !!x.plan; S.gate[sid] = x.gate || 'off'; if (tab() === t) renderTaskBar(); })
+    .catch(() => {});
+  t.msgs = sid ? await api('GET', `/api/sessions/${sid}/messages`) : [];
+  t.loaded = true;
+  const s = S.sessions.find((x) => x.id === sid);
+  if (s && s.engine_state && s.engine_state.usage && !S.usage[sid]) S.usage[sid] = s.engine_state.usage;
+}
+function renderAll() {
+  renderSessions(); renderTitle(); renderModelSelect(); renderChat(); renderComposer(); renderMeter(); renderFiles(); saveTabs();
+}
+$('#tabbar').addEventListener('click', (e) => {
+  const x = e.target.closest('[data-tabx]');
+  if (x) { closeTab(Number(x.dataset.tabx)); return; }
+  if (e.target.closest('[data-tabnew]')) { newTab(); return; }
+  const t = e.target.closest('[data-tab]');
+  if (t) switchTab(Number(t.dataset.tab));
+});
+
 // ------------------------------------------------------------------ 共用
 async function api(method, path, body) {
   const r = await fetch(BASE + path, {
@@ -237,7 +362,18 @@ function onEvent(ev) {
           S.msgs = S.msgs.filter((m) => !m.pending || (m.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('') !== text);
         }
         S.msgs.push(ev.message); renderChat(); renderFiles();
+      } else {
+        // 背景分頁：訊息照樣存進它自己的清單，切回去就看得到，不必重新抓
+        const t = tabOf(sid);
+        if (t) {
+          if (ev.message.role === 'user') {
+            const text = (ev.message.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
+            t.msgs = t.msgs.filter((m) => !m.pending || (m.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('') !== text);
+          }
+          t.msgs.push(ev.message);
+        }
       }
+      renderTabbar();
       break;
     case 'tool_start':
       S.tools[ev.id] = { sid, name: ev.name, args: ev.args, out: '', running: true, t0: Date.now() };
@@ -271,6 +407,7 @@ function onEvent(ev) {
       break;
     case 'truncated':
       if (sid === S.sid) { S.msgs = S.msgs.filter((m) => !(typeof m.id === 'number' && m.id >= ev.from_id)); delete S.errors[sid]; renderChat(); }
+      else { const t = tabOf(sid); if (t) t.msgs = t.msgs.filter((m) => !(typeof m.id === 'number' && m.id >= ev.from_id)); }
       break;
     case 'approval':
       S.approvals[ev.id] = ev;
@@ -302,6 +439,9 @@ function onEvent(ev) {
       if (ev.session_id === S.sid) {
         S.msgs.push({ id: 'pending-' + Date.now(), role: 'user', content: ev.content || [], pending: true });
         renderChat();
+      } else {
+        const t = tabOf(ev.session_id);
+        if (t) t.msgs.push({ id: 'pending-' + Date.now(), role: 'user', content: ev.content || [], pending: true });
       }
       break;
     case 'session_updated': {
@@ -361,22 +501,28 @@ async function loadWorkdir() {
 }
 
 async function openSession(sid) {
-  S.sid = sid;
+  // 側邊欄按一下：這個對話已經開在某個分頁就切過去，不然就用目前這個分頁開
+  const open = tabOf(sid);
+  if (open && open !== tab()) { await switchTab(S.tabs.indexOf(open)); return; }
+  const t = tab();
+  t.sid = sid; t.msgs = []; t.loaded = false; t.top = 0; t.follow = true;
   if (sid && !cur()) await loadSessions().catch(() => {});
-  api('GET', '/api/sessions/' + sid + '/tasks').then((t) => { S.todos[sid] = t.todos || []; S.planOn[sid] = !!t.plan; S.gate[sid] = t.gate || 'off'; renderTaskBar(); }).catch(() => {});
   localStorage.setItem('woof.sid', sid || '');
-  S.msgs = sid ? await api('GET', `/api/sessions/${sid}/messages`) : [];
-  const s = cur();
-  if (s && s.engine_state && s.engine_state.usage && !S.usage[sid]) S.usage[sid] = s.engine_state.usage;
+  if (sid) await loadTab(t); else t.loaded = true;
   showView('chat');
-  renderSessions(); renderTitle(); renderModelSelect(); renderChat(true); renderComposer(); renderMeter(); renderFiles();
+  renderAll();
+  if (S.follow) requestAnimationFrame(() => { const c = $('#chat'); if (c) stickBottom(); });
   $('#input').focus();
 }
 
 function newSession() {
-  S.sid = null; S.msgs = []; localStorage.setItem('woof.sid', ''); S.draft = {}; S.follow = true;
+  // 分頁已滿：新對話直接取代目前分頁（原本那個對話仍然存在側邊欄，不會被刪掉）
+  const t = tab();
+  t.sid = null; t.msgs = []; t.loaded = true; t.top = 0; t.follow = true; t.attach = []; t.draft = {}; t.liveThink = null;
+  localStorage.setItem('woof.sid', '');
   showView('chat');
-  renderSessions(); renderTitle(); renderModelSelect(); renderChat(true); renderComposer(); renderMeter(); renderFiles();
+  renderAll();
+  renderChat(true);
   $('#input').focus();
 }
 
@@ -400,6 +546,7 @@ function descIds(sid) {
   return out;
 }
 function renderSessions() {
+  renderTabbar();
   const q = $('#search').value.trim().toLowerCase();
   const ids = new Set(S.sessions.map((s) => s.id));
   const kids = {};
@@ -483,6 +630,7 @@ $('#sessionList').addEventListener('click', async (e) => {
   const it = e.target.closest('.item'); if (!it) return;
   const sid = it.dataset.sid;
   if (e.target.closest('.del')) return deleteSession(sid);
+  if (e.ctrlKey || e.metaKey) return openInTab(sid);
   openSession(sid);
 });
 async function deleteSession(sid) {
@@ -497,8 +645,10 @@ async function deleteSession(sid) {
   for (const id of gone) { delete S.todos[id]; delete S.planOn[id]; delete S.gate[id]; delete S.live[id]; delete S.usage[id]; delete S.errors[id]; delete S.queue[id]; S.running.delete(id); }
   for (const [k, a] of Object.entries(S.asks)) if (gone.has(a.session_id)) delete S.asks[k];
   for (const [k, a] of Object.entries(S.approvals)) if (gone.has(a.session_id)) delete S.approvals[k];
+  dropTabsOf(gone);
   refreshTasks();
-  if (sid === S.sid) newSession(); else renderSessions();
+  if (!S.tabs.some((t) => t.sid === S.sid)) { const t = tab(); if (t.sid && !t.loaded) loadTab(t).then(renderAll); else renderAll(); }
+  else renderSessions();
 }
 async function exportSession(sid) {
   try {
@@ -2448,7 +2598,7 @@ document.addEventListener('keydown', (e) => {
     else stop();
   }
   if (e.ctrlKey && e.key.toLowerCase() === 'k') { e.preventDefault(); $('#search').focus(); $('#search').select(); }
-  if (e.ctrlKey && e.key.toLowerCase() === 'n') { e.preventDefault(); newSession(); }
+  if (e.ctrlKey && e.key.toLowerCase() === 'n') { e.preventDefault(); newTab(); }
   if (e.ctrlKey && e.key === ',') { e.preventDefault(); openSettings(); }
   if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === 'b') { e.preventDefault(); setSide(document.body.classList.contains('side-off')); }
 });
@@ -5163,9 +5313,11 @@ if (D) {
   try {
     await refreshState();
     await loadSessions();
+    restoreTabs();
+    const cur0 = tab();
+    if (cur0.sid) { await loadTab(cur0); showView('chat'); renderAll(); }
+    else { showView('chat'); renderAll(); renderChat(true); }
     loadWorkdir();
-    const last = localStorage.getItem('woof.sid');
-    if (last && S.sessions.some((s) => s.id === last)) await openSession(last); else newSession();
     refreshTasks();
     loadCtxCap();
     loadDefaultPerm();
