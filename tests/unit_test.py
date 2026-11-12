@@ -309,5 +309,49 @@ class SubagentTerminal(unittest.TestCase):
         self.assertIn("沒有指定寫入範圍", run({"command": "echo"}, ctx(str(scope)))["output"])
 
 
+class EmptyReply(unittest.TestCase):
+    """模型回空內容：先請它用文字回覆一次；還是空就明說；思考用完輸出上限時請它精簡思考。用假的服務商，不連網。"""
+
+    def _run(self, replies):
+        from woof.agent import loop
+        seen = []
+
+        class P:
+            async def stream(self, model, system, messages, tools, effort):
+                seen.append(messages)
+                r = replies.pop(0) if replies else {"content": []}
+                yield {"type": "message", "content": r["content"], "meta": r.get("meta") or {}}
+
+        REG.config = {"models": [{"id": "E", "provider": "fe", "label": "E"}], "default_model": "E"}
+        REG.providers = {"fe": P()}
+        s = store.create_session("E", None, "empty")
+
+        async def emit(ev):
+            pass
+
+        asyncio.run(loop.run_turn(s["id"], [{"type": "text", "text": "嗨"}], emit))
+        return store.get_messages(s["id"]), seen
+
+    def test_nudge_then_text(self):
+        msgs, seen = self._run([{"content": []}, {"content": [{"type": "text", "text": "好的"}]}])
+        self.assertEqual(len(seen), 2)  # 空回覆後再問一次
+        last = msgs[-1]
+        self.assertEqual(last["role"], "assistant")
+        self.assertEqual(last["content"][0]["text"], "好的")
+        self.assertFalse((last.get("meta") or {}).get("empty"))
+
+    def test_still_empty(self):
+        msgs, seen = self._run([{"content": []}, {"content": []}])
+        self.assertEqual(len(seen), 2)  # 只追問一次
+        self.assertTrue(msgs[-1]["meta"].get("empty"))
+        self.assertIn("沒有給出文字回覆", msgs[-1]["content"][0]["text"])
+
+    def test_thinking_used_up_output(self):
+        cut = {"content": [], "meta": {"stop_reason": "length"}}
+        msgs, seen = self._run([dict(cut), dict(cut)])
+        self.assertEqual(len(seen), 2)  # 請它精簡思考重來一次
+        self.assertIn("輸出上限", msgs[-1]["content"][0]["text"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
