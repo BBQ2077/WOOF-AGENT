@@ -39,6 +39,8 @@ class Perms(unittest.TestCase):
 
     def test_danger_and_hardline(self):
         self.assertEqual(self.d("auto", "terminal", {"command": "rm -rf build"}), "ask")
+        self.assertEqual(self.d("auto", "terminal", {"command": "rm -f -R build"}), "ask")
+        self.assertEqual(self.d("auto", "terminal", {"command": "rm -f tmp.py"}), "auto")  # 刪單一檔案不是遞迴刪除
         self.assertEqual(self.d("auto", "terminal", {"command": "format c:"}), "deny")
         self.assertEqual(self.d("auto", "terminal", {"command": "sudo shutdown now"}), "deny")
 

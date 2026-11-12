@@ -56,7 +56,7 @@ TOOL_CAT = {
 
 # 危險指令：自動模式下改成先問
 DANGER = [
-    (r"\brm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+)+", "rm -rf 遞迴刪除"),
+    (r"\brm\s+(?:-{1,2}[\w-]+\s+)*(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\b", "rm -rf 遞迴刪除"),
     (r"\b(del|erase)\s+.*(/s|/q)", "del /s 大量刪除"),
     (r"\b(rd|rmdir)\s+.*?/s", "rmdir /s 刪除資料夾"),
     (r"Remove-Item\b.*-Recurse", "Remove-Item -Recurse 遞迴刪除"),
