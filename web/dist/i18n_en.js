@@ -1892,6 +1892,7 @@ window.WOOF_EN = {
 "想一下": "Think",
 "一次講多少": "How long its lines are",
 "最多 {0} tokens。太長會變成在演講。": "Up to {0} tokens. Much longer and it turns into a speech.",
+"最多 {0} tokens；想讓牠講多一點就往上拉。": "Up to {0} tokens — pull it right if you want it to say more.",
 "多久看一次": "How often it looks",
 "每 {0} 秒瞄一眼開著的對話。沒有新內容不會叫模型，所以放著不會一直花錢。": "Glances at the open chat every {0}s. No model call when nothing is new, so leaving it on costs nothing.",
 "每次看多少": "How much it sees",
@@ -1925,4 +1926,8 @@ window.WOOF_EN = {
 "編輯寵物檔": "Edit pet file",
 "寵物設定": "Pet settings",
 "建議回覆": "Suggested replies",
+"跟{0}說話…": "Talk to {0}…",
+"角色": "Character",
+"每個角色有自己的檔、自己的記憶、自己的表情圖，切換就是換一個人陪你。": "Each character has its own file, its own memory and its own faces. Switching swaps who keeps you company.",
+"大肥魚": "Fat Fish",
 };

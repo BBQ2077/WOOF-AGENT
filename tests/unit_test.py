@@ -1277,6 +1277,26 @@ class Pet(unittest.TestCase):
             self.assertIn(f, system)
         self.assertIn("say", system)
 
+    def test_parse_not_json_flagged(self):
+        p = self.up()
+        self.assertFalse(p.parse("汪！過來啦")["_ok"])
+        self.assertTrue(p.parse('{"say":"好","face":"gentle"}')["_ok"])
+
+    def test_chars_have_persona_and_sprites(self):
+        from woof.config import WEB_DIST
+
+        p = self.up()
+        p._ensure()
+        for cid in p.CHARS:
+            self.assertTrue((p.CHARS_DIR / (cid + ".md")).exists(), cid)
+            for f in p.FACES:
+                self.assertTrue((WEB_DIST / "pet" / cid / (f + ".webp")).exists(), f"{cid}/{f}")
+
+    def test_clean_accepts_char(self):
+        p = self.up()
+        self.assertEqual(p.clean({"char": "fish"})["char"], "fish")
+        self.assertNotIn("char", p.clean({"char": "cat"}))
+
     def test_parse_sug(self):
         p = self.up()
         got = p.parse('{"say":"去睡吧","face":"gentle","mood":"心疼","sug":["好，晚安","你也早點睡"]}')
@@ -1292,12 +1312,10 @@ class Pet(unittest.TestCase):
 
 
     def test_faces_have_images(self):
-        from woof.config import WEB_DIST
-
         p = self.up()
-        for f in p.FACES:
-            ok = (p.TILES / (f + ".webp")).exists() or (WEB_DIST / "pet" / (f + ".webp")).exists()
-            self.assertTrue(ok, f)
+        for cid in p.CHARS:
+            for f in p.FACES:
+                self.assertIsNotNone(p.sprite(f, cid), f"{cid}/{f}")
 
 
 if __name__ == "__main__":

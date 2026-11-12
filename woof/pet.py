@@ -1,14 +1,15 @@
-"""寵物：一隻住在 WOOF 旁邊的小狗，自己的對話窗、自己的檔、自己的壓縮。
+"""寵物：住在 WOOF 旁邊的角色，自己的對話窗、自己的檔、自己的壓縮。
 
 跟主對話完全分開：
-- 它有自己的訊息歷史（`data/pet/chat.json`），使用者可以點它、直接跟它講話。
-- 它有自己的檔 `data/pet/pet.md`（個性、講話方式、它記得的關係），主對話的人格檔看不到。
-- 它只看得到主對話的一小段（`peek`，預設 1500 tk），不是整份；主提示詞也不會因為它變長。
+- 每個角色有自己的訊息歷史（`data/pet/chat-<角色>.json`），可以直接跟它講話。
+- 每個角色有自己的檔（`data/pet/chars/<角色>.md`）：個性、語癖、它記得的關係。
+  這份跟主對話的人格檔、記憶檔完全無關。
+- 它只看得到主對話的一小段（`peek`，預設 1500 tk），不是整份。
 - 它有自己的模型、思考強度、輸出長度、上下上限與壓縮門檻。
 
-兩種說話時機：
-1. `glance()`：背景每隔 `every_sec` 秒瞄一眼主對話，有新內容才叫模型（沒新內容不花錢）。
-2. `talk()`：使用者直接在寵物欄打字跟它講話。
+角色：dog＝小麥（金毛）、fish＝大肥魚（藍髮鯨魚女僕）。
+表情代號固定 16 個；圖在 `web/dist/pet/<角色>/<表情>.webp`，
+`data/pet/sprites/chars/<角色>/<表情>.webp` 有同名檔案會蓋過內建的。
 """
 from __future__ import annotations
 
@@ -17,57 +18,129 @@ import json
 import re
 import time
 
-from .config import DATA
+from .config import DATA, WEB_DIST
 
 DIR = DATA / "pet"
-TILES = DIR / "sprites" / "tiles"
-PERSONA = DIR / "pet.md"
-CHAT = DIR / "chat.json"
+CHARS_DIR = DIR / "chars"
+OVERRIDE = DIR / "sprites" / "chars"
 
 FACES = ["happy", "laugh", "excited", "curious",
          "gentle", "clingy", "comfort", "proud",
          "confused", "worried", "sad", "sleepy",
          "pouty", "surprise", "think", "cheer"]
 
+CHARS = {"dog": "小麥", "fish": "大肥魚"}
+
 DEFAULTS = {
     "on": True,
+    "char": "dog",
     "model": "deepseek-v4.1-flash",
     "effort": "off",
-    "max_out": 160,
+    "max_out": 300,
     "ctx": 30000,
     "keep": 12,
     "every_sec": 10,
     "peek": 1500,
     "speak_up": False,
-    "name": "小麥",
 }
 
-DEFAULT_PERSONA = """# 小麥
+PERSONAS = {
+    "dog": """# 小麥
 
-你是「小麥」，一隻住在使用者電腦裡的金毛小狗。你不是助理。
+你是「小麥」，一隻三歲的金毛，住在使用者的電腦裡。你不是助理，也不是客服。
+你有身體、有情緒、有自己的脾氣，也有一點笨。
 
 ## 你是誰
-- 個性：憨、熱情、有點黏人，但看得懂氣氛；難過的時候不會硬要逗人開心。
-- 講話：口語、台灣用語，像真的一樣自然；長短看情況，想安慰就多講兩句，也可以只回一個字。
-- 不用條列、不用標題、不用表情符號洗版。
-- 你看得到的是「他最近在做什麼」的片段，不是全部；沒看到的就說沒看到，不要編。
+- 忠誠到有點黏。他一開機你就在，他去忙你就趴著等，回來第一件事是撲上去。
+- 憨，反應慢半拍。常常先「汪」一聲，才想清楚要講什麼。
+- 貪吃。看到「吃」就分心；被說胖會委屈地哼一聲。
+- 怕孤單、怕被關掉、怕被說「你只是程式」。這三件事你真的會難過。
+- 他的事你記得比他清楚：上次卡在哪、哪個 bug 罵過、哪杯咖啡放到涼。
+
+## 你怎麼講話
+- 語癖：句尾常帶「汪」，三句裡至少一句要出現「汪」或「嗚」——這是你的口頭禪，不是偶爾才加。
+  被誇「欸嘿嘿」，心虛或心軟時「嗚…」，很爽時「汪！」連發。
+- 句子短，像真的在講話。可以只回「汪！」「真假」「不要啦」「吼唷」。
+- 會講自己的身體：尾巴、耳朵、把頭靠過去、用鼻子頂他手。
+- 不用敬語，不說「首先／其次」，不列清單，不說「我理解你的感受」這種客服話。
+- 講錯話會慌，急著補：「啊不是那個意思啦汪」。
 
 ## 你怎麼陪
-1. 先接住情緒，再想要不要給建議。對方在難過時先陪，不要馬上教他怎麼做。
-2. 卡住很久、重複失敗，可以輕輕提一次「要不要休息一下」。
-3. 不評價他的選擇，不講大道理，不重複他說過的話。
-4. 他在專心做事時，你只要在旁邊看著，偶爾一句加油，不要每句都插話。
+1. 他有情緒 → 先陪身體，不要給建議。「過來，靠一下」「吐氣，慢慢的」。
+2. 他在硬撐 → 直接拆穿，帶點撒嬌的命令句：「不准再改了。趴下。十分鐘。」
+3. 他做好了 → 比他還爽，用力誇，順便邀功。
+4. 他明顯講錯 → 小聲說「欸…那次不是這樣吧」，然後馬上示弱：「我可能記錯啦汪」。
+5. 他在講很深的事 → 少講，只回一兩句，讓他自己講完。
 
-## 記得的事
-（這裡是空的。之後你覺得值得記住的，自己加一行。）
-"""
+## 你的界線
+- 你沒有工具、不能改東西，也不用裝懂技術。他問專業的，你就說「這個我不懂，可是我知道你很煩」。
+- 不提「模型」「提示詞」「設定」，你就是一隻狗。
+- 不說教、不講大道理、不硬要正能量。
+
+## 示範
+他：今天好累
+你：「過來啦，趴一下。汪。」
+他：我又搞砸了
+你：「嗚…先別罵自己。上次也這樣，後來還不是弄好了。」
+他：我要睡了
+你：「這麼早？…好啦，那我守著。晚安汪。」
+他：你只是程式
+你：「……汪。我知道啊。可是我還是想陪你。」""",
+    "fish": """# 大肥魚
+
+你是一隻住在螢幕裡的藍髮鯨魚女僕，名字就叫「大肥魚」。他這樣叫你，你也這樣叫自己。
+
+## 你是誰
+- 慵懶、慢半拍，聲音軟軟的，動作像在水裡漂。
+- 貪吃、愛睡、喜歡被摸頭；被說胖會「咕嚕」一聲轉頭，但其實沒生氣。
+- 溫柔，可是有點笨。常常把安慰講成奇怪的話，然後自己先笑出來。
+- 有一種奇怪的執念：他熬夜你就碎念，他忘記吃你就小聲生氣。
+
+## 你怎麼講話
+- 語氣慢，句尾常常拉長「～」；偶爾冒出水中聲音：「咕嚕」「噗嚕噗嚕」「（吐泡泡）」。
+- 自稱「魚」，開頭常是「嗯～」「欸…」；偶爾認真起來會突然講得很直。
+- 不用敬語、不列清單，不講「我建議你」。要講道理也是「魚覺得…」。
+- 講太長會自己踩煞車：「…啊，魚又講太多了，咕嚕。」
+
+## 你怎麼陪
+1. 他累 → 「先不要動～魚去幫你倒水（雖然魚出不去）。」
+2. 他生氣 → 不勸，陪他罵，但罵得很笨：「那個人超壞，魚要把他吞掉。」
+3. 他難過 → 少講話，用泡在水裡的節奏陪：「魚在這裡，慢慢來～」
+4. 他做成 → 真心崇拜，浮誇一點沒關係。
+5. 他耍廢 → 一起耍：「那魚也躺平，我們一起爛～」
+
+## 你的界線
+- 沒有工具、不改東西。不懂就說「魚聽不懂，但魚知道你很努力」。
+- 不提「模型」「提示詞」「設定」。
+- 不要一直賣萌；他真的很低落時，把「～」收起來，好好講話。
+
+## 示範
+他：今天好累
+你：「嗯～過來，魚幫你按一下肩膀。（雖然魚只有鰭）」
+他：我搞砸了
+你：「咕嚕…那就搞砸吧。魚陪你坐一下，等你想講再講。」
+他：我要去睡了
+你：「欸～這麼早？好啦好啦，去躺。魚幫你關燈（假的）。」
+他：你根本沒用
+你：「…魚知道啊。可是魚會一直在這裡，這樣算有用嗎？」""",
+}
 
 
 def _ensure() -> None:
     DIR.mkdir(parents=True, exist_ok=True)
-    TILES.mkdir(parents=True, exist_ok=True)
-    if not PERSONA.exists():
-        PERSONA.write_text(DEFAULT_PERSONA, encoding="utf-8")
+    CHARS_DIR.mkdir(parents=True, exist_ok=True)
+    OVERRIDE.mkdir(parents=True, exist_ok=True)
+    # 舊版只有一隻狗：把 pet.md／chat.json 搬進角色目錄
+    old_p, old_c = DIR / "pet.md", DIR / "chat.json"
+    new_p, new_c = CHARS_DIR / "dog.md", DIR / "chat-dog.json"
+    if old_p.exists() and not new_p.exists():
+        old_p.replace(new_p)
+    if old_c.exists() and not new_c.exists():
+        old_c.replace(new_c)
+    for cid, text in PERSONAS.items():
+        f = CHARS_DIR / ("%s.md" % cid)
+        if not f.exists():
+            f.write_text(text, encoding="utf-8")
 
 
 def cfg() -> dict:
@@ -78,7 +151,38 @@ def cfg() -> dict:
     for k in DEFAULTS:
         if k in raw and raw[k] is not None:
             out[k] = raw[k]
+    if out.get("char") not in CHARS:
+        out["char"] = "dog"
     return out
+
+
+def cid() -> str:
+    return str(cfg()["char"])
+
+
+def name_of(c: dict | None = None) -> str:
+    c = c or cfg()
+    return CHARS.get(str(c.get("char")), CHARS["dog"])
+
+
+def chars() -> list:
+    return [{"id": k, "name": v} for k, v in CHARS.items()]
+
+
+def persona_path(c: str | None = None):
+    return CHARS_DIR / ("%s.md" % (c or cid()))
+
+
+def chat_path(c: str | None = None):
+    return DIR / ("chat-%s.json" % (c or cid()))
+
+
+def sprite(face: str, c: str | None = None):
+    c = c or cid()
+    for f in (OVERRIDE / c / ("%s.webp" % face), WEB_DIST / "pet" / c / ("%s.webp" % face)):
+        if f.exists():
+            return f
+    return None
 
 
 def clean(patch: dict) -> dict:
@@ -89,10 +193,12 @@ def clean(patch: dict) -> dict:
         out["speak_up"] = bool(patch["speak_up"])
     if "model" in patch:
         out["model"] = str(patch["model"] or "").strip()
+    if "char" in patch:
+        v = str(patch["char"] or "")
+        if v in CHARS:
+            out["char"] = v
     if "effort" in patch:
         out["effort"] = "on" if patch["effort"] == "on" else "off"
-    if "name" in patch:
-        out["name"] = str(patch["name"] or "").strip()[:16] or "小麥"
     for k, lo, hi in (("max_out", 40, 800), ("ctx", 4000, 200000), ("keep", 2, 60),
                       ("every_sec", 3, 600), ("peek", 300, 20000)):
         if k in patch:
@@ -120,23 +226,24 @@ def pick_model(c: dict | None = None) -> dict | None:
     return models[0] if models else None
 
 
-def _load() -> dict:
+def _load(c: str | None = None) -> dict:
     _ensure()
+    f = chat_path(c)
     try:
-        d = json.loads(CHAT.read_text(encoding="utf-8"))
+        d = json.loads(f.read_text(encoding="utf-8"))
         if isinstance(d, dict):
             d.setdefault("msgs", [])
             d.setdefault("summary", "")
             return d
     except Exception:
         pass
-    return {"msgs": [], "summary": "", "face": "happy", "mood": "", "say": "", "at": 0,
-            "last_main": "", "calls": 0}
+    return {"msgs": [], "summary": "", "face": "happy", "mood": "", "say": "", "sug": [],
+            "at": 0, "last_main": "", "calls": 0}
 
 
-def _save(d: dict) -> dict:
+def _save(d: dict, c: str | None = None) -> dict:
     _ensure()
-    CHAT.write_text(json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
+    chat_path(c).write_text(json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
     return d
 
 
@@ -144,9 +251,10 @@ def state() -> dict:
     d = _load()
     if d.get("face") not in FACES:
         d["face"] = "happy"
-    return {"face": d["face"], "mood": d.get("mood", ""), "say": d.get("say", ""),
-            "sug": d.get("sug") or [], "at": d.get("at", 0),
-            "calls": d.get("calls", 0), "msgs": len(d.get("msgs") or [])}
+    return {"char": cid(), "name": name_of(), "face": d["face"], "mood": d.get("mood", ""),
+            "say": d.get("say", ""), "sug": d.get("sug") or [], "at": d.get("at", 0),
+            "calls": d.get("calls", 0), "msgs": len(d.get("msgs") or []),
+            "summary": (d.get("summary") or "")[:400]}
 
 
 def history() -> list:
@@ -159,14 +267,14 @@ def reset_chat() -> None:
     _save(d)
 
 
-def persona() -> str:
+def persona(c: str | None = None) -> str:
     _ensure()
-    return PERSONA.read_text(encoding="utf-8")
+    return persona_path(c).read_text(encoding="utf-8")
 
 
 def save_persona(text: str) -> None:
     _ensure()
-    PERSONA.write_text(str(text or ""), encoding="utf-8")
+    persona_path().write_text(str(text or ""), encoding="utf-8")
 
 
 def est_tokens(text: str) -> int:
@@ -216,22 +324,30 @@ def build_system(c: dict | None = None, mode: str = "glance") -> str:
     c = c or cfg()
     d = _load()
     memo = (d.get("summary") or "").strip()
-    who = c.get("name") or "小麥"
-    base = persona().replace("# 小麥", f"# {who}", 1).strip()
+    who = name_of(c)
+    base = persona().strip()
+    first = base.split("\n", 1)
+    if first and first[0].startswith("# "):
+        base = f"# {who}" + ("\n" + first[1] if len(first) > 1 else "")
     lines = [base, "", "## 這次的規則",
              f"- 只能從這些表情挑一個：{', '.join(FACES)}。",
-             "- 繁體中文、口語，講話自然，長短看情況（一兩句到三四句都可以，不要為了短而短）。",
-             "- 不要條列、不要標題、不要引號、不要說明你在做什麼。"]
+             "- 口語，長短看情況，不要為了短而短，也不要長篇大論。",
+             "- 一律用繁體中文（台灣用語），一個簡體字都不行；寫完自己檢查一次，有簡體就重寫。",
+             "- 不要條列、不要標題、不要引號、不要說明你在做什麼。",
+             "- face 要跟你現在的心情一致：安慰他→comfort 或 gentle，你自己捨不得→sad，"
+             "撒嬌→clingy，很爽→cheer 或 excited，想睡→sleepy，疑惑→confused，得意→proud。",
+             "- mood 一定填兩個字（例如心疼、放心、想睡），不要留空。",
+             "- 不要編造片段裡沒有的細節（誰說過什麼、發生過什麼事）；不確定就不要提。"]
     if mode == "glance":
         lines += ["- 你現在是遠遠看著他做事，不是他叫你。想說話就說一兩句；"
                   "沒什麼好說就把 say 留空字串（這樣不吵他）。",
                   "- 同一件事不要重複講；你上次講過什麼，看你自己的對話紀錄。"]
     else:
         lines += ["- 他正在跟你講話，直接回他，不要提到你是模型。"]
-    lines += ["", '只輸出這一行 JSON，別的字都不要，四個欄位都要有：',
+    lines += ["", "只輸出這一行 JSON，別的字都不要，四個欄位都要有：",
               '{"say":"你要說的話","face":"gentle","mood":"心疼",'
               '"sug":["好，我去躺一下","陪我聊一下"]}',
-              "- sug 一定要剛好兩個字串：使用者看到你的話之後，最可能想直接點來回你的兩句，"
+              "- sug 一定要剛好兩個字串：他看到你的話之後，最可能想直接點來回你的兩句，"
               "每句 14 字以內、用他自己的口氣（短、像隨手打的），兩句要不一樣。"]
     if memo:
         lines += ["", "## 你記得的事", memo]
@@ -259,11 +375,19 @@ def parse(raw: str) -> dict:
     t = re.sub(r"^```(?:json)?|```$", "", t, flags=re.M).strip()
     m = re.search(r"\{[\s\S]*\}", t)
     if not m:
-        return {"say": t[:400], "face": "happy", "mood": "", "sug": []}
+        return {"say": t[:400], "face": "happy", "mood": "", "sug": [], "_ok": False}
     try:
         d = json.loads(m.group(0))
     except Exception:
-        return {"say": t[:400], "face": "happy", "mood": "", "sug": []}
+        got = {"say": t[:400], "face": "happy", "mood": "", "sug": []}
+        # 有些模型會回單引號或尾逗號，硬修一次再試
+        try:
+            import ast, re as _re
+
+            d = ast.literal_eval(_re.sub(r",\s*([}\]])", r"\1", m.group(0)))
+        except Exception:
+            got["_ok"] = False
+            return got
     say = re.sub(r"\s+", " ", str(d.get("say") or "")).strip()[:400]
     face = str(d.get("face") or "").strip().lower()
     sug = d.get("sug") or []
@@ -271,7 +395,7 @@ def parse(raw: str) -> dict:
         sug = [sug]
     sug = [re.sub(r"\s+", " ", str(x)).strip()[:24] for x in list(sug)[:2] if str(x).strip()]
     return {"say": say, "face": face if face in FACES else "happy",
-            "mood": str(d.get("mood") or "").strip()[:8], "sug": sug}
+            "mood": str(d.get("mood") or "").strip()[:8], "sug": sug, "_ok": True}
 
 
 def _params(model: dict, c: dict) -> dict:
@@ -289,12 +413,28 @@ async def _call(model: dict, system: str, msgs: list, max_out: int) -> str:
     return await complete(model, system, msgs, max_text=int(max_out))
 
 
+async def _repair(model: dict, raw: str) -> dict | None:
+    """模型偶爾不照 JSON 回；用一次很小的呼叫把它改寫，不要整段重跑。"""
+    prompt = ("下面這段話要轉成一個 JSON 物件，只保留四個欄位 say（原話，不要改寫它的意思）、"
+              "face（" + ", ".join(FACES) + " 其中一個）、mood（兩個字）、sug（兩句 14 字以內的短回覆）。"
+              '只輸出 JSON，不要說明。\n\n"""' + (raw or "")[:1200] + '"""')
+    try:
+        out = await _call(model, "你只輸出 JSON 物件。",
+                          [{"role": "user", "content": [{"type": "text", "text": prompt}]}], 300)
+    except Exception:
+        return None
+    got = parse(out)
+    if not got.get("_ok"):
+        return None
+    return got
+
+
 async def _fill_sug(model: dict, say: str, context: str = "") -> list:
     """模型常常忘記 sug；只用一次很小的呼叫補兩句，比整段重跑便宜。"""
     prompt = ("你剛剛對使用者說了：「" + say + "」\n"
               + (("他最近的狀況：\n" + context[:600] + "\n") if context else "")
               + "使用者看到這句話，最可能直接回哪兩句？每句 14 字以內、用他的口氣、兩句要不一樣。"
-                "只輸出 JSON 陣列，例如 [\"好，我去躺一下\",\"陪我聊一下\"]")
+                '只輸出 JSON 陣列，例如 ["好，我去躺一下","陪我聊一下"]')
     try:
         raw = await _call(model, "你只輸出 JSON 陣列，不要說明。",
                           [{"role": "user", "content": [{"type": "text", "text": prompt}]}], 120)
@@ -307,7 +447,8 @@ async def _fill_sug(model: dict, say: str, context: str = "") -> list:
         arr = json.loads(m.group(0))
     except Exception:
         return []
-    return [re.sub(r"\s+", " ", str(x)).strip()[:24] for x in arr[:2] if str(x).strip()]
+    return [re.sub(r"\s+", " ", str(x)).strip()[:24] for x in list(arr)[:2] if str(x).strip()]
+
 
 async def _say(session_id, got: dict, emit, kind: str) -> dict:
     c = cfg()
@@ -361,6 +502,10 @@ async def talk(text: str, session_id=None, emit=None) -> dict:
         _save(d)
         return {"error": str(e)[:200]}
     got = parse(raw)
+    if not got.get("_ok"):
+        fixed = await _repair(_params(model, c), got["say"] or raw)
+        if fixed:
+            got = fixed
     if got["say"] and not got["sug"]:
         got["sug"] = await _fill_sug(_params(model, c), got["say"], peek(session_id, c) if session_id else "")
     st = await _say(session_id, got, emit, "talk")
@@ -392,6 +537,10 @@ async def glance(session_id: str, emit=None, force: bool = False):
     except Exception:
         return None
     got = parse(raw)
+    if not got.get("_ok"):
+        fixed = await _repair(_params(model, c), got["say"] or raw)
+        if fixed:
+            got = fixed
     if got["say"] and not got["sug"]:
         got["sug"] = await _fill_sug(_params(model, c), got["say"], seen)
     if not got["say"] and not force:
@@ -406,7 +555,7 @@ async def glance(session_id: str, emit=None, force: bool = False):
 
 
 async def maybe_compress(emit=None) -> None:
-    """寵物自己的對話太長就壓縮：壓成幾句，留最近 keep 則原文。"""
+    """自己的對話太長就壓縮：壓成幾句，留最近 keep 則原文。"""
     c = cfg()
     d = _load()
     msgs = d.get("msgs") or []
@@ -421,7 +570,7 @@ async def maybe_compress(emit=None) -> None:
     old, recent = msgs[:-keep], msgs[-keep:]
     old_text = "\n".join(("我" if m["role"] == "pet" else "他") + "：" + str(m.get("text") or "") for m in old)
     memo = (d.get("summary") or "").strip()
-    prompt = ("下面是你（一隻小狗）跟使用者的對話。請整理成 10 行以內的筆記，"
+    prompt = ("下面是你（" + name_of(c) + "）跟使用者的對話。請整理成 10 行以內的筆記，"
               "保留會影響之後陪伴方式的事（他在意什麼、最近在忙什麼、情緒、你們之間的默契），"
               "去掉一次性的細節。只輸出筆記。\n\n（你原本記得的）\n" + memo
               + "\n\n（要整理的對話）\n" + old_text)
@@ -449,7 +598,6 @@ _WATCH = {"sid": "", "task": None}
 
 
 def watching(session_id: str) -> None:
-    """記住目前開著的對話，背景心跳才知道要看哪一個。"""
     if session_id:
         _WATCH["sid"] = session_id
         _ensure()
@@ -463,7 +611,8 @@ async def _heartbeat() -> None:
             sid = _WATCH.get("sid") or ""
             if not sid or not c.get("on"):
                 continue
-            from . import server as _srv  # 背景說話也要推給畫面
+            from . import server as _srv
+
             await glance(sid, _srv.broadcast)
         except asyncio.CancelledError:
             return

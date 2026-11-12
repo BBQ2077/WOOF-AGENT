@@ -5964,7 +5964,8 @@ const PET = { cfg: null, st: { face: 'happy', say: '', mood: '', at: 0 }, hist: 
   busy: false, model: '', label: '' };
 
 function petSprite(face) {
-  return `${BASE}/api/pet/sprite/${encodeURIComponent(face || 'happy')}?token=${encodeURIComponent(TOKEN)}`;
+  const ch = (PET.st && PET.st.char) || (PET.cfg && PET.cfg.char) || 'dog';
+  return `${BASE}/api/pet/sprite/${encodeURIComponent(face || 'happy')}?char=${encodeURIComponent(ch)}&token=${encodeURIComponent(TOKEN)}`;
 }
 
 function petPaint() {
@@ -5980,7 +5981,9 @@ function petPaint() {
   const mood = $('#petMood');
   if (mood) mood.textContent = (PET.st && PET.st.mood) || '';
   const nm = $('#petName');
-  if (nm) nm.textContent = (PET.cfg && PET.cfg.name) || '小麥';
+  if (nm) nm.textContent = (PET.st && PET.st.name) || '小麥';
+  const inp = $('#petIn');
+  if (inp) inp.placeholder = `跟${(PET.st && PET.st.name) || '小麥'}說話…`;
   const sb = $('#petSug');
   if (sb) {
     const sug = (PET.st && PET.st.sug) || [];
@@ -6003,6 +6006,7 @@ async function petLoad() {
     const d = await api('GET', '/api/pet');
     PET.cfg = d.cfg; PET.st = d.state || PET.st; PET.faces = d.faces || [];
     PET.model = d.model; PET.label = d.label; PET.hist = d.history || [];
+    PET.chars = d.chars || [];
     petPaint();
   } catch (e) { /* 後端還沒好就算了，下次再讀 */ }
 }
@@ -6049,7 +6053,9 @@ async function petPoke() {
 async function petSave(patch) {
   try {
     const d = await api('PUT', '/api/pet', patch);
-    PET.cfg = d.cfg; PET.st = d.state || PET.st;
+    PET.cfg = d.cfg; PET.st = d.state || PET.st; PET.chars = d.chars || PET.chars;
+    PET.hist = d.history || [];
+    petPaint();
     return d;
   } catch (e) { notify('error', '存不起來', e.message); return null; }
 }
@@ -6120,13 +6126,13 @@ function renderPetSec(box) {
     box.innerHTML = `<div class="card">
       <div class="frow"><div><b>開著</b><small>關掉就不會看對話、也不會講話；牠記得的事還留著。</small></div>
         <div class="fctl"><span class="sw${c.on ? ' on' : ''}" data-petf="on"></span></div></div>
-      <div class="frow"><div><b>名字</b><small>顯示在寵物欄。</small></div>
-        <input data-petf="name" value="${esc(c.name)}" maxlength="16"></div>
+      <div class="frow"><div><b>角色</b><small>每個角色有自己的檔、自己的記憶、自己的表情圖，切換就是換一個人陪你。</small></div>
+        <div class="fctl"><select data-petf="char">${(d.chars || []).map((x) => `<option value="${esc(x.id)}"${c.char === x.id ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}</select></div></div>
       <div class="frow"><div><b>模型</b><small>牠用自己的模型，不跟主對話共用。DS 這種便宜的就夠。</small></div>
         <div class="fctl"><select data-petf="model">${models.map((m) => `<option value="${esc(m.id)}"${c.model === m.id ? ' selected' : ''}>${esc(m.label || m.id)}</option>`).join('')}</select></div></div>
       <div class="frow"><div><b>思考</b><small>先想一想再開口。寵物通常不用，會慢一點。</small></div>
         <div class="seg">${[['off', '不用'], ['on', '想一下']].map(([v, n]) => `<b class="${c.effort === v ? 'on' : ''}" data-petseg="${v}">${n}</b>`).join('')}</div></div>
-      <div class="frow"><div><b>一次講多少</b><small>最多 ${c.max_out} tokens。太長會變成在演講。</small></div>
+      <div class="frow"><div><b>一次講多少</b><small>最多 ${c.max_out} tokens；想讓牠講多一點就往上拉。</small></div>
         <input type="range" min="60" max="600" step="20" value="${c.max_out}" data-petf="max_out"></div>
       <div class="frow"><div><b>多久看一次</b><small>每 ${c.every_sec} 秒瞄一眼開著的對話。沒有新內容不會叫模型，所以放著不會一直花錢。</small></div>
         <input type="number" min="3" max="600" value="${c.every_sec}" data-petf="every_sec"></div>
@@ -6168,7 +6174,7 @@ function renderPetSec(box) {
       const el = e.target.closest('[data-petf]');
       if (!el) return;
       const k = el.dataset.petf;
-      if (['name', 'model', 'max_out', 'every_sec', 'peek', 'ctx'].includes(k)) {
+      if (['char', 'model', 'max_out', 'every_sec', 'peek', 'ctx'].includes(k)) {
         petSave({ [k]: el.value }).then(() => renderPetSec(box));
       }
     };

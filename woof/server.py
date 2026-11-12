@@ -703,7 +703,7 @@ async def pet_get():
     from . import pet
 
     m = pet.pick_model()
-    return {"cfg": pet.cfg(), "state": pet.state(), "faces": pet.FACES,
+    return {"cfg": pet.cfg(), "state": pet.state(), "faces": pet.FACES, "chars": pet.chars(),
             "model": (m or {}).get("id"), "label": (m or {}).get("label"),
             "history": pet.history()[-40:]}
 
@@ -720,7 +720,7 @@ async def pet_put(body: dict):
     REG.config["pet"] = cur
     m = pet.pick_model()
     await broadcast({"type": "pet", "pet": pet.state()})
-    return {"cfg": pet.cfg(), "state": pet.state(), "faces": pet.FACES,
+    return {"cfg": pet.cfg(), "state": pet.state(), "faces": pet.FACES, "chars": pet.chars(),
             "model": (m or {}).get("id"), "label": (m or {}).get("label"),
             "history": pet.history()[-40:]}
 
@@ -779,17 +779,15 @@ async def pet_file_put(body: dict):
 
 
 @app.get("/api/pet/sprite/{face}")
-async def pet_sprite(face: str):
+async def pet_sprite(face: str, char: str | None = None):
     from fastapi.responses import FileResponse
 
     from . import pet
 
     if face not in pet.FACES:
         raise HTTPException(404)
-    f = pet.TILES / f"{face}.webp"
-    if not f.exists():  # 沒有自己的圖就用程式內建的那一套
-        f = WEB_DIST / "pet" / f"{face}.webp"
-    if not f.exists():
+    f = pet.sprite(face, char)
+    if not f:
         raise HTTPException(404)
     return FileResponse(str(f), media_type="image/webp")
 
