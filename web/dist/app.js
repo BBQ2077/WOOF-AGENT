@@ -5963,6 +5963,9 @@ if (PANE2) {
 const PET = { cfg: null, st: { face: 'happy', say: '', mood: '', at: 0 }, hist: [], faces: [],
   busy: false, model: '', label: '' };
 
+document.addEventListener('input', (e) => {
+  if (e.target && e.target.id === 'petIn') petGrow();
+});
 function petSprite(face) {
   const ch = (PET.st && PET.st.char) || (PET.cfg && PET.cfg.char) || 'dog';
   return `${BASE}/api/pet/sprite/${encodeURIComponent(face || 'happy')}?char=${encodeURIComponent(ch)}&token=${encodeURIComponent(TOKEN)}`;
@@ -5989,7 +5992,10 @@ function petPaint() {
     const sug = (PET.st && PET.st.sug) || [];
     const quick = (PET.cfg && PET.cfg.quick) || [];
     sb.innerHTML = (sug.length
-      ? `<div class="sugrow model">${sug.map((x) => `<button class="sugbtn" data-pet="sug" data-say="${esc(x)}">${esc(x)}</button>`).join('')}</div>`
+      ? `<div class="sugrow model">${sug.map((x) => {
+        const t = x.length > 40 ? `${x.slice(0, 40)}…` : x;
+        return `<button class="sugbtn" data-pet="sug" data-say="${esc(x)}">${esc(t)}</button>`;
+      }).join('')}</div>`
       : '')
       + (quick.length
         ? `<div class="sugrow quick">${quick.map((x) => `<button class="sugbtn fix" data-pet="sug" data-say="${esc(x)}">${esc(x)}</button>`).join('')}</div>`
@@ -6021,12 +6027,19 @@ function petEvent(p) {
   petPaint();
 }
 
+function petGrow() {
+  const inp = $('#petIn');
+  if (!inp) return;
+  inp.style.height = 'auto';
+  inp.style.height = `${Math.min(inp.scrollHeight || 44, 132)}px`;
+}
+
 async function petSay(forced) {
   const inp = $('#petIn');
   if (!inp || PET.busy) return;
   const text = String(forced || inp.value).trim();
   if (!text) return;
-  PET.busy = true; inp.value = ''; inp.disabled = true;
+  PET.busy = true; inp.value = ''; petGrow(); inp.disabled = true;
   PET.hist.push({ role: 'user', text });
   petPaint();
   try {
@@ -6039,7 +6052,7 @@ async function petSay(forced) {
     notify('error', '牠沒聽到', e.message);
     inp.value = text;
   } finally {
-    PET.busy = false; inp.disabled = false;
+    PET.busy = false; inp.disabled = false; petGrow();
     if (document.activeElement !== inp) inp.focus();
   }
 }
@@ -6115,7 +6128,7 @@ $('#panePet').addEventListener('click', (e) => {
   if (k === 'poke') petPoke();
 });
 $('#panePet').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && e.target.id === 'petIn') { e.preventDefault(); petSay(); }
+  if (e.key === 'Enter' && e.target.id === 'petIn' && !e.shiftKey && !e.isComposing) { e.preventDefault(); petSay(); }
 });
 
 // ---- 設定 → 寵物
@@ -6127,27 +6140,40 @@ function renderPetSec(box) {
     const rows = [
       ['on', '開著', '關掉就不會看對話、也不會講話；牠記得的事還留著。'],
     ];
-    box.innerHTML = `<div class="card">
+    const charCard = (x) => `<div class="charc${c.char === x.id ? ' on' : ''}" data-petchar="${esc(x.id)}">
+        <img src="${BASE}/api/pet/sprite/happy?char=${encodeURIComponent(x.id)}&token=${encodeURIComponent(TOKEN)}" alt="">
+        <b>${esc(x.name)}</b><small>${esc(x.note || '')}</small></div>`;
+    box.innerHTML = `<div class="card"><div class="card-hd"><b>角色</b>
+        <small>每個角色有自己的檔、自己的記憶、自己的表情圖。切過去就是換一個人陪你，兩邊不共用。</small></div>
+      <div class="chargrid">${(d.chars || []).map(charCard).join('')}</div>
       <div class="frow"><div><b>開著</b><small>關掉就不會看對話、也不會講話；牠記得的事還留著。</small></div>
         <div class="fctl"><span class="sw${c.on ? ' on' : ''}" data-petf="on"></span></div></div>
-      <div class="frow"><div><b>角色</b><small>每個角色有自己的檔、自己的記憶、自己的表情圖，切換就是換一個人陪你。</small></div>
-        <div class="fctl"><select data-petf="char">${(d.chars || []).map((x) => `<option value="${esc(x.id)}"${c.char === x.id ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}</select></div></div>
-      <div class="frow"><div><b>模型</b><small>牠用自己的模型，不跟主對話共用。DS 這種便宜的就夠。</small></div>
-        <div class="fctl"><select data-petf="model">${models.map((m) => `<option value="${esc(m.id)}"${c.model === m.id ? ' selected' : ''}>${esc(m.label || m.id)}</option>`).join('')}</select></div></div>
-      <div class="frow"><div><b>思考</b><small>先想一想再開口。寵物通常不用，會慢一點。</small></div>
-        <div class="seg">${[['off', '不用'], ['on', '想一下']].map(([v, n]) => `<b class="${c.effort === v ? 'on' : ''}" data-petseg="${v}">${n}</b>`).join('')}</div></div>
-      <div class="frow"><div><b>一次講多少</b><small>最多 ${c.max_out} tokens；想讓牠講多一點就往上拉。</small></div>
-        <input type="range" min="60" max="600" step="20" value="${c.max_out}" data-petf="max_out"></div>
-      <div class="frow"><div><b>多久看一次</b><small>每 ${c.every_sec} 秒瞄一眼開著的對話。沒有新內容不會叫模型，所以放著不會一直花錢。</small></div>
-        <input type="number" min="3" max="600" value="${c.every_sec}" data-petf="every_sec"></div>
-      <div class="frow"><div><b>每次看多少</b><small>從主對話抓最近約 ${c.peek} tokens 的片段給牠看。</small></div>
-        <input type="number" min="300" max="20000" step="100" value="${c.peek}" data-petf="peek"></div>
-      <div class="frow"><div><b>牠自己的記憶上限</b><small>${Number(c.ctx).toLocaleString()} tokens，超過八成自己壓縮，留最近 ${c.keep} 則原文。跟主對話的壓縮分開。</small></div>
-        <input type="number" min="4000" max="200000" step="1000" value="${c.ctx}" data-petf="ctx"></div>
-      <div class="frow"><div><b>固定回覆</b><small>永遠在輸入框上方的那幾句通用回覆，用 | 分隔（最多四個）。模型每次給的建議是上面另一排，會變。</small></div>
-        <input data-petf="quick" value="${esc((c.quick || []).join('|'))}"></div>
+    </div>
+    <div class="card"><div class="card-hd"><b>陪伴</b><small>牠多久瞄一眼、看多少、能不能留言。</small></div>
+      <div class="frow"><div><b>多久看一次</b><small>每 ${c.every_sec} 秒瞄一眼你開著的對話。沒有新內容不會叫模型，所以放著不會一直花錢。</small></div>
+        <div class="fctl"><input type="number" min="3" max="600" value="${c.every_sec}" data-petf="every_sec"></div></div>
+      <div class="frow"><div><b>每次看多少</b><small>從主對話抓最近約 ${Number(c.peek).toLocaleString()} tokens 的片段給牠看。</small></div>
+        <div class="fctl"><input type="number" min="300" max="20000" step="100" value="${c.peek}" data-petf="peek"></div></div>
       <div class="frow"><div><b>允許牠在主對話留一句</b><small>預設關，也就是完全唯讀：牠只看得到你的對話，不能寫進去。打開後牠講的話才會用腳印（🐾）出現在對話裡。</small></div>
         <div class="fctl"><span class="sw${c.speak_up ? ' on' : ''}" data-petf="speak_up"></span></div></div>
+      <div class="frow"><div><b>固定回覆</b><small>永遠在輸入框上方的那幾句通用回覆，用 | 分隔（最多四個）。上面那排會變的是模型給的建議。</small></div>
+        <div class="fctl wide"><input data-petf="quick" value="${esc((c.quick || []).join('|'))}" placeholder="怎麼了？|繼續說"></div></div>
+    </div>
+    <div class="card"><div class="card-hd"><b>模型與額度</b><small>牠用自己的模型，不跟主對話共用。</small></div>
+      <div class="frow"><div><b>模型</b><small>DS 這種便宜的就夠；寵物不需要最強的。</small></div>
+        <div class="fctl wide"><select data-petf="model">${models.map((m) => `<option value="${esc(m.id)}"${c.model === m.id ? ' selected' : ''}>${esc(m.label || m.id)}</option>`).join('')}</select></div></div>
+      <div class="frow"><div><b>思考</b><small>先想一想再開口。寵物通常不用，會慢一點。</small></div>
+        <div class="seg">${[['off', '不用'], ['on', '想一下']].map(([v, n]) => `<b class="${c.effort === v ? ' on' : ''}" data-petseg="${v}">${n}</b>`).join('')}</div></div>
+      <div class="frow"><div><b>一次講多少</b><small>最多 ${c.max_out} tokens。想讓牠能講長一點就往上拉；小寵物欄拉太高會變成在演講。</small></div>
+        <div class="fctl wide"><input type="range" min="60" max="800" step="20" value="${c.max_out}" data-petf="max_out"></div></div>
+    </div>
+    <div class="card"><div class="card-hd"><b>牠自己的記憶</b><small>跟主對話的壓縮完全分開，不會互相影響。</small></div>
+      <div class="frow"><div><b>上限</b><small>${Number(c.ctx).toLocaleString()} tokens；超過八成牠會自己壓縮成筆記。</small></div>
+        <div class="fctl"><input type="number" min="4000" max="200000" step="1000" value="${c.ctx}" data-petf="ctx"></div></div>
+      <div class="frow"><div><b>壓縮後留幾則</b><small>壓縮時保留最近 ${c.keep} 則原文，其餘變成摘要。</small></div>
+        <div class="fctl"><input type="number" min="2" max="60" value="${c.keep}" data-petf="keep"></div></div>
+      <div class="frow"><div><b>現在有 ${d.state.msgs} 則訊息</b><small>清掉不影響主對話，只是牠會忘記你們聊過什麼。</small></div>
+        <div class="fctl"><button class="btn" data-petf="reset">清空牠的記憶</button></div></div>
     </div>
     <div class="card"><div class="card-hd"><b>寵物檔</b><small>只有牠看得到。主對話的人格檔、記憶檔跟這份完全分開。</small></div>
       <textarea id="petFile" rows="16" class="mono" spellcheck="false" placeholder="讀取中…"></textarea>
@@ -6160,6 +6186,11 @@ function renderPetSec(box) {
     </div>`;
     api('GET', '/api/pet/file').then((f) => { const t = $('#petFile'); if (t) t.value = f.text; });
     box.onclick = (e) => {
+      const ch = e.target.closest('[data-petchar]');
+      if (ch && ch.dataset.petchar !== c.char) {
+        petSave({ char: ch.dataset.petchar }).then(() => { renderPetSec(box); petLoad(); });
+        return;
+      }
       const seg = e.target.closest('[data-petseg]');
       if (seg) { petSave({ effort: seg.dataset.petseg }).then(() => renderPetSec(box)); return; }
       const el = e.target.closest('[data-petf]');
@@ -6181,7 +6212,7 @@ function renderPetSec(box) {
       if (!el) return;
       const k = el.dataset.petf;
       if (k === 'quick') { petSave({ quick: el.value }).then(() => renderPetSec(box)); return; }
-      if (['char', 'model', 'max_out', 'every_sec', 'peek', 'ctx'].includes(k)) {
+      if (['model', 'max_out', 'every_sec', 'peek', 'ctx', 'keep'].includes(k)) {
         petSave({ [k]: el.value }).then(() => renderPetSec(box));
       }
     };
