@@ -661,6 +661,27 @@ def clear_interrupted(session_id: str) -> dict | None:
     return store.update_session(session_id, engine_state=es)
 
 
+def apply_pending(session: dict | None) -> dict | None:
+    """套用排隊中的插件開關：只在這個對話的系統提示詞本來就會重組時做（壓縮過、提示詞覆寫或模型換過）。
+
+    中途改 plugins_off 會改到 prompt_fp，讓模型的前綴快取整段失效；改成排隊，
+    等下一次重組（ compress_count 改變、或 fp 本來就不同）再一次套用，不多花一次快取。
+    """
+    es = dict((session or {}).get("engine_state") or {})
+    off = es.pop("pending_off", None)
+    gen = es.pop("pending_gen", None)
+    if off is None:
+        return session
+    es["plugins_off"] = [str(x) for x in off]
+    es["preset_gen"] = gen
+    return store.update_session(session["id"], engine_state=es) or session
+
+
+def pending_off(session: dict | None) -> list[str]:
+    """這個對話還沒套用的插件開關（面板顯示用）。"""
+    return [str(x) for x in ((session or {}).get("engine_state") or {}).get("pending_off") or []]
+
+
 async def run_model_loop(ctx: TurnContext) -> None:
     provider = REG.providers[ctx.model_cfg["provider"]]
     nudged = False  # 工具結果後模型給空內容，只請它文字總結一次
@@ -857,6 +878,22 @@ async def run_turn(session_id: str, blocks: list[dict], emit: Emit) -> None:
             model_cfg, effort = fb, fb.get("default_effort")
         else:
             await emit({"type": "notice", "session_id": session_id, "text": f"{why}（只提醒，照常送出）"})
+
+    # 排隊的插件開關：這個對話已經送出過訊息，現在換會改到 prompt_fp、讓系統提示詞重組、
+    # 前綴快取整段失效。所以等 compress_count 或提示詞指紋本來就要變的那一次才套用。
+    pend = pending_off(session)
+    if pend:
+        es0 = dict(session.get("engine_state") or {})
+        gen0 = int(es0.get("compress_count") or 0)
+        pg = es0.get("pending_gen")
+        pg = -1 if pg is None else int(pg)  # 0 是「還沒壓縮過」，不能用 or 當成沒設
+        ctx_probe = TurnContext(session, model_cfg, effort, emit)
+        snap = store.get_prompt_snapshot(session_id)
+        if gen0 != pg or not snap or snap["fp"] != prompt_fp(ctx_probe):
+            session = apply_pending(session) or session
+            if not pending_off(session):
+                await emit({"type": "notice", "session_id": session_id,
+                            "text": "已套用排隊的插件開關（系統提示詞重新組裝了一次）。"})
 
     note, told = settings_note(session)
     if note:

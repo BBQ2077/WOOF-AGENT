@@ -2503,16 +2503,22 @@ $('#meter').onclick = () => openCtxPanel();
 
 async function openScopeModal() {
   if (!S.sid) { notify('warn', '先開一個對話'); return; }
-  let tv, tools;
-  try { [tv, tools] = await Promise.all([api('GET', '/api/templates'), api('GET', '/api/tools')]); }
+  let tv, tools, ps;
+  try { [tv, tools, ps] = await Promise.all([api('GET', '/api/templates'), api('GET', '/api/tools'), api('GET', '/api/presets')]); }
   catch (e) { notify('error', '讀不到插件資料', e.message); return; }
   S.templates = tv.templates || [];
+  const presets = ps.presets || [];
   const es = (cur() || {}).engine_state || {};
   const off = new Set(es.plugins_off || []);
   const byP = {};
   for (const t of tools) (byP[t.plugin] = byP[t.plugin] || []).push(t);
   const plugins = Object.keys(byP).sort();
-  const body = `<div class="scope-top"><label>模板</label><select id="tplSel"><option value="">全部插件（預設）</option>`
+  const permName = (k) => (PERM[k] || PERM.ask)[0];
+  const body = `<div class="scope-top"><label>模式</label><select id="presetSel"><option value="">不指定（自己挑下面的插件）</option>`
+    + presets.map((p) => `<option value="${esc(p.id)}"${es.preset === p.id ? ' selected' : ''}>${esc(p.name)}（${p.plugins.length} 個插件・${esc(permName(p.perm))}）</option>`).join('')
+    + `</select><span class="btn" data-gopreset>管理模式</span></div>`
+    + `<p class="scope-note">套用模式會一次換掉這個對話的插件和權限：權限下一則訊息就生效；插件開關排到下次壓縮或開新對話才換，這個對話的快取不會因此重算。</p>`
+    + `<div class="scope-top"><label>模板</label><select id="tplSel"><option value="">全部插件（預設）</option>`
     + S.templates.map((t) => `<option value="${esc(t.id)}"${es.template === t.id ? ' selected' : ''}>${esc(t.label)}（${t.plugins.length} 個插件）</option>`).join('')
     + `</select><button class="btn" data-savetpl>存成模板</button></div>`
     + `<p class="scope-note">這裡的開關只影響這個對話。沒勾的插件，模型在這個對話裡看不到它的工具。</p>`
@@ -2522,9 +2528,10 @@ async function openScopeModal() {
     + skillsRowHtml(es.skills || {});
   modal({
     title: '這個對話能用的插件', wide: true, ok: '套用到這個對話', body,
-    onOpen: (m) => { bindSkillsSeg(m); m.addEventListener('click', async (e) => {
+    onOpen: (m, close) => { bindSkillsSeg(m); m.addEventListener('click', async (e) => {
+      if (e.target.closest('[data-gopreset]')) { close(false); openSettings('presets'); return; }
       const sw = e.target.closest('[data-plug]');
-      if (sw) { sw.classList.toggle('on'); sw.closest('.trow').classList.toggle('off', !sw.classList.contains('on')); const ts = m.querySelector('#tplSel'); if (ts) ts.value = ''; return; }
+      if (sw) { sw.classList.toggle('on'); sw.closest('.trow').classList.toggle('off', !sw.classList.contains('on')); const ts = m.querySelector('#tplSel'); if (ts) ts.value = ''; const ps2 = m.querySelector('#presetSel'); if (ps2) ps2.value = ''; return; }
       if (e.target.closest('[data-savetpl]')) {
         const name = await promptBox('存成模板', '模板名稱', '', { desc: '模板會記住目前勾選的插件，之後任何對話都能套用。' });
         if (!name || !name.trim()) return;
@@ -2536,18 +2543,30 @@ async function openScopeModal() {
       }
     }); },
     onOk: async (m) => {
+      const ps2 = m.querySelector('#presetSel'); const pid = ps2 ? ps2.value : '';
       const ts = m.querySelector('#tplSel'); const tid = ts ? ts.value : '';
       try {
-        let r;
-        if (tid) r = await api('POST', `/api/sessions/${S.sid}/template`, { id: tid });
+        let r, preset = null;
+        if (pid) {
+          r = await api('POST', `/api/sessions/${S.sid}/preset`, { id: pid });
+          preset = pid;
+        } else if (tid) r = await api('POST', `/api/sessions/${S.sid}/template`, { id: tid });
         else {
           const on = [...m.querySelectorAll('[data-plug]')].filter((x) => x.classList.contains('on')).map((x) => x.dataset.plug);
           r = await api('POST', `/api/sessions/${S.sid}/plugins`, { off: plugins.filter((p) => !on.includes(p)) });
         }
-        const s = cur(); if (s) s.engine_state = { ...(s.engine_state || {}), plugins_off: r.off, template: r.template || null };
+        const s = cur();
+        if (s) {
+          const es = { ...(s.engine_state || {}), preset: preset || null, template: r.template || null };
+          if (r.pending) { es.pending_off = r.off; es.pending_gen = es.compress_count || 0; }
+          else { es.plugins_off = r.off; delete es.pending_off; delete es.pending_gen; }
+          s.engine_state = es;
+          if (preset) s.perm = r.perm;
+        }
         const sk = readSkillsSeg(m);
         if (Object.keys(sk).length) { await api('PUT', `/api/sessions/${S.sid}/skills`, sk); const cs = cur(); if (cs) cs.engine_state = { ...(cs.engine_state || {}), skills: Object.fromEntries(Object.entries(sk).filter(([, v]) => v !== null)) }; }
-        renderScopePill(); notify('ok', '已套用到這個對話');
+        renderScopePill(); renderPerm();
+        notify('ok', '已套用到這個對話', r.pending ? '權限下一則訊息生效；插件開關等下次壓縮或開新對話才換，這個對話的快取不會斷。' : '');
       } catch (err) { notify('error', '套用失敗', err.message); return false; }
     },
   });
@@ -3579,20 +3598,19 @@ const SECTIONS = [
   ['perms', '權限', '模型要用工具時，依類別決定直接執行、先問你、或不允許。'],
   ['tools', '工具', '每個工具一個開關，依插件分組。停用後模型看不到該工具。'],
   ['skills', 'Skills', '知識文件，跟工具分開。預設全部關閉，需要哪個就勾哪個。'],
+  ['presets', '模式預設組', '把「哪些插件可用」和「工具權限」打包成一個模式，一鍵套用。'],
   ['general', '一般', '工作目錄、終端機、可預覽的資料夾，以及執行中按 Enter 的行為。'],
   ['appearance', '外觀', '顏色、縮放與字級。只存在這台電腦，拉了立即生效。'],
   ['mcp', 'MCP 伺服器', 'WOOF 對外提供 MCP 工具，也可以連外部的 MCP 伺服器。'],
-  ['snapshots', '檔案還原', '模型改檔前先存一份原檔，之後可以在對話的「檔案」分頁還原。'],
-  ['about', '關於', ''],
+  ['snapshots', '檔案還原', '模型改檔前先存一份原檔，之後可以在對話的「檔案」分頁還原。'],  ['about', '關於', ''],
 ];
 // 側欄分組：同一類放一個框，項目長短不一也整齊
 const SET_GROUPS = [
   ['模型', ['vendors', 'aux', 'keys']],
   ['對話', ['prompts', 'styles', 'compress']],
-  ['能力', ['perms', 'tools', 'skills']],
+  ['能力', ['perms', 'presets', 'tools', 'skills']],
   ['環境', ['general', 'appearance']],
-  ['進階', ['mcp', 'snapshots', 'about']],
-];
+  ['進階', ['mcp', 'snapshots', 'about']],];
 async function renderMcpSec(box) {
   box.innerHTML = '<div class="blank">讀取中…</div>';
   let info;
@@ -3999,8 +4017,7 @@ function renderSettings() {
   const box = $('#setList');
   box.onclick = null;
   box.className = 'sec-' + sec[0];
-  ({ mcp: renderMcpSec, aux: renderAux, compress: renderCompressSec, prompts: renderPromptsSec, vendors: renderVendors, keys: renderKeyEditor, appearance: renderAppearance, general: renderGeneral, perms: renderPermsSec, about: renderAbout, styles: renderStylesSec, snapshots: renderSnapshotsSec, tools: renderToolsSet, skills: renderSkillsSet })[sec[0]](box);
-}
+  ({ mcp: renderMcpSec, aux: renderAux, compress: renderCompressSec, prompts: renderPromptsSec, vendors: renderVendors, keys: renderKeyEditor, appearance: renderAppearance, general: renderGeneral, perms: renderPermsSec, presets: renderPresetsSec, about: renderAbout, styles: renderStylesSec, snapshots: renderSnapshotsSec, tools: renderToolsSet, skills: renderSkillsSet })[sec[0]](box);}
 $('#setNav').onclick = (e) => { const d = e.target.closest('[data-sec]'); if (!d) return; setFindClear(); S.setSec = d.dataset.sec; localStorage.setItem('woof.setSec', S.setSec); renderSettings(); };
 $('#setQ').oninput = (e) => { S.setQ = e.target.value; renderSettings(); };
 $('#setQ').onkeydown = (e) => {
@@ -5209,6 +5226,119 @@ async function styleEditor(s) {
     },
   });
   if (S.setSec === 'styles') renderStylesSec($('#setList'));
+}
+// ---- 模式預設組：把「哪些插件可用」與「工具權限」打包成一鍵套用
+const PRESET_PERM = { auto: '全自動', edits: '改檔自動', ask: '先問我', readonly: '唯讀' };
+async function loadPresets() {
+  try {
+    const r = await api('GET', '/api/presets');
+    S.presets = r.presets || []; S.presetPlugins = r.plugins || []; S.presetDefault = r.default || '';
+  } catch { S.presets = S.presets || []; S.presetPlugins = S.presetPlugins || []; }
+  return S.presets;
+}
+function renderPresetsSec(box) {
+  box.innerHTML = '<div class="card"><div class="blank">讀取中…</div></div>';
+  loadPresets().then(() => {
+    const list = S.presets || [], plugins = S.presetPlugins || [];
+    const rows = list.map((p) => `<div class="sty" data-pid="${esc(p.id)}">
+      <div class="sty-main"><div class="sty-hd"><b>${esc(p.name)}</b>
+        <span class="tag t-off">${p.builtin ? '內建' : '自訂'}</span>
+        ${S.presetDefault === p.id ? '<span class="tag t-ok">新對話預設</span>' : ''}
+        <span class="tag">${esc(PRESET_PERM[p.perm] || p.perm)}</span>
+        <span class="tag t-off">${p.plugins.length} / ${plugins.length} 個插件</span></div>
+        ${p.desc ? `<p>${esc(p.desc)}</p>` : ''}
+        <div class="pm-chips">${p.plugins.map((x) => `<span>${esc(x)}</span>`).join('') || '<span>（這個模式沒有可用的插件）</span>'}</div></div>
+      <div class="sty-acts">
+        <span class="btn sm" data-puse>套用目前對話</span>
+        ${S.presetDefault === p.id ? '' : '<span class="btn sm" data-pdef>設為新對話預設</span>'}
+        ${p.builtin ? '' : '<span class="btn sm" data-pedit>修改</span><span class="btn sm" data-pdel>刪除</span>'}
+      </div></div>`).join('');
+    box.innerHTML = `<div class="card sty-list">${rows}
+      <div class="sty-foot"><span class="muted">套用時權限下一則訊息就換；插件開關排到下次壓縮或開新對話才換，已經在進行的對話不會因此重算提示快取。</span><span class="grow"></span>
+        ${S.presetDefault ? '<span class="btn" data-pnodef>取消新對話預設</span>' : ''}
+        <span class="btn primary" data-pnew>新增模式</span></div>
+    </div>`;
+  });
+}
+$('#setList').addEventListener('click', async (e) => {
+  if (S.setSec !== 'presets') return;
+  const box = $('#setList');
+  const row = e.target.closest('[data-pid]');
+  const p = row && (S.presets || []).find((x) => x.id === row.dataset.pid);
+  if (e.target.closest('[data-pnew]')) return presetEditor(null);
+  if (!p) {
+    if (e.target.closest('[data-pnodef]')) {
+      try { await api('PUT', '/api/presets/default', { id: '' }); S.presetDefault = ''; notify('ok', '已取消新對話預設'); renderPresetsSec(box); }
+      catch (err) { notify('error', '設定失敗', err.message); }
+    }
+    return;
+  }
+  if (e.target.closest('[data-puse]')) return applyPresetNow(p);
+  if (e.target.closest('[data-pdef]')) {
+    try { await api('PUT', '/api/presets/default', { id: p.id }); S.presetDefault = p.id; notify('ok', '新對話會用「' + p.name + '」', '開新對話時套用這個模式的插件與權限。'); renderPresetsSec(box); }
+    catch (err) { notify('error', '設定失敗', err.message); }
+    return;
+  }
+  if (e.target.closest('[data-pedit]')) return presetEditor(p);
+  if (e.target.closest('[data-pdel]')) {
+    const ok = await confirmBox(`刪除「${p.name}」？`, '只影響這個模式本身，已經在進行的對話不會被改。', { ok: '刪除', danger: true });
+    if (!ok) return;
+    try { await api('DELETE', `/api/presets/${encodeURIComponent(p.id)}`); if (S.presetDefault === p.id) S.presetDefault = ''; notify('ok', '已刪除'); renderPresetsSec(box); }
+    catch (err) { notify('error', '刪除失敗', err.message); }
+  }
+});
+async function applyPresetNow(p) {
+  if (!S.sid) { notify('warn', '先開一個對話'); return; }
+  try {
+    const r = await api('POST', `/api/sessions/${S.sid}/preset`, { id: p.id });
+    const s = cur();
+    if (s) {
+      const es = { ...(s.engine_state || {}), preset: r.preset };
+      if (r.pending) { es.pending_off = r.off; es.pending_gen = (es.compress_count || 0); }
+      else { es.plugins_off = r.off; delete es.pending_off; delete es.pending_gen; }
+      s.engine_state = es; s.perm = r.perm;
+    }
+    renderPerm(); renderScopePill();
+    notify('ok', '已套用「' + p.name + '」', r.pending ? '權限下一則訊息生效；插件開關等下次壓縮或開新對話才換。' : '這個對話還沒有訊息，插件已經換了。');
+  } catch (err) { notify('error', '套用失敗', err.message); }
+}
+async function presetEditor(p) {
+  await loadPresets();
+  const plugins = S.presetPlugins || [];
+  const on = new Set(p ? p.plugins : plugins);   // 新模式的預設是全部插件
+  const box = (k, n) => `<div class="trow${on.has(k) ? '' : ' off'}"><span class="sw sm${on.has(k) ? ' on' : ''}" data-plug="${esc(k)}"></span><code>${esc(k)}</code></div>`;
+  const body = `<label class="fld"><span>名稱</span><input data-pn maxlength="20" value="${esc(p ? p.name : '')}" placeholder="例：隨手問"></label>
+    <label class="fld"><span>說明</span><input data-pd maxlength="60" value="${esc(p ? p.desc : '')}" placeholder="一句話說明什麼時候用它"></label>
+    <div class="fld"><span>工具權限</span><div class="seg" data-pperm>${Object.entries(PRESET_PERM)
+      .map(([k, n]) => `<b data-pv="${k}" class="${(p ? p.perm : 'ask') === k ? 'on' : ''}">${esc(n)}</b>`).join('')}</div>
+      <small class="muted">套用這個模式時，對話的權限會換成這個。</small></div>
+    <div class="tgrp"><h4>要用的插件<small>沒勾的插件在這個模式裡會被關掉</small></h4><div class="list">
+      ${plugins.map(box).join('') || '<div class="blank">沒有插件</div>'}
+    </div></div>`;
+  const ok = await modal({
+    title: p ? `修改「${p.name}」` : '新增模式', wide: true, ok: '儲存', body,
+    onOpen: (m) => {
+      m.addEventListener('click', (e) => {
+        const sw = e.target.closest('[data-plug]');
+        if (sw) { const k = sw.dataset.plug; if (on.has(k)) on.delete(k); else on.add(k); sw.classList.toggle('on', on.has(k)); sw.closest('.trow').classList.toggle('off', !on.has(k)); return; }
+        const pv = e.target.closest('[data-pv]');
+        if (pv) { m.querySelectorAll('[data-pv]').forEach((x) => x.classList.toggle('on', x === pv)); }
+      });
+    },
+    onOk: (m) => {
+      const name = $('[data-pn]', m).value.trim();
+      if (!name) { notify('warn', '名稱要填'); return false; }
+      const desc = $('[data-pd]', m).value.trim();
+      const perm = (m.querySelector('[data-pv].on') || {}).dataset?.pv || 'ask';
+      const custom = (S.presets || []).filter((x) => !x.builtin)
+        .map((x) => ({ id: x.id, name: x.name, desc: x.desc, perm: x.perm, plugins: x.plugins }));
+      const item = { id: p ? p.id : '', name, desc, perm, plugins: [...on] };
+      const i = custom.findIndex((x) => x.id === item.id);
+      if (i >= 0) custom[i] = item; else custom.push(item);
+      return api('POST', '/api/presets', { presets: custom }).then(() => notify('ok', p ? '已修改' : '已新增', name));
+    },
+  });
+  if (ok && S.setSec === 'presets') renderPresetsSec($('#setList'));
 }
 // ---- 檔案還原（快照）的保留規則與容量
 const fmtBytes = (n) => n >= 1073741824 ? (n / 1073741824).toFixed(2) + ' GB' : n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : n >= 1024 ? Math.round(n / 1024) + ' KB' : n + ' B';

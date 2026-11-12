@@ -725,5 +725,126 @@ class ResponsesAPI(unittest.TestCase):
         self.assertEqual([e["text"] for e in evs if e["type"] == "text_delta"], ["嗨"])
 
 
+
+class Presets(unittest.TestCase):
+    """模式預設組：內建模式、自訂存檔、套用時的權限與插件開關、排隊才換插件。"""
+
+    PLUGINS = ["files", "terminal", "web_search", "vision", "memory", "subagent", "tasks"]
+
+    def setUp(self):
+        from woof import presets
+        self.presets = presets
+        self._plugins = REG.plugins
+        REG.plugins = {n: types.SimpleNamespace(name=n) for n in self.PLUGINS}
+        presets.PATH.unlink(missing_ok=True)
+
+    def tearDown(self):
+        REG.plugins = self._plugins
+        self.presets.PATH.unlink(missing_ok=True)
+
+    def test_builtin(self):
+        ps = self.presets.all_presets()
+        self.assertEqual([p["id"] for p in ps[:5]], ["chat", "write", "build", "orchestrate", "readonly"])
+        chat = self.presets.get("chat")
+        self.assertTrue(chat["builtin"])
+        self.assertEqual(chat["perm"], "ask")
+        off = self.presets.off_for(chat)
+        self.assertIn("terminal", off)      # 一般聊天不給終端機
+        self.assertIn("subagent", off)
+        self.assertNotIn("files", off)      # 讀檔、搜尋留著
+        # 只查不改：寫檔和跑指令都要擋
+        ro = self.presets.get("readonly")
+        self.assertEqual(ro["perm"], "readonly")
+        self.assertIn("terminal", self.presets.off_for(ro))
+
+    def test_custom_save_and_delete(self):
+        self.presets.save([{"name": "隨手問", "desc": "只查", "perm": "readonly",
+                            "plugins": ["files", "terminal", "不存在"]}])
+        custom = [p for p in self.presets.all_presets() if not p["builtin"]]
+        self.assertEqual(len(custom), 1)
+        c = custom[0]
+        self.assertEqual(c["name"], "隨手問")
+        self.assertEqual(c["perm"], "readonly")
+        self.assertEqual(c["plugins"], ["files", "terminal"])   # 不存在的插件被濾掉
+        self.assertEqual(self.presets.get(c["id"])["name"], "隨手問")
+        self.assertTrue(self.presets.delete(c["id"]))
+        self.assertEqual([p for p in self.presets.all_presets() if not p["builtin"]], [])
+        self.assertFalse(self.presets.delete(c["id"]))          # 刪不掉第二次
+
+    def test_custom_keeps_builtin_id_safe(self):
+        self.presets.save([{"id": "chat", "name": "假的一般聊天", "perm": "auto", "plugins": []},
+                           {"name": "壞權限", "perm": "亂填", "plugins": ["files"]}])
+        custom = [p for p in self.presets.all_presets() if not p["builtin"]]
+        self.assertEqual(len(custom), 2)
+        self.assertNotIn("chat", [c["id"] for c in custom])     # 不能蓋掉內建的
+        self.assertEqual(self.presets.get("chat")["name"], "一般聊天")
+        self.assertEqual([c["perm"] for c in custom if c["name"] == "壞權限"], ["ask"])  # 不行的權限退回先問我
+
+    def test_default(self):
+        self.assertIsNone(self.presets.for_new_session())
+        self.assertEqual(self.presets.default_id(), "")
+        self.presets.save([{"name": "寫東西", "perm": "edits", "plugins": ["files"]}])
+        pid = [p for p in self.presets.all_presets() if not p["builtin"]][0]["id"]
+        self.assertEqual(self.presets.set_default(pid), pid)
+        self.assertEqual(self.presets.default_id(), pid)
+        self.assertEqual(self.presets.for_new_session()["id"], pid)
+        self.assertEqual(self.presets.set_default(""), "")      # 取消
+        self.assertIsNone(self.presets.for_new_session())
+        with self.assertRaises(ValueError):
+            self.presets.set_default("沒有這個")
+        # 預設被刪掉時，預設要跟著清掉
+        self.presets.set_default(pid)
+        self.presets.delete(pid)
+        self.assertEqual(self.presets.default_id(), "")
+
+    def test_apply_to_new_session(self):
+        s = store.create_session("m", None, "新")
+        self.presets.apply_to_new(s, self.presets.get("write"))
+        got = store.get_session(s["id"])
+        self.assertEqual(got["perm"], "edits")
+        self.assertEqual(got["engine_state"]["preset"], "write")
+        self.assertEqual(got["engine_state"]["plugins_off"], self.presets.off_for(self.presets.get("write")))
+        self.assertNotIn("pending_off", got["engine_state"])     # 新對話直接換，不用排隊
+
+    def test_plugin_switch_deferred_until_next_rebuild(self):
+        """中途套用模式：權限馬上換，插件開關先排隊；指紋不變就不重組提示詞。"""
+        from woof.agent import loop
+
+        s = store.create_session("m", None, "t")
+        sid = s["id"]
+        store.add_message(sid, "user", [{"type": "text", "text": "哈囉"}])
+        before = store.get_session(sid)
+        off = self.presets.off_for(self.presets.get("write"))
+        es = dict(before["engine_state"])
+        es["pending_off"], es["pending_gen"] = off, 0
+        es["preset"] = "write"
+        queued = store.update_session(sid, perm="edits", engine_state=es)
+        # 權限換了不該改到提示詞指紋（靠 settings_note 附在訊息後面）
+        self.assertEqual(loop.pending_off(queued), off)
+        self.assertEqual(loop.prompt_fp(types.SimpleNamespace(
+            session=queued, extra_system="", cwd=queued.get("cwd") or "",
+            model_cfg={"id": "m", "provider": "p"})),
+            loop.prompt_fp(types.SimpleNamespace(
+                session=before, extra_system="", cwd=before.get("cwd") or "",
+                model_cfg={"id": "m", "provider": "p"})))
+        # 套用後：插件開關真的換了、排隊清掉
+        applied = loop.apply_pending(queued)
+        self.assertEqual(applied["engine_state"]["plugins_off"], off)
+        self.assertEqual(loop.pending_off(applied), [])
+        # 換了插件開關，指紋要變（這就是為什麼要排隊）
+        self.assertNotEqual(
+            loop.prompt_fp(types.SimpleNamespace(session=applied, extra_system="", cwd="",
+                                                 model_cfg={"id": "m", "provider": "p"})),
+            loop.prompt_fp(types.SimpleNamespace(session=before, extra_system="", cwd="",
+                                                 model_cfg={"id": "m", "provider": "p"})))
+
+    def test_no_pending_is_noop(self):
+        from woof.agent import loop
+
+        s = store.create_session("m", None, "t")
+        self.assertIs(loop.apply_pending(s), s)     # 沒排隊就原樣返回，不白寫一次資料庫
+        self.assertEqual(loop.pending_off(s), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

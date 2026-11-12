@@ -461,6 +461,79 @@ async def session_plugins(sid: str, body: dict):
     return {"ok": True, "off": off}
 
 
+@app.get("/api/presets")
+async def presets_api():
+    """模式預設組：一鍵套用「哪些插件可用」＋「工具權限」。"""
+    from . import presets
+
+    return {"presets": presets.all_presets(), "plugins": sorted(REG.plugins.keys()),
+            "default": presets.default_id()}
+
+
+@app.post("/api/presets")
+async def presets_save(body: dict):
+    from . import presets
+
+    presets.save(body.get("presets") or [])
+    await broadcast({"type": "state_changed"})
+    return {"ok": True, "presets": presets.all_presets()}
+
+
+@app.delete("/api/presets/{pid}")
+async def preset_delete(pid: str):
+    from . import presets
+
+    if not presets.delete(pid):
+        raise HTTPException(404, "沒有這個模式（內建的不能刪）")
+    if presets.default_id() == pid:
+        presets.set_default("")
+    await broadcast({"type": "state_changed"})
+    return {"ok": True, "presets": presets.all_presets(), "default": presets.default_id()}
+
+
+@app.put("/api/presets/default")
+async def preset_default(body: dict):
+    """設成新對話的預設模式；id 為空白＝不指定。"""
+    from . import presets
+
+    try:
+        presets.set_default(str(body.get("id") or ""))
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    await broadcast({"type": "state_changed"})
+    return {"ok": True, "default": presets.default_id()}
+
+
+@app.post("/api/sessions/{sid}/preset")
+async def apply_preset(sid: str, body: dict):
+    """把整個模式套到這個對話：權限下一則訊息就換；插件開關排到下次壓縮或新對話才換，
+    中途換插件會讓這個對話的系統提示詞重組、前綴快取失效。"""
+    from . import presets
+    from .agent.loop import prompt_gen
+
+    s = store.get_session(sid)
+    if s is None:
+        raise HTTPException(404)
+    p = presets.get(str(body.get("id") or ""))
+    if p is None:
+        raise HTTPException(404, "沒有這個模式")
+    off = presets.off_for(p)
+    es = dict(s.get("engine_state") or {})
+    sent = bool(store.get_messages(sid))
+    if sent:
+        es["pending_off"] = off
+        es["pending_gen"] = prompt_gen(sid)
+    else:
+        es["plugins_off"] = off
+        es.pop("pending_off", None)
+        es.pop("pending_gen", None)
+    es["preset"] = p["id"]
+    reset_allow_all(sid)
+    s2 = store.update_session(sid, perm=p["perm"], engine_state=es) or s
+    await broadcast({"type": "session_updated", "session": s2})
+    return {"ok": True, "perm": p["perm"], "off": off, "pending": sent, "preset": p["id"]}
+
+
 @app.get("/api/templates")
 async def templates_api():
     return {"templates": load_config().get("templates") or [], "plugins": sorted(REG.plugins.keys())}
@@ -510,9 +583,13 @@ async def create_session(body: dict):
     cfg = REG.model_cfg(model)
     effort = body.get("effort") or (cfg or {}).get("default_effort")
     s = store.create_session(model or (cfg or {}).get("id"), effort)
-    from . import perms
+    from . import perms, presets
     perm = body.get("perm") if body.get("perm") in perms.MODES else perms.settings()["default_mode"]
     s = store.update_session(s["id"], perm=perm) or s
+    if body.get("preset") is None:  # 前端沒指定就用設定裡的新對話預設模式
+        p = presets.for_new_session()
+        if p:
+            s = presets.apply_to_new(s, p) or s
     await REG.events.emit("on_session", "create", s)
     return s
 
