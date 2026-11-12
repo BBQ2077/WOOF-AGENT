@@ -7,8 +7,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .config import DATA
+
 WOOF_ROOT = Path(__file__).resolve().parents[1]
-ROOT = WOOF_ROOT / "data" / "prompts"
+ROOT = DATA / "prompts"
 
 FILES = {
     "instructions": {"label": "設定檔", "file": "instructions.md",

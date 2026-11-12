@@ -1698,5 +1698,56 @@ window.WOOF_EN = {
 "例：隨手問": "e.g. Quick question",
 "一句話說明什麼時候用它": "One line on when to use it",
 "設定失敗": "Could not save",
-"只影響這個模式本身，已經在進行的對話不會被改。": "Only the mode itself is affected; ongoing chats are not changed.",
-};
+"只影響這個模式本身，已經在進行的對話不會被改。": "Only the mode itself is affected; ongoing chats are not changed.","設定組": "Profiles",
+
+"切換設定組": "Switch profile",
+
+"新增設定組…": "New profile…",
+
+"新增設定組": "New profile",
+
+"設定組改名": "Rename profile",
+
+"改名": "Rename",
+
+"刪除設定組「{0}」？": "Delete profile \"{0}\"?",
+
+"切換到「{0}」？": "Switch to \"{0}\"?",
+
+"預設那組：專案本來的 config.toml、keys.toml 與 data": "The default profile: the project's own config.toml, keys.toml and data",
+
+"切換後 WOOF 會立刻重啟，大約幾秒鐘": "WOOF restarts right after switching; takes a few seconds",
+
+"瀏覽器開啟時無法自己重啟後端：這裡只會記下來，下次啟動 WOOF 就會用這一組": "Opened in a browser it cannot restart the backend: this only records it, and WOOF uses this profile next time it starts",
+
+"每組有獨立的金鑰、模型、記憶、Skills、對話與排程": "Each profile has its own keys, models, memory, Skills, chats and schedules",
+
+"設定組：{0}（共 {1} 組）": "Profile: {0} ({1} total)",
+
+"WOOF 會換成這一組：它有自己的金鑰、模型、記憶、Skills、對話與排程。目前這組的東西不會不見，切回來就還在。": "WOOF switches to this one: it has its own keys, models, memory, Skills, chats and schedules. Nothing in the current profile is lost; switch back and it is still there.",
+
+"（瀏覽器開啟時只能記下來，下次啟動 WOOF 才會生效。）": "(In a browser this is only recorded and takes effect the next time WOOF starts.)",
+
+"新增一組完全獨立的 WOOF：自己的金鑰、模型、記憶、Skills、對話與排程，跟其他組互不共用。": "Adds a fully independent WOOF: its own keys, models, memory, Skills, chats and schedules, shared with no other profile.",
+
+"新增失敗": "Create failed",
+
+"已新增設定組": "Profile created",
+
+"要開始用請點它切換": "Click it to switch",
+
+"已刪除設定組": "Profile deleted",
+
+"正在切換設定組": "Switching profile",
+
+"重啟後端並載入「{0}」…": "Restarting the backend and loading \"{0}\"…",
+
+"已切換設定組": "Profile switched",
+
+"現在是「{0}」": "Now on \"{0}\"",
+
+"已記下設定組": "Profile recorded",
+
+"重新啟動 WOOF 就會用「{0}」": "Restart WOOF to use \"{0}\"",
+
+"這一組的 config.toml、keys.toml 與 data 目錄（對話、記憶、Skills、排程紀錄）會整個刪掉，無法復原。": "This profile's config.toml, keys.toml and data folder (chats, memory, Skills, schedule history) are deleted entirely and cannot be restored.",};

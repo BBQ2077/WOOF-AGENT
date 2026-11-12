@@ -28,6 +28,28 @@ node node_modules/electron/install.js   # 新版 npm 不會自動跑這步，Ele
 
 平常直接在「設定」頁改，按「儲存變更」生效。手動改檔後到「插件」頁按「重新載入」。外觀（顏色、縮放、字級）存在介面本機，不寫進設定檔。
 
+### 多組設定（profile）
+
+想要分開的幾套 WOOF（例如工作、私人）就用設定組：每一組都有**自己的** `config.toml`、`keys.toml` 和 `data/`——
+金鑰、模型、記憶、Skills、對話、排程紀錄全部各自獨立，不會互相看到。
+
+| 設定組 | 位置 |
+|---|---|
+| 預設 | 專案本來的 `config.toml`、`keys.toml`、`data/`（不動它） |
+| 其他 | `data/profiles/<id>/config.toml`、`keys.toml`、`data/` |
+
+清單存在 `data/profiles.json`（所有組共用）：`{version, last, profiles: [{id, name, created}]}`。
+
+在左側選單最下面的**設定組**那一列切換：點一下列出所有組、可以新增、改名、刪除，目前這組前面有勾。
+切換會重啟 WOOF（後端啟動時就把資料路徑決定了，所以沒辦法不重新啟動）；刪除某一組會把它的 `config.toml`、
+`keys.toml`、`data/` 整個刪掉，無法復原，所以目前正在用的那一組不能刪，要先切到別組。
+
+是怎麼認的：後端啟動時讀環境變數 `WOOF_PROFILE`，`default` 或沒設就是預設那組；不在清單裡的代號也會退回預設。
+Electron 主程式會把目前這組寫進 `WOOF_PROFILE` 再啟動 Python，切換時換掉它、重啟後端、重載視窗。
+用瀏覽器開介面時沒有人能重啟後端，這時只會把「下次啟動用哪一組」記下來，重開 WOOF 才生效。
+
+介面偏好（配色、我的最愛、思考強度）也跟著設定組走，存在該組 `data/ui-preferences.json`。
+
 ### 模型商與模型
 
 模型商放連線方式和共用欄位，模型只放自己的名稱與能力；模型自己寫的同名欄位會蓋過模型商的。
@@ -140,7 +162,8 @@ woof/          核心：設定、資料庫、程序管理、插件載入、工�
 plugins/       所有功能
 desktop/       Electron 外殼（main.js、preload.js）
 web/dist/      介面（index.html、app.js、app.css）
-data/          對話資料庫、日誌、上傳的圖片
+data/          預設那組：對話資料庫、日誌、上傳的圖片、排程
+data/profiles/ 其他設定組（各有一組 config.toml、keys.toml、data/）
 tests/         測試腳本（`.venv/Scripts/python tests/unit_test.py` 跑單元測試，用暫存資料夾，不碰你的對話）
 ```
 

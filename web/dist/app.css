@@ -70,6 +70,21 @@ kbd{font-family:var(--mono);font-size:10px;color:var(--faint);border:1px solid v
 .sidefoot div:hover{background:var(--hover);color:var(--text)}
 .sidefoot div.on{background:var(--sel);color:var(--text);font-weight:600}
 .sidefoot div.on svg{color:var(--text)}
+
+/* ---------- 設定組（profile）切換 ---------- */
+.side{position:relative}
+#navProf #navProfTxt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#navProf .caret{width:14px;height:14px;flex:none;opacity:.6}
+#navProf:hover .caret{opacity:1}
+.pop .mi .pck{width:16px;flex:none;display:grid;place-items:center;color:var(--acc)}
+.pop .mi .pck svg{width:14px;height:14px}
+.pop .mi .pn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pop .mi .pact{display:none;place-items:center;width:22px;height:22px;border-radius:5px;color:var(--dim);flex:none}
+.pop .mi:hover .pact{display:grid}
+.pop .mi .pact:hover{background:var(--sel);color:var(--text)}
+.pop .mi .pact svg{width:14px;height:14px}
+.pop .mi[data-pact="new"] .pn{color:var(--text)}
+.pop .pnote{font-size:11.5px;color:var(--faint);padding:2px 10px 8px;line-height:1.55;white-space:normal}
 @keyframes pulse{50%{opacity:.3}}
 
 /* ---------- 對話 ---------- */

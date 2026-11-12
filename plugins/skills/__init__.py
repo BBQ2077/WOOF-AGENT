@@ -47,8 +47,14 @@ def _enabled(raw) -> set[str]:
 
 
 def _write_dir(raw) -> Path:
+    """相對路徑一律解成「目前這組的 data」底下的子目錄（data/skills 與 skills 指同一處）。"""
+    from woof.config import DATA
+
     p = Path(os.path.expanduser(str(raw or "data/skills")))
-    return p if p.is_absolute() else WOOF_ROOT / p
+    if p.is_absolute():
+        return p
+    parts = p.parts[1:] if p.parts and p.parts[0] == "data" else p.parts
+    return DATA.joinpath(*parts) if parts else DATA
 
 
 def scan(dirs: list[Path]) -> dict[str, dict]:

@@ -846,5 +846,220 @@ class Presets(unittest.TestCase):
         self.assertEqual(loop.pending_off(s), [])
 
 
+class Profiles(unittest.TestCase):
+    """多組設定：每組的金鑰、模型、記憶、Skills、對話、排程各自獨立；預設那組不動。"""
+
+    def setUp(self):
+        from woof import config, profiles
+
+        import shutil
+
+        self.config, self.profiles = config, profiles
+        self.made = []
+        self.reg_bak = config.REGISTRY.read_text(encoding="utf-8") if config.REGISTRY.exists() else None
+        # 從「只有預設」開始：清掉別的測試留下的設定組，這個類別才不會互相影響
+        shutil.rmtree(config.PROFILES_DIR, ignore_errors=True)
+        config.REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+        config.REGISTRY.write_text(
+            json.dumps({"version": 1, "last": "default",
+                        "profiles": [{"id": "default", "name": "預設", "created": 0}]}, ensure_ascii=False),
+            encoding="utf-8")
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        import shutil
+
+        for d in self.made:
+            shutil.rmtree(d, ignore_errors=True)
+        if self.reg_bak is None:
+            try:
+                self.config.REGISTRY.unlink()
+            except OSError:
+                pass
+        else:
+            self.config.REGISTRY.write_text(self.reg_bak, encoding="utf-8")
+
+    def mk(self, name="工作"):
+        p = self.profiles.create(name)
+        self.made.append(p.dir)
+        return p
+
+    def test_default_only(self):
+        doc = self.profiles.load()
+        self.assertEqual([r["id"] for r in doc["profiles"]], ["default"])
+        d = self.profiles.get("default")
+        self.assertTrue(d.is_default)
+        self.assertEqual(d.data, self.config.BASE_DATA)          # 預設就是專案本來的 data
+        self.assertEqual(d.config, self.config.BASE_CFG / "config.toml")
+        self.assertEqual(d.keys, self.config.BASE_CFG / "keys.toml")
+
+    def test_create_is_isolated(self):
+        p = self.mk()
+        self.assertEqual(p.dir, self.config.PROFILES_DIR / p.id)
+        self.assertTrue((p.dir / "config.toml").is_file())
+        self.assertTrue((p.dir / "keys.toml").is_file())
+        self.assertTrue((p.data / "prompts").is_dir())
+        self.assertNotEqual(p.data, self.config.BASE_DATA)
+        self.assertEqual(self.profiles.current().id, "default")   # 新增不會把目前這組切走
+        self.assertEqual(self.profiles.last_used(), p.id)         # 但會記成「下次開這組」
+
+    def test_new_config_parses(self):
+        import tomllib
+
+        p = self.mk()
+        cfg = tomllib.loads(p.config.read_text(encoding="utf-8"))
+        self.assertIn("workdir", cfg)
+        self.assertEqual(cfg.get("models"), [])
+        self.assertEqual(p.keys.read_text(encoding="utf-8").splitlines()[0][:2], "# ")
+
+    def test_names(self):
+        for bad in ["", "   ", "名字" * 11, "a/b", "a\\b", "a:b", "a?b"]:
+            with self.assertRaises(ValueError, msg=bad):
+                self.profiles.check_name(bad)
+        self.assertEqual(self.profiles.check_name("  工作   Stuff "), "工作 Stuff")
+
+    def test_create_bad_and_dup(self):
+        with self.assertRaises(ValueError):
+            self.mk("")               # 沒填名稱
+        with self.assertRaises(ValueError):
+            self.mk("   ")            # 空白名稱
+        p = self.mk("工作")
+        self.assertTrue(p.dir.is_dir())
+        with self.assertRaises(ValueError):
+            self.mk("工作")            # 同名不行
+        self.assertTrue(self.mk("其他").dir.is_dir())
+        with self.assertRaises(ValueError):
+            self.mk("其他")            # 名稱不能重複
+
+    def test_id_from_name(self):
+        a = self.mk("Work Stuff")
+        b = self.mk("work stuff")
+        self.assertEqual(a.id, "work-stuff")
+        self.assertEqual(b.id, "work-stuff-2")
+        self.assertNotEqual(a.id, b.id)
+
+    def test_rename(self):
+        p = self.mk()
+        self.assertEqual(self.profiles.rename(p.id, "  家庭  ").name, "家庭")
+        with self.assertRaises(ValueError):
+            self.profiles.rename("default", "亂改")     # 預設不能改名
+        other = self.mk("第三組")
+        with self.assertRaises(ValueError):
+            self.profiles.rename(other.id, "家庭")       # 撞名不行
+        with self.assertRaises(ValueError):
+            self.profiles.rename("nope", "無名")
+
+    def test_remove(self):
+        p = self.mk()
+        self.profiles.remove(p.id)
+        self.assertFalse(p.dir.exists())
+        self.assertEqual([r["id"] for r in self.profiles.load()["profiles"]], ["default"])
+        self.assertEqual(self.profiles.last_used(), "default")    # 刪掉的正是 last → 退回預設
+        with self.assertRaises(ValueError):
+            self.profiles.remove("default")
+
+    def test_switch_and_last(self):
+        p = self.mk()
+        self.profiles.set_last(p.id)
+        self.assertEqual(self.profiles.load()["last"], p.id)
+        with self.assertRaises(ValueError):
+            self.profiles.set_last("nope")
+
+    def test_bad_registry_falls_back(self):
+        self.config.REGISTRY.write_text("{ 壞掉的 json", encoding="utf-8")
+        self.assertEqual([r["id"] for r in self.profiles.load()["profiles"]], ["default"])
+        self.assertEqual(self.profiles.current().id, "default")    # 原資料還在，不會不見
+
+    def test_missing_registry_is_default(self):
+        try:
+            self.config.REGISTRY.unlink()
+        except OSError:
+            pass
+        self.assertEqual(self.profiles.current().name, "預設")
+        self.assertEqual(len(self.profiles.all_profiles()), 1)
+
+
+class ConfigPathsByProfile(unittest.TestCase):
+    """路徑看 WOOF_PROFILE：預設用專案本來的檔案，其他用 data/profiles/<id>/。"""
+
+    CODE = ("import json;from woof import config, cron, store;"
+            "print(json.dumps({'profile': config.PROFILE, 'data': str(config.DATA),"
+            " 'config': str(config.CONFIG_PATH), 'keys': str(config.KEYS_PATH),"
+            " 'cron': str(cron.FILE), 'db': str(store._DB)}))")
+
+    def run_py(self, profile=None, data=None):
+        import subprocess
+
+        env = dict(os.environ)
+        env["WOOF_DATA"] = data or TMP
+        env["PYTHONIOENCODING"] = "utf-8"
+        env.pop("WOOF_PROFILE", None)
+        if profile:
+            env["WOOF_PROFILE"] = profile
+        r = subprocess.run([sys.executable, "-c", self.CODE], capture_output=True, text=True,
+                           env=env, cwd=str(ROOT))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout.strip().splitlines()[-1])
+
+    def test_default(self):
+        got = self.run_py()
+        base = str(Path(TMP))
+        self.assertEqual(got["profile"], "default")
+        self.assertEqual(got["data"], base)
+        self.assertEqual(got["config"], str(Path(base) / "config.toml"))
+        self.assertEqual(got["keys"], str(Path(base) / "keys.toml"))
+        self.assertEqual(got["cron"], str(Path(base) / "cron.json"))   # 排程跟著這組的 data
+        self.assertEqual(got["db"], str(Path(base) / "woof.db"))       # 對話庫也是
+
+    def test_profile_and_unknown(self):
+        from woof import config, profiles
+
+        bak = config.REGISTRY.read_text(encoding="utf-8") if config.REGISTRY.exists() else None
+        p = profiles.create("獨立組")
+        self.addCleanup(lambda: (self._rm(p.dir), self._back(bak)))
+
+        got = self.run_py(profile=p.id)
+        d = str(Path(TMP) / "profiles" / p.id / "data")
+        self.assertEqual(got["profile"], p.id)
+        self.assertEqual(got["data"], d)
+        self.assertEqual(got["config"], str(Path(TMP) / "profiles" / p.id / "config.toml"))
+        self.assertEqual(got["keys"], str(Path(TMP) / "profiles" / p.id / "keys.toml"))
+        self.assertEqual(got["cron"], str(Path(d) / "cron.json"))
+        self.assertEqual(got["db"], str(Path(d) / "woof.db"))
+        self.assertNotEqual(got["data"], self.run_py()["data"])        # 跟預設組不同
+
+        unknown = self.run_py(profile="不存在的組")
+        self.assertEqual(unknown["profile"], "default")                # 認不得的 id 就回預設，不會炸掉
+
+    def test_two_data_dirs_are_independent(self):
+        import subprocess
+
+        outs = []
+        for name in ["woof_a", "woof_b"]:
+            dd = tempfile.mkdtemp(prefix=name + "_")
+            self.addCleanup(lambda dd=dd: __import__("shutil").rmtree(dd, ignore_errors=True))
+            outs.append(self.run_py(data=dd))
+        self.assertNotEqual(outs[0]["db"], outs[1]["db"])
+        self.assertNotEqual(outs[0]["cron"], outs[1]["cron"])
+
+    @staticmethod
+    def _rm(d):
+        import shutil
+
+        shutil.rmtree(d, ignore_errors=True)
+
+    @staticmethod
+    def _back(text):
+        from woof import config
+
+        if text is None:
+            try:
+                config.REGISTRY.unlink()
+            except OSError:
+                pass
+        else:
+            config.REGISTRY.write_text(text, encoding="utf-8")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

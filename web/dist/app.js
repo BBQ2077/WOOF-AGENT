@@ -27,6 +27,7 @@ const S = {
   running: new Set(), live: {}, tools: {}, errors: {}, usage: {}, attach: [], plugFilter: '全部', ws: null, approvals: {}, asks: {}, todos: {}, planOn: {}, gate: {}, subOpen: new Set(),
   modelId: null, workdir: '', tasks: [], queue: {}, srvQ: {}, resumeHide: {}, interrupting: {},
   pins: new Set(JSON.parse(localStorage.getItem('woof.pins') || '[]')),
+  profile: null,
   cfg: null, dirty: false, setSec: localStorage.getItem('woof.setSec') || 'vendors', openVendors: new Set(),
   openPlugins: new Set(),
 };
@@ -486,6 +487,7 @@ async function refreshState() {
   S.plugins = st.plugins; S.keys = st.keys;
   S.running = new Set(st.running);
   S.approvals = {}; for (const a of st.approvals || []) S.approvals[a.id] = a;
+  if (st.profile) { S.profile = st.profile; if (!S.profList || !S.profList.length) refreshProf(); else renderProf(); }
   renderModelSelect(); renderPlugins(); renderKeys(); renderSessions(); renderComposer();
 }
 async function refreshKeys() { try { S.keys = (await api('GET', '/api/state')).keys; renderKeys(); } catch {} }
@@ -3586,6 +3588,121 @@ $('#togSide').onclick = () => setSide(document.body.classList.contains('side-off
 $('#navCron').onclick = () => openCron();
 $('#navPlug').onclick = () => { showView('plug'); refreshState(); };
 $('#navSet').onclick = () => { setFindClear(); openSettings(); };
+
+// ------------------------------------------------------------------ 設定組（profile）
+// 每組各自獨立的金鑰、模型、記憶、Skills、對話與排程。目前這組由後端啟動時的 WOOF_PROFILE 決定，
+// 所以切換要重啟後端——桌面程式會接手（換環境變數、重啟 Python、重載畫面）；瀏覽器開啟時只會記下
+// 「下次啟動用哪一組」，並老實告訴使用者要重開 WOOF。
+function profList() { return S.profList || []; }
+function profName(p) { return (p && p.name) || '預設'; }
+function curProf() { return profList().find((p) => p.current) || null; }
+function renderProf() {
+  const p = curProf(), el = $('#navProf');
+  if (!el) return;
+  const n = profList().length;
+  $('#navProfTxt').textContent = profName(p);
+  el.title = `設定組：${profName(p)}（共 ${n} 組）\n每組有獨立的金鑰、模型、記憶、Skills、對話與排程`;
+}
+function profRowHtml(p) {
+  const acts = p.is_default ? '<small>預設</small>'
+    : `<span class="pact" data-pact="rename" data-pid="${esc(p.id)}" title="改名">${ico('edit')}</span>`
+      + `<span class="pact" data-pact="del" data-pid="${esc(p.id)}" title="刪除">${ico('trash')}</span>`;
+  return `<div class="mi${p.current ? ' on' : ''}" data-pid="${esc(p.id)}" title="${esc(p.is_default ? '預設那組：專案本來的 config.toml、keys.toml 與 data' : p.id)}">`
+    + `<span class="pck">${p.current ? ico('check') : ''}</span><span class="pn">${esc(profName(p))}</span>${acts}</div>`;
+}
+function profMenuHtml(r) {
+  const cur = r.current;
+  const rows = r.profiles.map(profRowHtml).join('');
+  const hint = r.can_switch ? '切換後 WOOF 會立刻重啟，大約幾秒鐘'
+    : '瀏覽器開啟時無法自己重啟後端：這裡只會記下來，下次啟動 WOOF 就會用這一組';
+  return '<div class="phd">設定組</div>' + rows
+    + '<div class="sep"></div><div class="mi" data-pact="new"><span class="pck"></span><span class="pn">新增設定組…</span></div>'
+    + `<div class="pnote">${hint}</div>`;
+}
+async function refreshProf() {
+  try {
+    const r = await api('GET', '/api/profiles');
+    S.profList = r.profiles || [];
+    S.profCanSwitch = !!r.can_switch;
+    const c = curProf();
+    S.profile = { id: r.current, name: profName(c), count: S.profList.length };
+  } catch { if (!S.profList) S.profList = []; }
+  renderProf();
+  if ($('#profMenu').classList.contains('on')) $('#profMenu').innerHTML = profMenuHtml({ current: (S.profile || {}).id, can_switch: S.profCanSwitch, profiles: profList() });
+}
+function openProfMenu() {
+  const menu = $('#profMenu'), anchor = $('#navProf');
+  if (menu.classList.contains('on')) { closePops(); return; }
+  closePops();
+  menu.classList.add('on'); anchor.classList.add('on');
+  const side = $('.side').getBoundingClientRect(), a = anchor.getBoundingClientRect();
+  menu.style.left = Math.round(a.left - side.left) + 'px';
+  menu.style.width = Math.max(200, Math.round(a.width)) + 'px';
+  menu.style.bottom = Math.round(side.bottom - a.top + 6) + 'px';
+  refreshProf();
+}
+async function switchProfile(pid) {
+  const p = profList().find((x) => x.id === pid);
+  if (!p || p.current) { closePops(); return; }
+  const ok = await confirmBox(`切換到「${profName(p)}」？`,
+    'WOOF 會換成這一組：它有自己的金鑰、模型、記憶、Skills、對話與排程。目前這組的東西不會不見，切回來就還在。'
+    + (S.profCanSwitch ? '' : '\n\n（瀏覽器開啟時只能記下來，下次啟動 WOOF 才會生效。）'), { ok: '切換' });
+  if (!ok) return;
+  closePops();
+  try {
+    const r = await api('POST', `/api/profiles/${encodeURIComponent(pid)}/switch`);
+    if (!r.restart) { notify('ok', '已切換設定組', `現在是「${profName(p)}」`); return refreshProf(); }
+    if (D && D.switchProfile) {
+      notify('info', '正在切換設定組', `重啟後端並載入「${profName(p)}」…`);
+      const res = await D.switchProfile(pid);
+      if (res && res.ok === false) notify('error', '切換失敗', res.error || '未知錯誤');
+      else setTimeout(() => location.reload(), 1000);   // 後端換好了，畫面重新連一次（視窗通常已經被主程序重載）
+    } else {
+      notify('ok', '已記下設定組', `重新啟動 WOOF 就會用「${profName(p)}」`);
+    }
+  } catch (e) { notify('error', '切換失敗', e.message); }
+}
+async function createProfile() {
+  const name = await promptBox('新增設定組', '名稱', '', {
+    desc: '新增一組完全獨立的 WOOF：自己的金鑰、模型、記憶、Skills、對話與排程，跟其他組互不共用。',
+    placeholder: '例如：工作',
+  });
+  if (!name) return;
+  try {
+    const p = await api('POST', '/api/profiles', { name });
+    notify('ok', '已新增設定組', `「${p.name}」— 要開始用請點它切換`);
+    await refreshProf();
+  } catch (e) { notify('error', '新增失敗', e.message); }
+}
+async function renameProfile(pid) {
+  const p = profList().find((x) => x.id === pid);
+  if (!p || p.is_default) return;
+  const name = await promptBox('設定組改名', '名稱', profName(p));
+  if (!name) return;
+  try { await api('PATCH', `/api/profiles/${encodeURIComponent(pid)}`, { name }); notify('ok', '已改名'); await refreshProf(); }
+  catch (e) { notify('error', '改名失敗', e.message); }
+}
+async function deleteProfile(pid) {
+  const p = profList().find((x) => x.id === pid);
+  if (!p || p.is_default) return;
+  const ok = await confirmBox(`刪除設定組「${profName(p)}」？`,
+    '這一組的 config.toml、keys.toml 與 data 目錄（對話、記憶、Skills、排程紀錄）會整個刪掉，無法復原。', { ok: '刪除', danger: true });
+  if (!ok) return;
+  try { await api('DELETE', `/api/profiles/${encodeURIComponent(pid)}`); notify('ok', '已刪除設定組'); await refreshProf(); }
+  catch (e) { notify('error', '刪除失敗', e.message); }
+}
+$('#navProf').onclick = openProfMenu;
+$('#profMenu').onclick = (e) => {
+  const act = e.target.closest('[data-pact]');
+  if (act) {
+    const a = act.dataset.pact;
+    if (a === 'new') return createProfile();
+    if (a === 'rename') return renameProfile(act.dataset.pid);
+    if (a === 'del') return deleteProfile(act.dataset.pid);
+  }
+  const row = e.target.closest('[data-pid]');
+  if (row) switchProfile(row.dataset.pid);
+};
 
 // ------------------------------------------------------------------ 設定
 const SECTIONS = [

@@ -24,6 +24,7 @@ from . import cron, keypool, procs, store
 from .agent.loop import (flush_steer, mark_interrupted, peek_steer, pending_approvals, pop_steer, push_steer,
                          requeue_steer, reset_allow_all,
                          resolve_approval, resume_session, run_turn)
+from . import config
 from .config import DATA, PLUGINS, WEB_DIST, load_config, load_keys, save_config, save_keys
 from .loader import REG
 from .prompts import get as _prompt_get
@@ -90,6 +91,7 @@ async def broadcast(ev: dict) -> None:
 @app.get("/api/state")
 async def state():
     return {
+        "profile": _profile_state(),
         "models": REG.models(),
         "vendors": REG.vendors(),
         "backends": sorted(set(REG.providers) | set(REG.engines)),
@@ -99,6 +101,73 @@ async def state():
         "running": [sid for sid, t in RUNS.items() if not t.done()],
         "approvals": pending_approvals(),
     }
+
+
+# ---------------------------------------------------------------- 設定組
+def _profile_state() -> dict:
+    from . import profiles
+
+    return {"id": config.PROFILE, "name": profiles.current().name, "count": len(profiles.all_profiles())}
+
+
+@app.get("/api/profiles")
+async def profile_list():
+    from . import profiles
+
+    cur = profiles.current()
+    return {"current": cur.id, "can_switch": bool(os.environ.get("WOOF_DESKTOP")),
+            "profiles": [{**p.as_dict(), "current": p.id == cur.id} for p in profiles.all_profiles()]}
+
+
+@app.post("/api/profiles")
+async def profile_create(body: dict):
+    from . import profiles
+
+    try:
+        p = profiles.create(str(body.get("name") or ""))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {**p.as_dict(), "current": False}
+
+
+@app.patch("/api/profiles/{pid}")
+async def profile_rename(pid: str, body: dict):
+    from . import profiles
+
+    try:
+        p = profiles.rename(pid, str(body.get("name") or ""))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {**p.as_dict(), "current": p.id == config.PROFILE}
+
+
+@app.delete("/api/profiles/{pid}")
+async def profile_delete(pid: str):
+    from . import profiles
+
+    if pid == config.PROFILE:
+        raise HTTPException(400, "不能刪除目前正在用的這組，先切換到別組再刪")
+    try:
+        profiles.remove(pid)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True}
+
+
+@app.post("/api/profiles/{pid}/switch")
+async def profile_switch(pid: str):
+    """切換設定組：這裡只記下「下次開的是哪一組」，實際重啟後端由桌面程式執行。"""
+    from . import profiles
+
+    if pid == config.PROFILE:
+        return {"ok": True, "restart": False, "profile": _profile_state()}
+    if not any(p.id == pid for p in profiles.all_profiles()):
+        raise HTTPException(404, "找不到這組設定")
+    try:
+        profiles.set_last(pid)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "restart": True, "profile": {"id": pid, "name": profiles.get(pid).name, "count": len(profiles.all_profiles())}}
 
 
 @app.get("/api/usage")
@@ -750,10 +819,10 @@ async def get_settings():
 def _read_keys_raw() -> dict:
     import tomllib
 
-    from .config import ROOT
+    from .config import KEYS_PATH
 
     try:
-        return tomllib.loads((ROOT / "keys.toml").read_text(encoding="utf-8"))
+        return tomllib.loads(KEYS_PATH.read_text(encoding="utf-8"))
     except Exception:
         return {}
 

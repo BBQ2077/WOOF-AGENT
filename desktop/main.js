@@ -70,10 +70,48 @@ function log(...a) {
   try { fs.appendFileSync(path.join(ROOT, 'data', 'desktop.log'), `[${new Date().toISOString()}] ${a.join(' ')}\n`); } catch {}
 }
 
-// ---- 介面偏好設定檔 data/ui-preferences.json（主題、我的最愛、思考強度、送出行為…）
+// ---- 介面偏好設定檔（主題、我的最愛、思考強度、送出行為…；跟著設定組走）
 // 主程序在畫面載入前讀好，preload 同步交給畫面；畫面改了就送回來寫檔。
 // 格式與寫法和後端 woof/ui_prefs.py 一致：逐鍵合併、<檔>.lock 資料夾當鎖、先寫暫存檔再改名。
-const PREFS_FILE = ROOT ? path.join(ROOT, 'data', 'ui-preferences.json') : null;
+let PREFS_FILE = null;
+
+// ---- 設定組（profile）：預設那組就是專案本來的 data\ 與 config.toml／keys.toml，
+// 其他每組放在 data\profiles\<id>\（有自己的 config.toml、keys.toml、data\）。
+// 清單存在 data\profiles.json；目前這組由環境變數 WOOF_PROFILE 決定，切換要重啟後端。
+const PROFILES_DIR = ROOT ? path.join(ROOT, 'data', 'profiles') : null;
+const REGISTRY = ROOT ? path.join(ROOT, 'data', 'profiles.json') : null;
+const PROFILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/;
+
+function readRegistry() {
+  const empty = { version: 1, last: 'default', profiles: [{ id: 'default', name: '預設', created: 0 }] };
+  if (!REGISTRY) return empty;
+  let doc;
+  try { doc = JSON.parse(fs.readFileSync(REGISTRY, 'utf8').replace(/^\uFEFF/, '')); } catch { return empty; }
+  const rows = (Array.isArray(doc.profiles) ? doc.profiles : [])
+    .filter((r) => r && typeof r.id === 'string' && (r.id === 'default' || PROFILE_RE.test(r.id)))
+    .map((r) => ({ id: r.id, name: String(r.name || '').trim() || '預設', created: Number(r.created) || 0 }));
+  if (!rows.some((r) => r.id === 'default')) rows.unshift(empty.profiles[0]);
+  const last = rows.some((r) => r.id === doc.last) ? doc.last : 'default';
+  return { version: 1, last, profiles: rows };
+}
+function writeRegistry(doc) {
+  if (!REGISTRY) return;
+  const tmp = `${REGISTRY}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(doc, null, 1));
+  fs.renameSync(tmp, REGISTRY);
+}
+function currentProfile() {
+  const id = (process.env.WOOF_PROFILE || '').trim();
+  if (id && id !== 'default' && PROFILE_RE.test(id)) return id;
+  const last = readRegistry().last;
+  return last === 'default' || PROFILE_RE.test(last) ? last : 'default';
+}
+function profileDir(pid) {
+  if (!ROOT) return null;
+  return pid === 'default' ? path.join(ROOT, 'data') : path.join(ROOT, 'data', 'profiles', pid, 'data');
+}
+// 介面偏好檔跟著設定組走（各組可以有各自的配色與我的最愛）
+PREFS_FILE = ROOT ? path.join(profileDir(currentProfile()), 'ui-preferences.json') : null;
 function readPrefs() {
   if (!PREFS_FILE) return { exists: false, revision: 0, values: {} };
   let raw;
@@ -139,6 +177,7 @@ function killBackend() {
 function cleanEnv() {
   const env = { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' };
   for (const k of ['PYTHONPATH', 'PYTHONHOME', 'VIRTUAL_ENV', 'PYTHONSTARTUP', 'PYTHONEXECUTABLE', '__PYVENV_LAUNCHER__', 'CONDA_PREFIX']) delete env[k];
+  env.WOOF_PROFILE = currentProfile();
   return env;
 }
 function startBackend() {
@@ -277,6 +316,32 @@ ipcMain.handle('pick-folder', async (e, start) => {
 });
 ipcMain.handle('show-item', (_e, p) => shell.showItemInFolder(p));
 ipcMain.handle('root', () => ROOT);
+// 設定組：清單給設定頁顯示；切換要重啟後端（資料路徑在後端啟動時就決定了）
+ipcMain.handle('profiles', () => {
+  const cur = currentProfile();
+  const doc = readRegistry();
+  return { current: cur, profiles: doc.profiles.map((p) => ({ ...p, current: p.id === cur })) };
+});
+ipcMain.handle('profile-dir', (_e, pid) => profileDir(pid === 'default' ? 'default' : pid) || '');
+ipcMain.handle('profile-switch', async (_e, pid) => {
+  const doc = readRegistry();
+  if (!doc.profiles.some((p) => p.id === pid)) return { ok: false, error: '找不到這組設定' };
+  if (pid === currentProfile()) return { ok: true, restart: false };
+  writeRegistry({ ...doc, last: pid });
+  killBackend();
+  backend = null;
+  port = null;
+  PREFS_FILE = path.join(profileDir(pid), 'ui-preferences.json');
+  showSplash('正在切換設定組…');
+  try {
+    await boot();
+  } catch (e) {
+    log('switch failed', e.message);
+    showSplash(e.message);
+    return { ok: false, error: e.message };
+  }
+  return { ok: true, restart: true };
+});
 ipcMain.handle('notify', (_e, title, body) => {
   if (Notification.isSupported()) new Notification({ title: title || 'WOOF', body: String(body || '') }).show();
 });

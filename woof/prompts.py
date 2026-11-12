@@ -13,6 +13,8 @@ import json
 import string
 from pathlib import Path
 
+from .config import DATA
+
 MODES = ("lean", "normal")
 MODE_LABEL = {"lean": "精簡", "normal": "常規"}
 GROUPS = ("流程", "接續", "壓縮", "其他")
@@ -153,7 +155,7 @@ _e("compact_part", "壓縮", "分段摘要的提示", "分段摘要時，每段�
    "（這是整段對話的第 {i}/{k} 段，只摘要這一段，不要猜測其他段的內容。）", vars="i, k"),
 
 
-_OV_FILE = Path(__file__).resolve().parent.parent / "data" / "prompt_overrides.json"
+_OV_FILE = DATA / "prompt_overrides.json"
 _ov_cache: dict | None = None
 
 
