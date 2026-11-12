@@ -1513,7 +1513,7 @@ body.side-off .side,body.side-off .resizer[data-rs=side]{display:none}
 
 /* 並排兩個對話：母視窗右半邊是 iframe，裡面是同一支畫面但只留對話區 */
 .panes{flex:1;min-height:0;display:flex;min-width:0}
-.pane{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;position:relative}
+#paneA,#paneB{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;position:relative}
 #paneB{flex:0 0 50%;border-left:1px solid var(--line);background:var(--bg)}
 #paneB .phead{height:35px;flex:none;display:flex;align-items:center;gap:8px;padding:0 8px 0 14px;border-bottom:1px solid var(--line);background:var(--panel);font-size:12px;color:var(--dim)}
 #paneB .ptitle{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -1529,3 +1529,28 @@ body.side-off .side,body.side-off .resizer[data-rs=side]{display:none}
 body.pane2 .titlebar,body.pane2 .side,body.pane2 .resizer,body.pane2 #right,body.pane2 #rightRs,body.pane2 #tabbar,body.pane2 .statusbar,body.pane2 .ctxpanel,body.pane2 #notes,body.pane2 .toast,body.pane2 .page{display:none!important}
 body.pane2 .win{height:100%}
 body.pane2 #paneA{padding:0}
+
+/* ---- 寵物欄 */
+.petwrap{display:flex;flex-direction:column;height:100%;gap:10px;padding:14px 12px 12px;overflow:hidden}
+.petstage{position:relative;display:flex;flex-direction:column;align-items:center;gap:8px;flex:0 0 auto}
+#petImg{width:136px;height:136px;border-radius:22px;object-fit:cover;background:#fdf6ea;
+  box-shadow:0 8px 22px rgb(20 30 60 / .16);transition:transform .18s}
+#petImg:hover{transform:translateY(-2px) scale(1.02)}
+.petbub{position:relative;max-width:250px;background:var(--panel2);color:var(--text);
+  border:1px solid var(--line);border-radius:14px;padding:8px 11px;font-size:12.5px;line-height:1.55;
+  box-shadow:0 6px 18px rgb(20 30 60 / .10);opacity:0;transform:translateY(4px);
+  transition:opacity .18s,transform .18s;pointer-events:none;text-align:center}
+.petbub.on{opacity:1;transform:none}
+.petbub::after{content:'';position:absolute;left:50%;bottom:-6px;margin-left:-6px;
+  border:6px solid transparent;border-top-color:var(--panel2);border-bottom:0}
+.petname{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--faint)}
+.petname b{color:var(--dim);font-weight:600}
+.petbtns{display:flex;gap:6px;justify-content:center}
+.pethist{flex:1 1 auto;min-height:60px;overflow:auto;display:flex;flex-direction:column;gap:6px;
+  font-size:12px;padding:2px}
+.petline{max-width:92%;padding:7px 10px;border-radius:12px;line-height:1.55;word-break:break-word}
+.petline.u{align-self:flex-end;background:var(--acc);color:var(--on-acc);border-bottom-right-radius:4px}
+.petline.p{align-self:flex-start;background:var(--bubble);color:var(--text);border-bottom-left-radius:4px}
+.petin{display:flex;gap:6px;flex:0 0 auto}
+.petin input{flex:1;min-width:0}
+#petFile{width:100%;font-size:12px;line-height:1.6}

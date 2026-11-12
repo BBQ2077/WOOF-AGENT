@@ -1228,5 +1228,63 @@ class Groups(unittest.TestCase):
         self.store.delete_session(sid)
 
 
+
+class Pet(unittest.TestCase):
+    """寵物：解析模型輸出、設定夾範圍、不看整份對話。"""
+
+    def up(self):
+        from woof import pet
+
+        return pet
+
+    def test_parse_json(self):
+        p = self.up()
+        got = p.parse('```json\n{"say":"辛苦了","face":"comfort","mood":"心疼"}\n```')
+        self.assertEqual(got["say"], "辛苦了")
+        self.assertEqual(got["face"], "comfort")
+        self.assertEqual(got["mood"], "心疼")
+
+    def test_parse_bad_face_goes_happy(self):
+        p = self.up()
+        self.assertEqual(p.parse('{"say":"嗨","face":"dancing"}')["face"], "happy")
+        self.assertEqual(p.parse("就一句話沒有 JSON")["say"], "就一句話沒有 JSON")
+        self.assertEqual(p.parse("")["say"], "")
+
+    def test_parse_quiet_glance(self):
+        p = self.up()
+        got = p.parse('{"say":"","face":"sleepy","mood":"想睡"}')
+        self.assertEqual(got["say"], "")
+        self.assertEqual(got["face"], "sleepy")
+
+    def test_clean_clamps(self):
+        p = self.up()
+        got = p.clean({"every_sec": 0, "ctx": 99999999, "max_out": 5, "watch": "head"})
+        self.assertEqual(got["every_sec"], 3)
+        self.assertEqual(got["ctx"], 200000)
+        self.assertEqual(got["max_out"], 40)
+        self.assertNotIn("watch", got)  # 舊欄位不再收
+        self.assertEqual(p.clean({"effort": "HIGH"})["effort"], "off")
+
+    def test_est_tokens(self):
+        p = self.up()
+        self.assertGreater(p.est_tokens("一二三四五"), 4)
+        self.assertLess(p.est_tokens("hello world"), 6)
+
+    def test_system_lists_every_face(self):
+        p = self.up()
+        system = p.build_system({"name": "小麥", "effort": "off"}, "glance")
+        for f in p.FACES:
+            self.assertIn(f, system)
+        self.assertIn("say", system)
+
+    def test_faces_have_images(self):
+        from woof.config import WEB_DIST
+
+        p = self.up()
+        for f in p.FACES:
+            ok = (p.TILES / (f + ".webp")).exists() or (WEB_DIST / "pet" / (f + ".webp")).exists()
+            self.assertTrue(ok, f)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

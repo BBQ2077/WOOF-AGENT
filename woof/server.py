@@ -697,6 +697,110 @@ async def apply_template(sid: str, body: dict):
     return {"ok": True, "off": off, "template": tid or None}
 
 
+# ---------------------------------------------------------------- 寵物
+@app.get("/api/pet")
+async def pet_get():
+    from . import pet
+
+    m = pet.pick_model()
+    return {"cfg": pet.cfg(), "state": pet.state(), "faces": pet.FACES,
+            "model": (m or {}).get("id"), "label": (m or {}).get("label"),
+            "history": pet.history()[-40:]}
+
+
+@app.put("/api/pet")
+async def pet_put(body: dict):
+    from . import config as wcfg, pet
+
+    cfg = wcfg.load_config()
+    cur = dict(cfg.get("pet") or {})
+    cur.update(pet.clean(body or {}))
+    cfg["pet"] = cur
+    save_config(cfg)
+    REG.config["pet"] = cur
+    m = pet.pick_model()
+    await broadcast({"type": "pet", "pet": pet.state()})
+    return {"cfg": pet.cfg(), "state": pet.state(), "faces": pet.FACES,
+            "model": (m or {}).get("id"), "label": (m or {}).get("label"),
+            "history": pet.history()[-40:]}
+
+
+@app.post("/api/pet/say")
+async def pet_say(body: dict):
+    from . import pet
+
+    text = str((body or {}).get("text") or "").strip()
+    if not text:
+        raise HTTPException(400, "要說點什麼")
+    sid = str((body or {}).get("session_id") or "") or None
+    if sid:
+        pet.watching(sid)
+    r = await pet.talk(text, sid, broadcast)
+    if r.get("error"):
+        raise HTTPException(400, r["error"])
+    r["history"] = pet.history()[-40:]
+    return r
+
+
+@app.post("/api/pet/glance")
+async def pet_glance(body: dict):
+    from . import pet
+
+    sid = str((body or {}).get("session_id") or "")
+    if not sid:
+        raise HTTPException(400, "要指定是哪個對話")
+    pet.watching(sid)
+    r = await pet.glance(sid, broadcast, force=True)
+    return {"state": pet.state(), "spoke": bool(r)}
+
+
+@app.post("/api/pet/reset")
+async def pet_reset():
+    from . import pet
+
+    pet.reset_chat()
+    await broadcast({"type": "pet", "pet": pet.state()})
+    return {"state": pet.state(), "history": []}
+
+
+@app.get("/api/pet/file")
+async def pet_file_get():
+    from . import pet
+
+    return {"text": pet.persona(), "faces": pet.FACES, "state": pet.state()}
+
+
+@app.put("/api/pet/file")
+async def pet_file_put(body: dict):
+    from . import pet
+
+    pet.save_persona((body or {}).get("text") or "")
+    return {"ok": True, "text": pet.persona()}
+
+
+@app.get("/api/pet/sprite/{face}")
+async def pet_sprite(face: str):
+    from fastapi.responses import FileResponse
+
+    from . import pet
+
+    if face not in pet.FACES:
+        raise HTTPException(404)
+    f = pet.TILES / f"{face}.webp"
+    if not f.exists():  # 沒有自己的圖就用程式內建的那一套
+        f = WEB_DIST / "pet" / f"{face}.webp"
+    if not f.exists():
+        raise HTTPException(404)
+    return FileResponse(str(f), media_type="image/webp")
+
+
+@app.on_event("startup")
+async def _pet_beat():
+    from . import pet
+
+    pet.start_heartbeat()
+
+
 # ---------------------------------------------------------------- 對話群組
 @app.get("/api/groups")
 async def groups_list():
@@ -844,6 +948,9 @@ async def search_all(q: str = "", limit: int = 40, sid: str | None = None):
 
 @app.get("/api/sessions/{sid}/messages")
 async def messages(sid: str):
+    from . import pet
+
+    pet.watching(sid)
     return store.get_messages(sid)
 
 
@@ -1892,7 +1999,18 @@ async def _turn(sid: str, blocks: list[dict]) -> None:
 
     status = await _guarded(sid, body, "執行失敗")
     await _close_or_resume(sid, status, _resume_turn)
+    asyncio.create_task(_pet_after(sid))
     return status
+
+
+async def _pet_after(sid: str) -> None:
+    """一回合結束後，讓寵物看要不要講一句。壞了不影響對話。"""
+    from . import pet
+
+    try:
+        await pet.after_turn(sid, broadcast)
+    except Exception:
+        pass
 
 
 async def _resume_turn(sid: str) -> None:

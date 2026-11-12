@@ -470,6 +470,9 @@ function wsSend(obj) {
 function onEvent(ev) {
   const sid = ev.session_id;
   switch (ev.type) {
+    case 'pet':
+      petEvent(ev.pet);
+      break;
     case 'run_start':
       S.running.add(sid); S.live[sid] = { thinking: '', text: '' }; delete S.errors[sid];
       renderSessions(); if (sid === S.sid) { renderChat(); renderComposer(); renderTaskBar(); }
@@ -2850,6 +2853,7 @@ function openTab(id) {
   if (id === 'paneFiles') loadTree();
   if (id === 'paneTerm') syncTerms();
   if (id === 'paneArts') renderArts();
+  if (id === 'panePet') petLoad();
   localStorage.setItem('woof.rtab', id);
 }
 $('#togRight').onclick = () => setRight($('#right').classList.contains('hide'));
@@ -3882,6 +3886,7 @@ const SECTIONS = [
   ['keys', 'API 金鑰', '同一個金鑰池可以放多把 key，一把用完自動換下一把。'],
   ['prompts', '提示詞與記憶', 'WOOF 寫給模型的內部提示詞，以及設定檔、人物檔、使用者檔、記憶檔。'],
   ['styles', '輸出風格', '每個對話可以選一種風格，內容會放進系統提示。'],
+  ['pet', '寵物', '住在旁邊的小狗。自己的對話窗、自己的檔、自己的壓縮，跟主對話完全分開。'],
   ['compress', '上下文壓縮', '對話變長時把較早的內容摘要起來，全文仍留在資料庫。'],
   ['perms', '權限', '模型要用工具時，依類別決定直接執行、先問你、或不允許。'],
   ['tools', '工具', '每個工具一個開關，依插件分組。停用後模型看不到該工具。'],
@@ -3898,6 +3903,7 @@ const SECTIONS = [
 const SET_GROUPS = [
   ['模型', ['vendors', 'aux', 'keys']],
   ['對話', ['prompts', 'styles', 'compress']],
+  ['寵物', ['pet']],
   ['能力', ['perms', 'presets', 'tools', 'skills']],
   ['環境', ['general', 'appearance', 'remote']],
   ['進階', ['mcp', 'snapshots', 'about']],
@@ -4308,7 +4314,7 @@ function renderSettings() {
   const box = $('#setList');
   box.onclick = null;
   box.className = 'sec-' + sec[0];
-  ({ mcp: renderMcpSec, aux: renderAux, compress: renderCompressSec, prompts: renderPromptsSec, vendors: renderVendors, keys: renderKeyEditor, appearance: renderAppearance, general: renderGeneral, perms: renderPermsSec, presets: renderPresetsSec, remote: renderRemoteSec, about: renderAbout, styles: renderStylesSec, snapshots: renderSnapshotsSec, tools: renderToolsSet, skills: renderSkillsSet })[sec[0]](box);}
+  ({ mcp: renderMcpSec, aux: renderAux, compress: renderCompressSec, prompts: renderPromptsSec, vendors: renderVendors, keys: renderKeyEditor, appearance: renderAppearance, general: renderGeneral, perms: renderPermsSec, presets: renderPresetsSec, remote: renderRemoteSec, about: renderAbout, styles: renderStylesSec, pet: renderPetSec, snapshots: renderSnapshotsSec, tools: renderToolsSet, skills: renderSkillsSet })[sec[0]](box);}
 $('#setNav').onclick = (e) => { const d = e.target.closest('[data-sec]'); if (!d) return; setFindClear(); S.setSec = d.dataset.sec; localStorage.setItem('woof.setSec', S.setSec); renderSettings(); };
 $('#setQ').oninput = (e) => { S.setQ = e.target.value; renderSettings(); };
 $('#setQ').onkeydown = (e) => {
@@ -5952,3 +5958,177 @@ if (PANE2) {
   if (document.readyState === 'complete') setTimeout(go2, 400);
   else window.addEventListener('load', () => setTimeout(go2, 400));
 }
+
+// ---- 寵物：側邊自己的對話窗（訊息、提示詞、壓縮都跟主對話分開）
+const PET = { cfg: null, st: { face: 'happy', say: '', mood: '', at: 0 }, hist: [], faces: [],
+  busy: false, model: '', label: '' };
+
+function petSprite(face) {
+  return `${BASE}/api/pet/sprite/${encodeURIComponent(face || 'happy')}?token=${encodeURIComponent(TOKEN)}`;
+}
+
+function petPaint() {
+  const img = $('#petImg');
+  if (!img) return;
+  img.src = petSprite(PET.st && PET.st.face);
+  const bub = $('#petBub');
+  if (bub) {
+    const s = String((PET.st && PET.st.say) || '').trim();
+    bub.textContent = s;
+    bub.classList.toggle('on', !!s);
+  }
+  const mood = $('#petMood');
+  if (mood) mood.textContent = (PET.st && PET.st.mood) || '';
+  const nm = $('#petName');
+  if (nm) nm.textContent = (PET.cfg && PET.cfg.name) || '小麥';
+  const h = $('#petHist');
+  if (h) {
+    h.innerHTML = PET.hist.slice(-40).map((m) => `<div class="petline ${m.role === 'pet' ? 'p' : 'u'}">${esc(m.text)}</div>`).join('');
+    h.scrollTop = h.scrollHeight;
+  }
+}
+
+async function petLoad() {
+  try {
+    const d = await api('GET', '/api/pet');
+    PET.cfg = d.cfg; PET.st = d.state || PET.st; PET.faces = d.faces || [];
+    PET.model = d.model; PET.label = d.label; PET.hist = d.history || [];
+    petPaint();
+  } catch (e) { /* 後端還沒好就算了，下次再讀 */ }
+}
+
+function petEvent(p) {
+  if (!p) return;
+  PET.st = p;
+  petPaint();
+}
+
+async function petSay() {
+  const inp = $('#petIn');
+  if (!inp || PET.busy) return;
+  const text = inp.value.trim();
+  if (!text) return;
+  PET.busy = true; inp.value = ''; inp.disabled = true;
+  PET.hist.push({ role: 'user', text });
+  petPaint();
+  try {
+    const d = await api('POST', '/api/pet/say', { text, session_id: S.sid || '' });
+    PET.st = d; PET.hist = d.history || PET.hist;
+    petPaint();
+  } catch (e) {
+    PET.hist.pop();
+    petPaint();
+    notify('error', '牠沒聽到', e.message);
+    inp.value = text;
+  } finally {
+    PET.busy = false; inp.disabled = false;
+    if (document.activeElement !== inp) inp.focus();
+  }
+}
+
+async function petPoke() {
+  if (!S.sid) { notify('warn', '先開一個對話', '牠才看得到東西。'); return; }
+  try {
+    const d = await api('POST', '/api/pet/glance', { session_id: S.sid });
+    PET.st = d.state || PET.st;
+    petPaint();
+    if (!d.spoke) notify('info', '牠看了一眼', '這次沒什麼想說的。');
+  } catch (e) { notify('error', '失敗', e.message); }
+}
+
+async function petSave(patch) {
+  try {
+    const d = await api('PUT', '/api/pet', patch);
+    PET.cfg = d.cfg; PET.st = d.state || PET.st;
+    return d;
+  } catch (e) { notify('error', '存不起來', e.message); return null; }
+}
+
+$('#panePet').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-pet]');
+  if (!b) return;
+  const k = b.dataset.pet;
+  if (k === 'say') petSay();
+  if (k === 'poke') petPoke();
+  if (k === 'reset') {
+    confirmBox('清掉牠記得的事？', '牠自己的對話與摘要會清空。主對話完全不受影響。', { ok: '清空', danger: true })
+      .then((ok) => ok && api('POST', '/api/pet/reset', {}).then((d) => {
+        PET.st = d.state || PET.st; PET.hist = []; petPaint();
+        notify('ok', '牠忘記了', '重新開始。');
+      }));
+  }
+});
+$('#panePet').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && e.target.id === 'petIn') { e.preventDefault(); petSay(); }
+});
+
+// ---- 設定 → 寵物
+function renderPetSec(box) {
+  box.innerHTML = '<div class="blank">讀取中…</div>';
+  api('GET', '/api/pet').then((d) => {
+    const c = d.cfg;
+    const models = (S.cfg.models || []);
+    const rows = [
+      ['on', '開著', '關掉就不會看對話、也不會講話；牠記得的事還留著。'],
+    ];
+    box.innerHTML = `<div class="card">
+      <div class="frow"><div><b>開著</b><small>關掉就不會看對話、也不會講話；牠記得的事還留著。</small></div>
+        <div class="fctl"><span class="sw${c.on ? ' on' : ''}" data-petf="on"></span></div></div>
+      <div class="frow"><div><b>名字</b><small>顯示在寵物欄。</small></div>
+        <input data-petf="name" value="${esc(c.name)}" maxlength="16"></div>
+      <div class="frow"><div><b>模型</b><small>牠用自己的模型，不跟主對話共用。DS 這種便宜的就夠。</small></div>
+        <div class="fctl"><select data-petf="model">${models.map((m) => `<option value="${esc(m.id)}"${c.model === m.id ? ' selected' : ''}>${esc(m.label || m.id)}</option>`).join('')}</select></div></div>
+      <div class="frow"><div><b>思考</b><small>先想一想再開口。寵物通常不用，會慢一點。</small></div>
+        <div class="seg">${[['off', '不用'], ['on', '想一下']].map(([v, n]) => `<b class="${c.effort === v ? 'on' : ''}" data-petseg="${v}">${n}</b>`).join('')}</div></div>
+      <div class="frow"><div><b>一次講多少</b><small>最多 ${c.max_out} tokens。太長會變成在演講。</small></div>
+        <input type="range" min="60" max="600" step="20" value="${c.max_out}" data-petf="max_out"></div>
+      <div class="frow"><div><b>多久看一次</b><small>每 ${c.every_sec} 秒瞄一眼開著的對話。沒有新內容不會叫模型，所以放著不會一直花錢。</small></div>
+        <input type="number" min="3" max="600" value="${c.every_sec}" data-petf="every_sec"></div>
+      <div class="frow"><div><b>每次看多少</b><small>從主對話抓最近約 ${c.peek} tokens 的片段給牠看。</small></div>
+        <input type="number" min="300" max="20000" step="100" value="${c.peek}" data-petf="peek"></div>
+      <div class="frow"><div><b>牠自己的記憶上限</b><small>${Number(c.ctx).toLocaleString()} tokens，超過八成自己壓縮，留最近 ${c.keep} 則原文。跟主對話的壓縮分開。</small></div>
+        <input type="number" min="4000" max="200000" step="1000" value="${c.ctx}" data-petf="ctx"></div>
+      <div class="frow"><div><b>也在主對話留一句</b><small>打開後牠講的話會出現在對話裡（前面有腳印）。預設只留在寵物欄。</small></div>
+        <div class="fctl"><span class="sw${c.speak_up ? ' on' : ''}" data-petf="speak_up"></span></div></div>
+    </div>
+    <div class="card"><div class="card-hd"><b>寵物檔</b><small>只有牠看得到。主對話的人格檔、記憶檔跟這份完全分開。</small></div>
+      <textarea id="petFile" rows="16" class="mono" spellcheck="false" placeholder="讀取中…"></textarea>
+      <div class="frow"><div><b>存檔</b><small>下一次牠講話就用新版。</small></div>
+        <div class="fctl"><button class="btn" data-petf="saveFile">儲存寵物檔</button></div></div>
+    </div>
+    <div class="card"><div class="card-hd"><b>牠記得的事</b><small>牠自己的對話與摘要，只有牠看得到。</small></div>
+      <div class="frow"><div><b>${d.state.msgs} 則訊息</b><small>清掉不影響主對話，只是牠會忘記你們聊過什麼。</small></div>
+        <div class="fctl"><button class="btn" data-petf="reset">清空牠的記憶</button></div></div>
+    </div>`;
+    api('GET', '/api/pet/file').then((f) => { const t = $('#petFile'); if (t) t.value = f.text; });
+    box.onclick = (e) => {
+      const seg = e.target.closest('[data-petseg]');
+      if (seg) { petSave({ effort: seg.dataset.petseg }).then(() => renderPetSec(box)); return; }
+      const el = e.target.closest('[data-petf]');
+      if (!el) return;
+      const k = el.dataset.petf;
+      if (k === 'on' || k === 'speak_up') {
+        petSave({ [k]: !el.classList.contains('on') }).then(() => renderPetSec(box));
+      } else if (k === 'saveFile') {
+        api('PUT', '/api/pet/file', { text: $('#petFile').value })
+          .then(() => notify('ok', '寵物檔存好了', '下一次牠講話就用新的。'))
+          .catch((err) => notify('error', '存不起來', err.message));
+      } else if (k === 'reset') {
+        confirmBox('清掉牠記得的事？', '牠自己的對話與摘要會清空，主對話不受影響。', { ok: '清空', danger: true })
+          .then((ok) => ok && api('POST', '/api/pet/reset', {}).then(() => renderPetSec(box)));
+      }
+    };
+    box.onchange = (e) => {
+      const el = e.target.closest('[data-petf]');
+      if (!el) return;
+      const k = el.dataset.petf;
+      if (['name', 'model', 'max_out', 'every_sec', 'peek', 'ctx'].includes(k)) {
+        petSave({ [k]: el.value }).then(() => renderPetSec(box));
+      }
+    };
+  }).catch((err) => { box.innerHTML = `<div class="errbox">讀取失敗：${esc(err.message)}</div>`; });
+}
+
+petLoad().then(() => {
+  if (PET.cfg && PET.cfg.on && localStorage.getItem('woof.rtab') !== 'panePet') openTab('panePet');
+});
