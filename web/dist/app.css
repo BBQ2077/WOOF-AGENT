@@ -1650,3 +1650,8 @@ body.pane2 #paneA{padding:0}
 .chargrid .charc{width:168px}
 
 .sugrow.model .sugbtn:only-child{grid-column:1 / -1}
+
+.petline{position:relative}
+.petreact{position:absolute;left:-7px;bottom:-7px;background:var(--panel);
+  border:1px solid var(--line2);border-radius:999px;padding:0 4px;font-size:12px;line-height:1.5}
+.petline.u.hasreact{margin-bottom:10px}

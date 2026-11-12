@@ -1297,6 +1297,17 @@ class Pet(unittest.TestCase):
         self.assertEqual(p.clean({"char": "fish"})["char"], "fish")
         self.assertNotIn("char", p.clean({"char": "cat"}))
 
+    def test_parse_multibubble_and_react(self):
+        p = self.up()
+        g = p.parse('{"say":["汪！","尾巴斷了"],"face":"cheer","mood":"開心","react":"🐾"}')
+        self.assertEqual(g["say"].count("\n"), 1)
+        self.assertEqual(g["react"], "🐾")
+        self.assertTrue(g["_ok"])
+
+    def test_parse_react_defaults_empty(self):
+        p = self.up()
+        self.assertEqual(p.parse('{"say":"汪"}')["react"], "")
+
     def test_clean_quick(self):
         p = self.up()
         self.assertEqual(p.clean({"quick": "嗯嗯|然後呢"})["quick"], ["嗯嗯", "然後呢"])

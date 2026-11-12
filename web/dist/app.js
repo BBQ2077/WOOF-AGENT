@@ -5984,9 +5984,10 @@ function petPaint() {
   const mood = $('#petMood');
   if (mood) mood.textContent = (PET.st && PET.st.mood) || '';
   const nm = $('#petName');
-  if (nm) nm.textContent = (PET.st && PET.st.name) || '小麥';
+  const pname = (PET.st && PET.st.name) || '沃夫';
+  if (nm) nm.textContent = pname;
   const inp = $('#petIn');
-  if (inp) inp.placeholder = `跟${(PET.st && PET.st.name) || '小麥'}說話…`;
+  if (inp) inp.placeholder = uiLang() === 'en' ? `Talk to ${pname}…` : `跟${pname}說話…`;
   const sb = $('#petSug');
   if (sb) {
     const sug = (PET.st && PET.st.sug) || [];
@@ -6005,7 +6006,14 @@ function petPaint() {
   if (h) {
     const list = PET.hist.slice(-40);
     h.innerHTML = list.length
-      ? list.map((m) => `<div class="petline ${m.role === 'pet' ? 'p' : 'u'}">${esc(m.text)}</div>`).join('')
+      ? list.map((m) => {
+        if (m.role !== 'pet') {
+          const r = m.react ? `<span class="petreact">${esc(m.react)}</span>` : '';
+          return `<div class="petline u${r ? ' hasreact' : ''}">${esc(m.text)}${r}</div>`;
+        }
+        return String(m.text || '').split('\n').filter((x) => x.trim())
+          .map((line) => `<div class="petline p">${esc(line)}</div>`).join('');
+      }).join('')
       : '<div class="pethint">牠會看著你開著的對話，偶爾說一兩句。<br>想找牠說話，直接打字就好。</div>';
     h.scrollTop = h.scrollHeight;
   }
