@@ -3886,7 +3886,7 @@ const SECTIONS = [
   ['keys', 'API 金鑰', '同一個金鑰池可以放多把 key，一把用完自動換下一把。'],
   ['prompts', '提示詞與記憶', 'WOOF 寫給模型的內部提示詞，以及設定檔、人物檔、使用者檔、記憶檔。'],
   ['styles', '輸出風格', '每個對話可以選一種風格，內容會放進系統提示。'],
-  ['pet', '寵物', '住在旁邊的小狗。自己的對話窗、自己的檔、自己的壓縮，跟主對話完全分開。'],
+  ['pet', '寵物', '住在旁邊的小狗。自己的對話窗、自己的檔、自己的壓縮；對你的對話唯讀——看得到，但不會插話、不會動工具、不會改任何東西。'],
   ['compress', '上下文壓縮', '對話變長時把較早的內容摘要起來，全文仍留在資料庫。'],
   ['perms', '權限', '模型要用工具時，依類別決定直接執行、先問你、或不允許。'],
   ['tools', '工具', '每個工具一個開關，依插件分組。停用後模型看不到該工具。'],
@@ -5983,7 +5983,10 @@ function petPaint() {
   if (nm) nm.textContent = (PET.cfg && PET.cfg.name) || '小麥';
   const h = $('#petHist');
   if (h) {
-    h.innerHTML = PET.hist.slice(-40).map((m) => `<div class="petline ${m.role === 'pet' ? 'p' : 'u'}">${esc(m.text)}</div>`).join('');
+    const list = PET.hist.slice(-40);
+    h.innerHTML = list.length
+      ? list.map((m) => `<div class="petline ${m.role === 'pet' ? 'p' : 'u'}">${esc(m.text)}</div>`).join('')
+      : '<div class="pethint">牠會看著你開著的對話，偶爾說一兩句。<br>想找牠說話，直接打字就好。</div>';
     h.scrollTop = h.scrollHeight;
   }
 }
@@ -6088,7 +6091,7 @@ function renderPetSec(box) {
         <input type="number" min="300" max="20000" step="100" value="${c.peek}" data-petf="peek"></div>
       <div class="frow"><div><b>牠自己的記憶上限</b><small>${Number(c.ctx).toLocaleString()} tokens，超過八成自己壓縮，留最近 ${c.keep} 則原文。跟主對話的壓縮分開。</small></div>
         <input type="number" min="4000" max="200000" step="1000" value="${c.ctx}" data-petf="ctx"></div>
-      <div class="frow"><div><b>也在主對話留一句</b><small>打開後牠講的話會出現在對話裡（前面有腳印）。預設只留在寵物欄。</small></div>
+      <div class="frow"><div><b>允許牠在主對話留一句</b><small>預設關，也就是完全唯讀：牠只看得到你的對話，不能寫進去。打開後牠講的話才會用腳印（🐾）出現在對話裡。</small></div>
         <div class="fctl"><span class="sw${c.speak_up ? ' on' : ''}" data-petf="speak_up"></span></div></div>
     </div>
     <div class="card"><div class="card-hd"><b>寵物檔</b><small>只有牠看得到。主對話的人格檔、記憶檔跟這份完全分開。</small></div>

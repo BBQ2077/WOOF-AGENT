@@ -1554,3 +1554,7 @@ body.pane2 #paneA{padding:0}
 .petin{display:flex;gap:6px;flex:0 0 auto}
 .petin input{flex:1;min-width:0}
 #petFile{width:100%;font-size:12px;line-height:1.6}
+
+.petro{font-size:10px;padding:1px 5px;border-radius:5px;background:var(--hover);color:var(--faint);letter-spacing:.02em}
+
+.pethint{color:var(--faint);font-size:12px;line-height:1.9;text-align:center;padding:18px 10px}

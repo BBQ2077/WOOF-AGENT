@@ -1916,4 +1916,10 @@ window.WOOF_EN = {
 "失敗": "Failed",
 "關掉就不會看對話、也不會講話；牠記得的事還留著。": "When it's off it won't watch or speak; what it remembers stays.",
 "牠自己的對話與摘要，只有牠看得到。": "Its own chat and notes, visible only to it.",
+"唯讀": "Read-only",
+"住在旁邊的小狗。自己的對話窗、自己的檔、自己的壓縮；對你的對話唯讀——看得到，但不會插話、不會動工具、不會改任何東西。": "A little dog living beside you. Its own chat, its own file, its own compression — and read-only towards your chats: it can look, but cannot speak up, use tools, or change anything.",
+"允許牠在主對話留一句": "Let it leave a line in the chat",
+"預設關，也就是完全唯讀：牠只看得到你的對話，不能寫進去。打開後牠講的話才會用腳印（🐾）出現在對話裡。": "Off by default, which means fully read-only: it can read your chats but never write. When on, its lines appear in the chat with a paw print (🐾).",
+"牠會看著你開著的對話，偶爾說一兩句。": "It watches the chat you have open and chimes in now and then.",
+"想找牠說話，直接打字就好。": "Want to talk to it? Just type below.",
 };

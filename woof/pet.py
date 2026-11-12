@@ -428,7 +428,8 @@ async def _heartbeat() -> None:
             sid = _WATCH.get("sid") or ""
             if not sid or not c.get("on"):
                 continue
-            await glance(sid, None)
+            from . import server as _srv  # 背景說話也要推給畫面
+            await glance(sid, _srv.broadcast)
         except asyncio.CancelledError:
             return
         except Exception:
