@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<title>WOOF</title>
+<script src="prefs.js?v=1"></script>
+<script src="theme.js?v=14"></script>
+<link rel="icon" type="image/png" href="brand/favicon.png">
+<link rel="stylesheet" href="vendor/hljs.css">
+<link rel="stylesheet" href="app.css?v=68">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-right" viewBox="0 0 24 24"><path d="M10 7l5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-heart" viewBox="0 0 24 24"><path d="M12 20s-7-4.4-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.6-7 10-7 10z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+  <symbol id="i-heart-f" viewBox="0 0 24 24"><path d="M12 20s-7-4.4-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.6-7 10-7 10z" fill="currentColor" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M16 16l4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-chat" viewBox="0 0 24 24"><path d="M5 6.5A2.5 2.5 0 0 1 7.5 4h9A2.5 2.5 0 0 1 19 6.5v7a2.5 2.5 0 0 1-2.5 2.5H11l-4 3.5V16a2.5 2.5 0 0 1-2-2.5z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+  <symbol id="i-puzzle" viewBox="0 0 24 24"><path d="M9 4.5a2 2 0 0 1 4 0V6h4v4h-1.5a2 2 0 0 0 0 4H17v4h-4v-1.5a2 2 0 0 0-4 0V18H5v-4h1.5a2 2 0 0 0 0-4H5V6h4z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 3v2.2M12 18.8V21M3 12h2.2M18.8 12H21M5.6 5.6l1.6 1.6M16.8 16.8l1.6 1.6M5.6 18.4l1.6-1.6M16.8 7.2l1.6-1.6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+  <symbol id="i-panel" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M14.5 5v14" stroke="currentColor" stroke-width="1.7"/></symbol>
+  <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 3L5 13.5h6L10 21l8-10.5h-6z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+  <symbol id="i-image" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="9" cy="10" r="1.6" fill="currentColor"/><path d="M5 17l4.5-4.5 3 3 2.5-2.5L19 17" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+  <symbol id="i-compress" viewBox="0 0 24 24"><path d="M8 4v4H4M16 4v4h4M8 20v-4H4M16 20v-4h4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-steer" viewBox="0 0 24 24"><path d="M4 9a7 7 0 0 1 13-2.5M17 3v4h-4M11 13a1.6 1.6 0 1 0 0 .01M4 19h16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="M8 8V5.5A1.5 1.5 0 0 1 9.5 4h9A1.5 1.5 0 0 1 20 5.5v9a1.5 1.5 0 0 1-1.5 1.5H16M5.5 8h9A1.5 1.5 0 0 1 16 9.5v9a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 4 18.5v-9A1.5 1.5 0 0 1 5.5 8z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+  <symbol id="i-woof" viewBox="0 0 512 512"><g fill="currentColor" transform="translate(256 256) scale(0.84) translate(-256 -272)"><ellipse cx="140" cy="236" rx="38" ry="49" transform="rotate(-24 140 236)"/><ellipse cx="208" cy="150" rx="39" ry="52" transform="rotate(-10 208 150)"/><ellipse cx="304" cy="150" rx="39" ry="52" transform="rotate(10 304 150)"/><ellipse cx="372" cy="236" rx="38" ry="49" transform="rotate(24 372 236)"/><path d="M256 252c40 0 70 30 96 66 22 30 34 50 34 74 0 32-24 52-56 52-28 0-46-14-74-14s-46 14-74 14c-32 0-56-20-56-52 0-24 12-44 34-74 26-36 56-66 96-66z"/></g></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M9 6.5v11M15 6.5v11" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+  <symbol id="i-side" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M9.5 5v14" stroke="currentColor" stroke-width="1.7"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 7.5V12l3 2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M19 12a7 7 0 1 1-2.1-5M19 4v4h-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M4 7.5A1.5 1.5 0 0 1 5.5 6H10l2 2h6.5A1.5 1.5 0 0 1 20 9.5v8a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2M7 7l1 12h8l1-12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="11" height="11" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M15.5 8V6.5A2 2 0 0 0 13.5 4.5h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2H8" fill="none" stroke="currentColor" stroke-width="1.7"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24"><path d="M15.5 4.5a2 2 0 0 1 3 3L8 18l-4 1 1-4z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+  <symbol id="i-archive" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="4" rx="1" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M5 8.5v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-10M10 12.5h4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+  <symbol id="i-branch" viewBox="0 0 24 24"><circle cx="7" cy="6" r="2" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="7" cy="18" r="2" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="17" cy="8" r="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M7 8v8M17 10c0 4-10 2-10 6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+  <symbol id="i-pin" viewBox="0 0 24 24"><path d="M9 4h6l-1 6 3 3H7l3-3zM12 13v7" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" stroke-linecap="round"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 19h14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3.5l7 3v5c0 4.5-3 7.8-7 9-4-1.2-7-4.5-7-9v-5z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13l10-6.5z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+  <symbol id="i-plug" viewBox="0 0 24 24"><path d="M9 3v4M15 3v4M7 7h10v4a5 5 0 0 1-10 0zM12 16v5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 7v6M12 16.5v.5" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><path d="M12 11v6M12 7.5v.5" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></symbol>
+  <symbol id="i-agent" viewBox="0 0 24 24"><circle cx="12" cy="6" r="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="5.5" cy="18" r="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="18.5" cy="18" r="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 8.5v3M12 11.5l-5.2 4.3M12 11.5l5.2 4.3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+  <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M9.6 9.5a2.5 2.5 0 1 1 3.4 2.3c-.6.3-1 .8-1 1.5v.4M12 16.6v.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+  <symbol id="i-new" viewBox="0 0 24 24"><path d="M12 20h7M15.5 4.5a2 2 0 0 1 3 3L8 18l-4 1 1-4z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+</svg>
+
+<div class="win">
+  <div class="titlebar">
+    <div class="tb-left"><span class="tbtn" id="togSide" title="側邊欄　Ctrl+B"><svg><use href="#i-side"/></svg></span></div>
+    <div class="tb-title" id="tbTitle"></div>
+    <div class="tb-act"><span class="tbtn" id="togRight" title="右側面板"><svg><use href="#i-panel"/></svg></span></div>
+    <div class="wc">
+      <div data-win="min" title="最小化">&#xE921;</div>
+      <div data-win="max" title="最大化">&#xE922;</div>
+      <div data-win="close" title="關閉到系統匣">&#xE8BB;</div>
+    </div>
+  </div>
+  <div class="body">
+    <aside class="side">
+      <div class="side-top">
+        <div class="newbtn" id="newBtn"><svg><use href="#i-new"/></svg>新對話<kbd>Ctrl N</kbd></div>
+        <div class="sidenav">
+          <div id="navCron"><svg><use href="#i-clock"/></svg>排程工作<span class="nav-badge" id="cronBadge" hidden></span></div>
+          <div id="navPlug"><svg><use href="#i-puzzle"/></svg>插件</div>
+        </div>
+        <label class="search"><svg><use href="#i-search"/></svg><input id="search" placeholder="搜尋對話"><kbd>Ctrl K</kbd></label>
+      </div>
+      <div class="slist" id="sessionList"></div>
+      <div class="sidefoot">
+        <div id="navSet"><svg><use href="#i-gear"/></svg>設定</div>
+      </div>
+    </aside>
+    <div class="resizer" data-rs="side" title="拖拉調整寬度，雙擊還原"></div>
+
+    <main class="main" id="chatView">
+      <div class="chat" id="chat"></div>
+      <div class="composer">
+        <div class="cwrap">
+          <div class="taskbar" id="taskBar" hidden></div>
+          <div class="queuebox" id="queueBox" hidden></div>
+          <div class="inject" id="runHint"><span class="spin"></span>執行中 · 輸入後按 Enter 插入下一步 · Esc 停止</div>
+          <span class="tobottom" id="toBottom" title="回到最新"><svg><use href="#i-down"/></svg></span>
+          <div class="attach" id="attach"></div>
+          <div class="cbox" id="cbox">
+            <textarea id="input" rows="1" placeholder="輸入訊息，Enter 送出，Shift+Enter 換行"></textarea>
+            <div class="cbar">
+              <span class="ic" id="plusBtn" title="附加圖片、壓縮上下文"><svg><use href="#i-plus"/></svg></span>
+              <span class="pill" id="modePill" data-spick="mode" title="對話模式"><span id="modePillTxt">一般</span><svg><use href="#i-down"/></svg></span>
+              <span class="pill" id="permPill" title="工具執行權限"><svg><use href="#i-shield"/></svg><span id="permPillTxt">自動執行</span></span>
+              <span class="cgap"></span>
+              <span class="pill" id="scopePill" title="這個對話能用哪些插件（模板）"><span id="scopePillTxt">插件</span></span>
+              <span class="pill" id="modelPill" title="切換模型"><span id="modelPillTxt">選擇模型</span><svg><use href="#i-down"/></svg></span>
+              <span class="pill" id="effortPill" title="思考強度"><span id="effortPillTxt">思考</span><svg><use href="#i-down"/></svg></span>
+              <span class="ic tipc" id="steerBtn" hidden data-tip="插話：在下一次工具呼叫後送進目前回合，不中斷"><svg><use href="#i-steer"/></svg></span><span class="ic tipc" id="queueBtn" hidden data-tip="排隊訊息　Ctrl+Enter"><svg><use href="#i-layers"/></svg></span>
+              <button class="send" id="sendBtn" title="送出"><svg><use href="#i-up"/></svg></button>
+            </div>
+            <input type="file" id="fileIn" accept="image/*" multiple hidden>
+          </div>
+          <div class="pop" id="plusMenu">
+            <div class="mi" data-act="image"><svg><use href="#i-image"/></svg>附加圖片<small>也可以直接貼上或拖進來</small></div>
+            <div class="mi" data-act="compact"><svg><use href="#i-compress"/></svg>壓縮上下文<small>把較早的訊息摘要起來</small></div>
+          </div>
+          <div class="pop wide" id="modelMenu">
+            <label class="msearch"><svg><use href="#i-search"/></svg><input id="modelSearch" placeholder="搜尋模型或模型商"></label>
+            <div class="mlist" id="modelList"></div>
+            <div class="mfoot3"><span id="modelReload"><svg><use href="#i-refresh"/></svg>重新整理模型</span><span id="modelAdd"><svg><use href="#i-plus"/></svg>新增自訂模型…</span><span id="modelEdit"><svg><use href="#i-gear"/></svg>編輯模型…</span></div>
+          </div>
+          <div class="pop" id="effortMenu"></div>
+          <div class="pop" id="permMenu"></div>
+          <div class="pop" id="slashMenu"></div>
+        </div>
+      </div>
+      <div class="statusbar">
+        <span class="sb" id="sbDir"><svg><use href="#i-folder"/></svg><span id="sbDirTxt"></span></span>
+        <span class="grow"></span>
+        <span class="sb" id="sbTasks" title="背景任務"><svg><use href="#i-bolt"/></svg><span id="sbTasksTxt">沒有背景任務</span></span>
+        <span class="sb" id="meter"><span class="ring"><i id="meterFill"></i></span><span id="meterTxt">上下文 —</span><span class="meter-tip" id="meterTip"></span></span>
+        <span class="sb" id="compactBtn" title="手動壓縮較早的訊息"><svg><use href="#i-compress"/></svg>壓縮</span>
+        <span class="sb" id="sbVer" title="關於 WOOF"><span id="sbVerTxt">WOOF</span></span>
+      </div>
+      <div class="ctxpanel" id="ctxPanel"></div>
+    </main>
+
+    <section class="page" id="cronView">
+      <div class="phead">
+        <div><h2>排程工作</h2><p id="cronSub">到時間就開一個新對話，把提示詞交給模型執行。</p></div>
+        <span class="btn primary" id="cronNew"><svg><use href="#i-plus"/></svg>新排程工作</span>
+      </div>
+      <div class="cron-split" id="cronBody"></div>
+    </section>
+
+    <section class="page" id="plugView">
+      <div class="phead">
+        <div><h2>插件</h2><p>模型連線、工具、掛鉤都是插件。點一列看詳情與設定；可以從範本新增，或把插件資料夾、zip 拖進來安裝。</p></div>
+        <span class="btn" id="plugReload" title="改過插件程式碼後重新載入"><svg><use href="#i-refresh"/></svg>重新載入</span>
+        <span class="btn" id="plugInstall"><svg><use href="#i-download"/></svg>安裝</span>
+        <span class="btn primary" id="plugNew"><svg><use href="#i-plus"/></svg>新增插件</span>
+      </div>
+      <div class="ptools"><div class="filters" id="plugFilters"></div><label class="search"><svg><use href="#i-search"/></svg><input id="plugSearch" placeholder="搜尋插件"></label></div>
+      <div class="list" id="plugGrid"></div>
+    </section>
+
+    <section class="page settings" id="setView">
+      <nav class="setnav" id="setNav"></nav>
+      <div class="setbody">
+        <div class="phead"><div><h2 id="setTitle">設定</h2><p id="setIntro"></p></div><span class="savest" id="setSaved"></span></div>
+        <div id="setList"></div>
+      </div>
+    </section>
+
+    <div class="resizer" data-rs="right" id="rightRs" title="拖拉調整寬度，雙擊還原"></div>
+    <aside class="right" id="right">
+      <div class="tabs">
+        <div class="on" data-p="paneTasks">任務</div><div data-p="paneFiles">檔案</div><div data-p="paneTerm">終端</div><div data-p="paneArts">產物</div><div data-p="paneKeys">額度</div>
+      </div>
+      <div class="pane on" id="paneTasks"></div>
+      <div class="pane" id="paneTerm"></div>
+      <div class="pane" id="paneKeys"></div>
+      <div class="pane" id="paneFiles"></div>
+      <div class="pane" id="paneArts"></div>
+    </aside>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+<div class="notes" id="notes"></div>
+<div class="viewer" id="viewer"><div class="vstage" id="vStage"><img id="viewerImg" draggable="false" alt=""></div>
+<span class="vnav prev" data-v="prev" title="上一張（←）">‹</span><span class="vnav next" data-v="next" title="下一張（→）">›</span>
+<div class="vbar"><span class="vname" id="vName"></span><span class="vsep"></span><b data-v="out" title="縮小（−）">−</b><span class="vpct" id="vPct" data-v="one" title="原始大小（1）">100%</span><b data-v="in" title="放大（+）">+</b><span class="vsep"></span><b data-v="fit" title="符合視窗（0）">符合</b><b data-v="one" title="原始大小（1）">1:1</b><b data-v="rot" title="旋轉（R）">↻</b><b data-v="folder" id="vFolder" title="在資料夾中顯示"><svg><use href="#i-folder"/></svg></b><b data-v="close" title="關閉（Esc）"><svg><use href="#i-x"/></svg></b></div></div>
+<script src="vendor/marked.min.js"></script>
+<script src="vendor/purify.min.js"></script>
+<script src="vendor/highlight.min.js"></script>
+<script src="i18n_en.js?v=9"></script>
+<script src="app.js?v=114"></script>
+</body>
+</html>

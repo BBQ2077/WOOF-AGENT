@@ -1,0 +1,5 @@
+name = "files"
+version = "0.1.0"
+kinds = ["tool"]
+description = "讀檔、寫檔、修改、搜尋"
+enabled = true

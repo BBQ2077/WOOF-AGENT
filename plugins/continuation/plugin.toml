@@ -1,0 +1,35 @@
+name = "continuation"
+version = "0.1.0"
+kinds = ["hook"]
+description = "做到一半停下時讓模型接著做完：輸出被截斷、說要做卻沒動手、待辦沒做完、背景指令結束、回合出錯或到步數上限"
+enabled = true
+
+[settings.truncated]
+type = "number"
+default = 3
+label = "回覆被輸出長度上限截斷時，自動請模型接著寫幾次（0＝不接）"
+
+[settings.stall]
+type = "number"
+default = 2
+label = "模型說「接下來我會…」卻沒呼叫工具就停下時，自動推它繼續幾次（0＝不推）"
+
+[settings.todo]
+type = "number"
+default = 1
+label = "回合結束時待辦清單還有沒做完的項目，自動提醒幾次（0＝不提醒；模型在問你問題時不提醒）"
+
+[settings.bg_notify]
+type = "boolean"
+default = true
+label = "模型放到背景的指令結束時，把結果送回對話讓模型接著處理（模型也可以在指令上關掉）"
+
+[settings.auto_resume]
+type = "number"
+default = 1
+label = "回合中途因連線或伺服器錯誤中斷時，自動接續幾次（0＝不自動，只顯示「繼續」按鈕）"
+
+[settings.max_steps]
+type = "number"
+default = 0
+label = "單一回合最多幾步（一步＝呼叫一次模型，同一步並行的多個工具算一步）。0＝不限；設了上限，剩 5 步會先請模型收尾，到上限暫停，按「繼續」接著做"

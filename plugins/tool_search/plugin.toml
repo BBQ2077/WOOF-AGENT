@@ -1,0 +1,26 @@
+name = "tool_search"
+version = "1.0.0"
+kinds = ["hook", "tool"]
+description = "工具延遲載入：MCP 工具和少用的工具先不送完整說明，模型用 tool_search 找、tool_describe 看參數、tool_call 執行，省每回合的 token"
+enabled = true
+
+[settings.mode]
+type = "select"
+default = "自動"
+options = ["自動", "開啟", "關閉"]
+label = "自動＝延遲的工具說明合計超過門檻才啟用；開啟＝有可延遲的工具就啟用；關閉＝全部工具照常送出"
+
+[settings.defer]
+type = "text"
+default = "schedule, process"
+label = "另外要延遲的內建工具（名稱用逗號分隔；MCP 工具一律可延遲）"
+
+[settings.threshold]
+type = "number"
+default = 1500
+label = "自動模式的門檻：延遲工具的說明合計超過幾個 token 才啟用"
+
+[settings.listing_max]
+type = "number"
+default = 4000
+label = "工具清單最多佔幾個 token（超過就只列名稱，再超過只列來源）"

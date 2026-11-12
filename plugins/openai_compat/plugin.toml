@@ -1,0 +1,10 @@
+name = "openai_compat"
+version = "0.1.0"
+kinds = ["provider"]
+description = "OpenAI 相容端點（DeepSeek、OpenRouter、本機模型、自訂 API）"
+enabled = true
+
+[settings.max_tokens]
+type = "number"
+default = 32000
+label = "單次最大輸出 token"

@@ -1,0 +1,15 @@
+name = "terminal"
+version = "0.1.0"
+kinds = ["tool"]
+description = "Git Bash 指令、背景任務；Job Object 與整棵程序樹結束"
+enabled = true
+
+[settings.default_timeout]
+type = "number"
+default = 180
+label = "前景指令逾時（秒）"
+
+[settings.max_output]
+type = "number"
+default = 30000
+label = "回傳給模型的最大字數"

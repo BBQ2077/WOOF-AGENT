@@ -1,0 +1,77 @@
+# WOOF 設定範例：複製成 config.toml 再改。金鑰放 keys.toml（格式見 keys.example.toml），不要寫在這裡。
+
+# 工作目錄：terminal 與檔案工具的預設位置（不填＝使用者資料夾下的 WOOF-files）
+# workdir = "D:/work"
+# 介面可以直接預覽的資料夾
+# allowed_dirs = ["D:/work"]
+
+# ── OpenAI 相容 API（OpenRouter、DeepSeek、xAI、NVIDIA NIM、Ollama 等都用這種寫法）──
+[[models]]
+id = "openrouter-example"
+label = "範例模型（OpenRouter）"
+provider = "openai_compat"
+model = "vendor/model-name"
+base_url = "https://openrouter.ai/api/v1"
+key_pool = "openrouter"
+effort_style = "openrouter"
+efforts = ["low", "medium", "high"]
+default_effort = "medium"
+vision = true
+context_window = 200000
+
+# 免費或常被限流的模型：多重試幾次、限流時等久一點
+[[models]]
+id = "free-example"
+label = "免費模型範例"
+provider = "openai_compat"
+model = "vendor/model-name:free"
+base_url = "https://openrouter.ai/api/v1"
+key_pool = "openrouter"
+effort_style = "none"
+max_retries = 2
+rate_limit_wait = 120
+vision = false
+context_window = 131072
+
+# 本機 Ollama（不需要金鑰）
+[[models]]
+id = "ollama-local"
+label = "本機模型（Ollama）"
+provider = "openai_compat"
+model = "llama3.3"
+base_url = "http://127.0.0.1:11434/v1"
+effort_style = "none"
+vision = false
+context_window = 131072
+
+# ── Anthropic API（用 API key）──
+[[models]]
+id = "claude-api"
+label = "Claude（API key）"
+provider = "anthropic"
+model = "claude-sonnet-model-id"
+key_pool = "anthropic"
+efforts = ["low", "medium", "high"]
+default_effort = "medium"
+vision = true
+context_window = 200000
+
+# ── 本機 claude CLI（用你自己已登入的 claude 指令）──
+[[models]]
+id = "claude-cli"
+label = "Claude（本機 CLI）"
+provider = "claude_cli"
+model = "sonnet"
+efforts = ["low", "medium", "high"]
+default_effort = "medium"
+vision = true
+context_window = 200000
+
+# ── 權限 ──
+[permissions]
+# 新對話的預設權限：auto（全自動）/ edits（改檔自動）/ ask（先問我）/ readonly（唯讀）/ custom（自訂）
+default_mode = "ask"
+# 會自動執行的模式裡，危險指令（rm -rf、git push --force…）改成先問
+danger_ask = true
+# 排程等沒人在旁邊的對話，碰到要先問的工具：deny（擋下）/ approve（直接放行）
+headless = "deny"

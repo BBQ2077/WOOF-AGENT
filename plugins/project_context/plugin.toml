@@ -1,0 +1,5 @@
+name = "project_context"
+version = "0.1.0"
+kinds = ["hook"]
+description = "專案指示檔：工作目錄（往上到 git 根）的 AGENTS.md、CLAUDE.md 放進系統提示（唯讀）"
+enabled = true

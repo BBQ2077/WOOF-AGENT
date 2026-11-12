@@ -1,0 +1,31 @@
+name = "web_search"
+version = "0.1.0"
+kinds = ["tool"]
+description = "網路搜尋與網頁擷取：Firecrawl 與 Tavily 多把 key 輪換，額度用完自動跳下一把"
+enabled = true
+
+[settings.order]
+type = "order"
+options = ["firecrawl", "tavily", "firecrawl_keyless"]
+default = "firecrawl_keyless,firecrawl,tavily"
+label = "搜尋順序（用逗號分隔，額度用完才換下一家）"
+
+[settings.firecrawl_billing_day]
+type = "number"
+default = 1
+label = "Firecrawl 每月重置日（1–31，超過當月天數取月底）"
+
+[settings.tavily_billing_day]
+type = "number"
+default = 1
+label = "Tavily 每月重置日（1–31，超過當月天數取月底）"
+
+[settings.results]
+type = "number"
+default = 5
+label = "搜尋結果數量（1–10）"
+
+[settings.extract_chars]
+type = "number"
+default = 12000
+label = "擷取網頁時每頁最多字數"

@@ -1,0 +1,30 @@
+name = "skills"
+version = "0.3.0"
+kinds = ["tool", "hook"]
+description = "Skills 來源與權限：讀取／寫入兩個開關。個別 skill 在「Skills」分區勾選，預設全部關閉"
+enabled = true
+
+[settings.dirs]
+type = "text"
+default = ""
+label = "讀取的 Skills 資料夾（多個用 ; 分隔；留空＝只用 WOOF 自己的 data/skills）"
+
+[settings.read]
+type = "bool"
+default = false
+label = "允許讀取已勾選的 skills（清單與 skill_view）"
+
+[settings.write]
+type = "bool"
+default = false
+label = "允許寫入 skills（skill_write）"
+
+[settings.write_dir]
+type = "text"
+default = "data/skills"
+label = "寫入位置（相對 WOOF 資料夾；只能寫到這裡，不碰別的 skills）"
+
+[settings.enabled_skills]
+type = "text"
+default = ""
+label = "已勾選的 skill（由 Skills 分區管理，逗號分隔）"

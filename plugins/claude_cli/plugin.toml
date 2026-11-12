@@ -1,0 +1,16 @@
+name = "claude_cli"
+version = "0.1.0"
+kinds = ["engine"]
+description = "Claude Code CLI 引擎：呼叫本機 claude 指令，登入由 claude 自己處理，WOOF 只當介面"
+enabled = true
+
+[settings.claude_path]
+type = "text"
+default = ""
+label = "claude 執行檔路徑（空白＝自動尋找）"
+
+[settings.permission_mode]
+type = "select"
+options = ["bypassPermissions", "auto", "acceptEdits"]
+default = "bypassPermissions"
+label = "權限模式"

@@ -1,0 +1,25 @@
+# 環境與套件
+.venv/
+node_modules/
+__pycache__/
+*.pyc
+
+# 打包輸出
+release/
+/dist/
+
+# 個人資料：對話、記憶、金鑰、設定、日誌、備份
+data/
+keys.toml
+config.toml
+*.log
+*.bak
+.env
+# 早期介面草稿（含私人範例內容），只留本機
+mockup/
+# 開發紀錄（含用量與測試足跡），只留本機
+TODO.md
+# 內部筆記，只留本機
+docs/
+# 早期設計筆記，只留本機
+SPEC.md

@@ -1,0 +1,5 @@
+name = "info"
+version = "1.0.0"
+kinds = ["tool"]
+description = "基礎資訊：現在時間與日期（可指定時區）、系統與工作目錄資訊"
+enabled = true

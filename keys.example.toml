@@ -1,0 +1,24 @@
+# 複製成 keys.toml 後填入。同一服務可以放多把，會自動輪換。
+[[ollama]]
+label = "主要"
+key = "..."
+
+[[deepseek]]
+label = "主要"
+key = "sk-..."
+
+[[openrouter]]
+label = "主要"
+key = "sk-or-..."
+
+[[anthropic]]
+label = "Claude Console"
+key = "sk-ant-api..."
+
+[[firecrawl]]
+label = "帳號1"
+key = "fc-..."
+
+[[tavily]]
+label = "帳號1"
+key = "tvly-..."

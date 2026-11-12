@@ -1,0 +1,16 @@
+name = "anthropic"
+version = "0.1.0"
+kinds = ["provider"]
+description = "Claude（Anthropic API key）：adaptive thinking、effort、prompt caching"
+enabled = true
+
+[settings.max_tokens]
+type = "number"
+default = 64000
+label = "單次最大輸出 token"
+
+[settings.prompt_caching]
+type = "select"
+options = ["開啟", "關閉"]
+default = "開啟"
+label = "Prompt caching"

@@ -1,0 +1,5 @@
+name = "schedule"
+version = "1.0.0"
+kinds = ["tool"]
+description = "排程工作：讓模型幫你建立、列出、暫停、刪除定時執行的提示詞（設定 → 排程 也能管理）"
+enabled = true

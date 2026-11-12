@@ -1,0 +1,24 @@
+{
+  "name": "woof-desktop",
+  "license": "MIT",
+  "version": "0.2.0",
+  "description": "WOOF 個人 AI agent 桌面程式",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-packager . WOOF --platform=win32 --arch=x64 --out=../release --overwrite --asar --icon=brand/icon.ico --executable-name=WOOF --app-copyright=WOOF --win32metadata.ProductName=WOOF --win32metadata.FileDescription=WOOF --win32metadata.CompanyName=WOOF --ignore=\"^/brand/.*-1024\\.png$\" --ignore=\"\\.svg$\" --ignore=\"^/postpack\\.js$\" --ignore=\"^/node_modules/(@highlightjs|dompurify|marked)\"",
+    "postpack": "node postpack.js"
+  },
+  "devDependencies": {
+    "@electron/packager": "^20.3.0",
+    "electron": "^45.2.3"
+  },
+  "dependencies": {
+    "@highlightjs/cdn-assets": "^11.12.0",
+    "dompurify": "^3.4.17",
+    "marked": "^18.2.0"
+  },
+  "productName": "WOOF",
+  "author": "WOOF"
+}

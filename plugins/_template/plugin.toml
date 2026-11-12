@@ -1,0 +1,10 @@
+name = "my_plugin"
+version = "0.1.0"
+kinds = ["tool"]
+description = "一句話說明這個插件做什麼"
+enabled = true
+
+[settings.example]
+type = "text"
+default = "預設值"
+label = "範例設定"

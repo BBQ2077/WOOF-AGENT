@@ -1,0 +1,15 @@
+name = "focus"
+version = "1.0.0"
+kinds = ["hook"]
+description = "重點便條：多步工作時，每次送模型前在最後面附一小段目前狀態（要求、步數、待辦、改過的檔、最近出錯、權限）。只在這次請求裡，不存進對話，不影響快取前綴"
+enabled = true
+
+[settings.from_step]
+type = "number"
+default = 2
+label = "從這一回合的第幾步開始附（0＝每一步都附；第 0 步是使用者剛送出的那次）"
+
+[settings.max_tokens]
+type = "number"
+default = 300
+label = "便條上限（tokens，估計值）。這是上限，沒東西可寫時會更短或不附"

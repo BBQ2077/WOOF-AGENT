@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<title>WOOF</title>
+<script>
+  // 跟介面同一組顏色（主程序從介面偏好設定檔 data/ui-preferences.json 帶進來），開啟時不閃色
+  (function () {
+    var q = new URLSearchParams(location.search), r = document.documentElement.style;
+    if (q.get('bg')) r.setProperty('--bg', q.get('bg'));
+    if (q.get('text')) r.setProperty('--text', q.get('text'));
+    if (q.get('dim')) r.setProperty('--dim', q.get('dim'));
+    if (q.get('dark') === '1') document.documentElement.classList.add('dark');
+  })();
+</script>
+<style>
+  :root { --bg: #fcfdff; --text: #1f2328; --dim: #5f6878; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font-family: "Segoe UI Variable Text", "Segoe UI", "Microsoft JhengHei UI", sans-serif; -webkit-font-smoothing: antialiased; }
+  body { display: flex; align-items: center; justify-content: center; -webkit-app-region: drag; user-select: none; }
+  .box { display: flex; flex-direction: column; align-items: center; gap: 14px; margin-top: -40px; }
+  .mark { width: 76px; height: 76px; animation: breathe 2.2s ease-in-out infinite; }
+  .mark .sq { fill: var(--text); }
+  .mark .pw { fill: var(--bg); }
+  .word { font-weight: 800; letter-spacing: .32em; font-size: 15px; margin-right: -.32em; }
+  .msg { color: var(--dim); font-size: 12.5px; min-height: 18px; display: flex; align-items: center; gap: 8px; }
+  .dots { display: inline-flex; gap: 4px; }
+  .dots i { width: 4px; height: 4px; border-radius: 50%; background: var(--dim); opacity: .3; animation: dot 1.2s infinite; }
+  .dots i:nth-child(2) { animation-delay: .2s; } .dots i:nth-child(3) { animation-delay: .4s; }
+  .ver { position: fixed; bottom: 14px; left: 0; right: 0; text-align: center; color: var(--dim); opacity: .6; font-size: 11px; }
+  .err { display: none; flex-direction: column; align-items: center; gap: 14px; max-width: 540px; text-align: center; }
+  .err p { margin: 0; color: #d13b4f; line-height: 1.6; font-size: 13px; white-space: pre-wrap; word-break: break-word; }
+  html.dark .err p { color: #ef5d62; }
+  .acts { display: flex; gap: 8px; -webkit-app-region: no-drag; }
+  .acts button { height: 32px; padding: 0 14px; border-radius: 8px; border: 1px solid color-mix(in srgb, var(--text) 18%, transparent);
+    background: transparent; color: var(--text); font: inherit; font-size: 12.5px; cursor: pointer; }
+  .acts button.pri { background: var(--text); color: var(--bg); border-color: var(--text); }
+  .acts button:hover { opacity: .85; }
+  body.failed .mark { animation: none; opacity: .5; }
+  body.failed .msg { display: none; }
+  body.failed .err { display: flex; }
+  @keyframes breathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(.94); } }
+  @keyframes dot { 0%, 100% { opacity: .25; } 40% { opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) { .mark, .dots i { animation: none; } }
+</style>
+</head>
+<body>
+  <div class="box">
+    <div class="mark"><svg viewBox="0 0 512 512"><rect x="16" y="16" width="480" height="480" rx="120" class="sq"/><g class="pw" transform="translate(256 256) scale(0.84) translate(-256 -272)"><ellipse cx="140" cy="236" rx="38" ry="49" transform="rotate(-24 140 236)"/><ellipse cx="208" cy="150" rx="39" ry="52" transform="rotate(-10 208 150)"/><ellipse cx="304" cy="150" rx="39" ry="52" transform="rotate(10 304 150)"/><ellipse cx="372" cy="236" rx="38" ry="49" transform="rotate(24 372 236)"/><path d="M256 252c40 0 70 30 96 66 22 30 34 50 34 74 0 32-24 52-56 52-28 0-46-14-74-14s-46 14-74 14c-32 0-56-20-56-52 0-24 12-44 34-74 26-36 56-66 96-66z"/></g></svg></div>
+    <div class="word">WOOF</div>
+    <div class="msg"><span class="dots"><i></i><i></i><i></i></span><span id="msg">正在啟動…</span><span id="sec"></span></div>
+    <div class="err">
+      <p id="err"></p>
+      <div class="acts"><button class="pri" id="retry">重試</button><button id="log">開啟紀錄檔</button></div>
+    </div>
+  </div>
+  <div class="ver" id="ver"></div>
+  <script>
+    const q = new URLSearchParams(location.search), D = window.woofDesktop;
+    if (q.get('v')) document.getElementById('ver').textContent = 'v' + q.get('v');
+    if (q.get('error')) {
+      document.body.classList.add('failed');
+      document.getElementById('err').textContent = q.get('error');
+    }
+    const t0 = Date.now();
+    setInterval(() => { const s = Math.floor((Date.now() - t0) / 1000); document.getElementById('sec').textContent = s >= 3 ? s + ' 秒' : ''; }, 500);
+    if (D && D.onBoot) D.onBoot((t) => { document.getElementById('msg').textContent = t; });
+    document.getElementById('retry').onclick = () => D && D.retryBoot();
+    document.getElementById('log').onclick = () => D && D.openLog();
+  </script>
+</body>
+</html>

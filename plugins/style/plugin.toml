@@ -1,0 +1,5 @@
+name = "style"
+version = "0.1.0"
+kinds = ["hook"]
+description = "輸出風格：每個對話可選一種（放進系統提示）。內建解說、精簡、教學，可在設定新增、修改、置頂"
+enabled = true

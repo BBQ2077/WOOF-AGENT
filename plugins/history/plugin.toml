@@ -1,0 +1,5 @@
+name = "history"
+version = "1.0.0"
+kinds = ["tool"]
+description = "對話檢索：讓模型搜尋、翻閱過去的對話（全文檢索，中文可用）"
+enabled = true

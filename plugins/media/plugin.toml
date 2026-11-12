@@ -1,0 +1,17 @@
+name = "media"
+version = "1.0.0"
+kinds = ["tool"]
+description = "生成圖片、影片：讓聊天模型呼叫生圖／影片模型（例如 Agnes Image、Agnes Video），檔案存在 data/media，對話裡直接顯示"
+enabled = true
+
+[settings.image_model]
+type = "model"
+filter = "image"
+default = ""
+label = "生圖用的模型（空白＝第一個有 key 的生圖模型）"
+
+[settings.video_model]
+type = "model"
+filter = "video"
+default = ""
+label = "生成影片用的模型（空白＝第一個有 key 的影片模型）"

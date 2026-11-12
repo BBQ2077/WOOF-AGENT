@@ -1,0 +1,47 @@
+name = "context"
+version = "0.1.0"
+kinds = ["hook"]
+description = "上下文太長時自動摘要舊訊息，全文留在資料庫，之後的回合不再重送"
+enabled = true
+
+[settings.window]
+type = "number"
+default = 0
+label = "壓縮用的上下文大小（token）。0＝照模型本身的上下文窗口；填 100000 就當作只有 10 萬"
+
+[settings.trigger]
+type = "number"
+default = 70
+label = "用量超過上下文窗口的百分之幾就壓縮"
+
+[settings.early]
+type = "number"
+default = 50
+label = "用量超過百分之幾就在背景先壓縮（不等滿）"
+
+[settings.keep]
+type = "number"
+default = 3
+label = "保留最近幾輪不壓縮（使用者一則＋模型的回覆，含中間的工具呼叫，算一輪）"
+
+[settings.ratio]
+type = "number"
+default = 20
+label = "摘要長度佔原文的百分之幾（壓縮幅度，建議 10 到 30）"
+
+[settings.method]
+type = "select"
+default = "單次"
+options = ["單次", "多工"]
+label = "壓縮方式：單次＝一次摘要（預設）；多工＝依字數分段同時摘要，最後合併"
+
+[settings.parallel]
+type = "number"
+default = 4
+label = "多工時，一次同時跑幾段（1 到 8）"
+
+
+[settings.mid_turn]
+type = "boolean"
+default = true
+label = "回合進行中也壓縮：工具結果一直疊上去、用量超過門檻時先壓縮再送；模型回報上下文爆掉時壓縮後重送。使用者這次的要求會在摘要後面原文重述，模型接著做完"

@@ -1,0 +1,5 @@
+name = "tasks"
+version = "1.0.0"
+kinds = ["tool"]
+description = "TODO 清單（todo）與向使用者提問（ask_user）"
+enabled = true

@@ -1,0 +1,23 @@
+name = "subagent"
+version = "1.0.0"
+kinds = ["tool"]
+description = "子代理：把獨立的子任務交給另一個代理用乾淨的上下文去做，可以同時派好幾個"
+enabled = true
+
+[settings.max_parallel]
+type = "number"
+label = "最多同時幾個"
+default = 3
+help = "一次 delegate_task 最多並行的子代理數"
+
+[settings.models]
+type = "models"
+label = "可指派的模型"
+default = ""
+help = "主代理派子代理時可以挑的模型。都不勾＝不能挑，一律用「設定 → 模型用途 → 子代理」。建議只勾便宜或免費的，避免模型自己挑貴的"
+
+[settings.max_per_turn]
+type = "number"
+label = "每回合最多派幾個"
+default = 6
+help = "你送出一則訊息後，這一輪工作最多派出的子代理總數；0＝不限"

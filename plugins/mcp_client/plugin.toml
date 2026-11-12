@@ -1,0 +1,20 @@
+name = "mcp_client"
+version = "0.1.0"
+kinds = ["tool", "hook"]
+description = "連接 MCP 伺服器：stdio 子程序或 HTTP，對方的工具以 mcp_<伺服器>_<工具> 提供給模型"
+enabled = true
+
+[settings.servers]
+type = "text"
+default = ""
+label = "伺服器清單（每行一個：名稱 | command 參數… 或 名稱 | http://位址）"
+
+[settings.timeout]
+type = "number"
+default = 120
+label = "單次工具呼叫逾時秒數"
+
+[settings.disabled]
+type = "text"
+default = ""
+label = "停用的伺服器（名稱用逗號分隔）"
