@@ -103,7 +103,37 @@ async def state():
 
 @app.get("/api/usage")
 async def usage_api(range: str = "today", sid: str = ""):
-    return store.usage_summary(range, sid or None)
+    from datetime import datetime
+    from woof import config as wcfg, cost
+
+    u = store.usage_summary(range, sid or None)
+    cfg = wcfg.load_config()
+    mid = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    since = {"today": mid, "7d": mid - 6 * 86400, "30d": mid - 29 * 86400}.get(range, 0.0)
+    sp = cost.spent(cfg, since, sid or None)
+    u["cost"] = sp["total"]
+    u["unpriced"] = sp["unpriced"]
+    for m in u["by_model"]:
+        m["cost"] = sp["by_model"].get(m["model"])
+    for d in u["daily"]:
+        d["cost"] = sp["by_day"].get(d["day"], 0.0)
+    u["budget"] = cost.status(cfg)
+    return u
+
+
+@app.post("/api/budget")
+async def budget_save(body: dict):
+    from woof import config as wcfg, cost
+
+    try:
+        b = cost.clean_budget(body)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    cfg = wcfg.load_config()
+    cfg["budget"] = b
+    save_config(cfg)
+    REG.config["budget"] = b
+    return cost.status(cfg)
 
 
 @app.get("/api/quota")
@@ -167,7 +197,7 @@ async def get_session_prompt(sid: str):
         want = aux.get(task) or ""
         m = find_model(want) if want else None
         aux_rows.append({"task": task, "model_id": want,
-                         "label": (m or {}).get("label") or want or "自動（沿用對話模型）"})
+                         "label": (m or {}).get("label") or want or ("不使用" if task in ("fallback", "review") else "自動（沿用對話模型）")})
     web = REG.plugins.get("web_search")
     web_order = (web.settings.get("order") if web is not None else "") or ""
     return {
@@ -301,6 +331,8 @@ async def session_rewind(sid: str, body: dict):
     summ = es.get("summary") or {}
     if summ and int(summ.get("through") or 0) > mid:
         es.pop("summary", None)
+    if int((es.get("prune") or {}).get("through") or 0) > mid:
+        es.pop("prune", None)
     store.update_session(sid, engine_state=es)
     if int((es.get("usage") or {}).get("through") or 0) > mid:
         from . import tokens
@@ -573,7 +605,7 @@ async def export(sid: str):
     return {"markdown": "\n".join(lines)}
 
 
-AUX_TASKS = ("fallback", "vision", "compact", "subagent")
+AUX_TASKS = ("fallback", "vision", "compact", "subagent", "review")
 
 
 @app.get("/api/tools")

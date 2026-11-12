@@ -1,4 +1,4 @@
-"""檔案工具：read_file、write_file、patch、search_files。"""
+"""檔案工具：read_file、write_file、patch、search_files、list_tree。"""
 from __future__ import annotations
 
 import asyncio
@@ -125,6 +125,77 @@ def register(woof):
                     pass
         return {"output": "\n".join(out) or "沒有找到"}
 
+    SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".mypy_cache", ".pytest_cache",
+                 ".ruff_cache", ".idea", ".next", ".tox", ".cache"}
+
+    def _tree(root: Path, depth: int, cap: int) -> str:
+        """每個資料夾最多列 per 項（資料夾優先），整體最多 cap 項；最近修改看全部掃到的檔案。"""
+        import time as _t
+        per = max(15, cap // 10)
+        recent: list = []
+        count = 0
+
+        def entries(d: Path):
+            try:
+                return sorted(d.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())), None
+            except OSError as e:
+                return [], e.strerror or str(e)
+
+        def walk(d: Path, level: int, prefix: str) -> list[str]:
+            nonlocal count
+            out: list[str] = []
+            items, err = entries(d)
+            if err:
+                return [f"{prefix}（讀不到：{err}）"]
+            shown = 0
+            for it in items:
+                try:
+                    is_dir = it.is_dir()
+                    st = it.stat()
+                except OSError:
+                    continue
+                if not is_dir:
+                    recent.append((st.st_mtime, it))
+                if shown >= per or count >= cap:
+                    continue
+                shown += 1
+                count += 1
+                if is_dir and it.name in SKIP_DIRS:
+                    out.append(f"{prefix}{it.name}/  （略過）")
+                elif is_dir:
+                    out.append(f"{prefix}{it.name}/")
+                    if level < depth:
+                        out.extend(walk(it, level + 1, prefix + "  "))
+                else:
+                    size = st.st_size
+                    sz = f"{size}B" if size < 1024 else f"{size / 1024:.0f}K" if size < 1048576 else f"{size / 1048576:.1f}M"
+                    out.append(f"{prefix}{it.name}  {sz}  {_t.strftime('%m-%d %H:%M', _t.localtime(st.st_mtime))}")
+            if len(items) > shown:
+                out.append(f"{prefix}…還有 {len(items) - shown} 項")
+            return out
+
+        lines = walk(root, 1, "")
+        out = f"{root}（{depth} 層）\n" + "\n".join(lines)
+        recent.sort(key=lambda x: -x[0])
+        if recent:
+            out += "\n\n最近修改：\n" + "\n".join(
+                f"  {_t.strftime('%Y-%m-%d %H:%M', _t.localtime(m))}  {p.relative_to(root)}" for m, p in recent[:10])
+        return out
+
+    async def list_tree(args: dict, ctx) -> dict:
+        root = _resolve(args.get("path") or ".", ctx.cwd)
+        if not root.is_dir():
+            return {"output": f"不是資料夾：{root}", "is_error": True}
+        depth = max(1, min(int(args.get("depth") or 2), 4))
+        cap = max(50, min(int(args.get("limit") or 400), 2000))
+        return {"output": await asyncio.to_thread(_tree, root, depth, cap)}
+
+    woof.add_tool("list_tree", "列出資料夾的樹狀結構（預設 2 層、最多 4 層），附檔案大小、修改時間和最近修改的 10 個檔案；"
+                  "略過 .git、node_modules、__pycache__、虛擬環境等。剛接觸一個專案時先用它定位。",
+                  {"type": "object", "properties": {
+                      "path": {"type": "string", "description": "資料夾，預設工作目錄"},
+                      "depth": {"type": "integer", "description": "層數，1 到 4，預設 2"},
+                      "limit": {"type": "integer", "description": "最多列幾項，預設 400"}}}, list_tree)
     woof.add_tool("read_file", "讀取文字檔（附行號），或列出資料夾內容。",
                   {"type": "object", "properties": {
                       "path": {"type": "string"}, "offset": {"type": "integer", "description": "起始行，從 1 開始"},

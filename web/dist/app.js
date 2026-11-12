@@ -13,7 +13,7 @@ const ico = (name, cls = '') => `<svg class="${cls}"><use href="#i-${name}"/></s
 const EFFORT_LABEL = { none: '關', off: '關', on: '開', minimal: '最小', low: '低', medium: '中', high: '高', xhigh: '極高', max: '最高' };
 const EFFORT_SCALE = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 const EFFORT_HINT = { on: '開啟思考，先推理再回答', off: '不思考，最快', none: '不思考，最快', minimal: '幾乎不思考', low: '快速回答', medium: '一般難度', high: '仔細推理', xhigh: '更深入推理', max: '用到上限' };
-const TOOL_ICON = { delegate_task: '🤖', terminal: '⌨️', read_file: '📄', write_file: '✏️', patch: '🩹', search_files: '🔎', skill_view: '📘',
+const TOOL_ICON = { delegate_task: '🤖', terminal: '⌨️', read_file: '📄', write_file: '✏️', patch: '🩹', search_files: '🔎', list_tree: '🗂️', skill_view: '📘',
   skills_list: '📚', web_search: '🌐', web_extract: '🌐', vision_analyze: '👁️', Bash: '⌨️', Read: '📄', Write: '✏️',
   Edit: '🩹', Grep: '🔎', Glob: '🔎', WebSearch: '🌐', WebFetch: '🌐', Task: '🤖', TodoWrite: '📝' };
 const BACKEND_LABEL = { openai_compat: 'OpenAI 相容 API', anthropic: 'Anthropic', claude_cli: 'Claude Code CLI' };
@@ -1947,8 +1947,28 @@ function usageCardHtml() {
   const r = S.usageRange;
   return `<div class="qcard usage-card"><div class="qtop"><div class="qhd"><b>用量</b><small>本機紀錄，每次模型呼叫算一次</small></div></div>`
     + `<div class="qbody"><div class="seg useg">${[['today', '今天'], ['7d', '7 天'], ['30d', '30 天'], ['session', '此對話']].map(([k, l]) => `<b class="${r === k ? 'on' : ''}" data-urange="${k}">${l}</b>`).join('')}</div>`
-    + `<div id="usageBox">讀取中…</div></div></div>`;
+    + `<div id="usageBox">讀取中…</div><div id="budgetBox"></div></div></div>`;
 }
+const BUDGET_ACT = { warn: '只提醒', pause: '暫停送出', fallback: '改用備用模型' };
+const money = (v) => (v == null ? '' : v >= 100 ? '$' + Math.round(v).toLocaleString('en-US') : '$' + Number(v).toFixed(v < 1 ? 3 : 2));
+function renderBudget(b) {
+  const box = $('#budgetBox'); if (!box || !b) return;
+  const bar = (spent, cap) => cap ? `<i class="bgbar${spent >= cap ? ' over' : spent >= cap * 0.8 ? ' near' : ''}"><i style="width:${Math.min(100, Math.round(spent / cap * 100))}%"></i></i>` : '';
+  box.innerHTML = `<div class="bghd"><b>預算</b><small>依模型單價計算，沒填單價的模型不算</small></div>
+    <div class="bgrow"><span>今天 <b>${money(b.today)}</b>${b.daily ? ` / ${money(b.daily)}` : ''}</span>${bar(b.today, b.daily)}</div>
+    <div class="bgrow"><span>本月 <b>${money(b.month)}</b>${b.monthly ? ` / ${money(b.monthly)}` : ''}</span>${bar(b.month, b.monthly)}</div>
+    <div class="bgform"><label>每日上限 $<input data-bg="daily" value="${b.daily || ''}" placeholder="不限" class="mono"></label>
+      <label>每月上限 $<input data-bg="monthly" value="${b.monthly || ''}" placeholder="不限" class="mono"></label>
+      <label>超過時<select data-bg="action">${Object.entries(BUDGET_ACT).map(([k, l]) => `<option value="${k}"${b.action === k ? ' selected' : ''}>${l}</option>`).join('')}</select></label></div>`
+    + (b.over && b.over.length ? `<div class="bgover">${b.over.map(esc).join('<br>')}</div>` : '')
+    + (b.action === 'fallback' && !b.fallback ? '<div class="bgover">還沒指定備用模型（設定 → 模型用途 → 備用），超過時只會提醒</div>' : '');
+}
+async function saveBudget() {
+  const box = $('#budgetBox'); if (!box) return;
+  const body = {}; box.querySelectorAll('[data-bg]').forEach((el) => { body[el.dataset.bg] = el.value.trim(); });
+  try { renderBudget(await api('POST', '/api/budget', body)); toast('預算已儲存'); } catch (e) { toast('預算沒存：' + e.message); }
+}
+document.addEventListener('change', (e) => { if (e.target.closest && e.target.closest('#budgetBox [data-bg]')) saveBudget(); });
 function fmtCount(n) {
   const v = Number(n || 0);
   if (v < 1000) return String(Math.round(v));
@@ -1968,14 +1988,16 @@ async function loadUsage() {
   const maxd = Math.max(1, ...u.daily.map((d) => d.input_tokens + d.output_tokens));
   const pct = (a, b) => (b > 0 ? Math.round(a / b * 100) : 0);
   const hit = pct(u.cache_read, u.input_tokens);
-  box.innerHTML = `<div class="uhead"><div class="uhero" title="${f(u.input_tokens + u.output_tokens)} tokens"><b>${k(u.input_tokens + u.output_tokens)}</b><small>tokens・${f(u.calls)} 次呼叫</small></div>
+  renderBudget(u.budget);
+  const costTip = (u.unpriced || []).length ? `沒填單價、沒算進去：${u.unpriced.map((x) => (modelOf(x) || {}).label || x).join('、')}` : '依模型單價計算';
+  box.innerHTML = `<div class="uhead"><div class="uhero" title="${f(u.input_tokens + u.output_tokens)} tokens"><b>${k(u.input_tokens + u.output_tokens)}</b><small>tokens・${f(u.calls)} 次呼叫${u.cost ? `・<span title="${esc(costTip)}">約 ${money(u.cost)}</span>` : ''}</small></div>
       <div class="usplit"><span title="${f(u.input_tokens)}">輸入 <b>${k(u.input_tokens)}</b></span><span title="${f(u.output_tokens)}">輸出 <b>${k(u.output_tokens)}</b></span>`
     + `<span title="輸入裡有 ${f(u.cache_read)} tokens 是讀快取（便宜很多）">快取命中 <b>${hit}%</b></span></div></div>`
     + (u.daily.length > 1 ? `<div class="udays">${u.daily.map((d) => `<div class="uday" title="${esc(d.day)}：${f(d.input_tokens + d.output_tokens)} tokens・${f(d.calls)} 次"><span><i style="height:${Math.max(6, Math.round((d.input_tokens + d.output_tokens) / maxd * 100))}%"></i></span><small>${esc(d.day.slice(5).replace('-', '/'))}</small></div>`).join('')}</div>` : '')
     + (u.by_model.length ? `<div class="umodels">${u.by_model.map((m) => {
       const tot = m.input_tokens + m.output_tokens; const top = u.by_model[0].input_tokens + u.by_model[0].output_tokens;
       return `<div class="umrow" title="輸入 ${f(m.input_tokens)}（快取 ${pct(m.cache_read, m.input_tokens)}%）・輸出 ${f(m.output_tokens)}">
-        <span class="uml">${esc((modelOf(m.model) || {}).label || m.model)}</span><span class="umn">${k(tot)}</span><span class="umc">${f(m.calls)} 次</span>
+        <span class="uml">${esc((modelOf(m.model) || {}).label || m.model)}</span><span class="umn">${k(tot)}</span><span class="umc">${m.cost != null ? money(m.cost) : f(m.calls) + ' 次'}</span>
         <i class="umbar"><i style="width:${Math.max(2, Math.round(tot / Math.max(1, top) * 100))}%"></i></i></div>`;
     }).join('')}</div>`
       : '<div class="qempty">這個範圍還沒有用量紀錄</div>');
@@ -2203,7 +2225,7 @@ function renderCtxPanel() {
   const nDefer = tools.filter((t) => t.deferred).length;
   const fz = d.frozen;
   const auxRows = d.aux || [];
-  const AUX_NAMES = { fallback: '備用模型', vision: '看圖（VIS）', compact: '壓縮', subagent: '子代理' };
+  const AUX_NAMES = { fallback: '備用模型', vision: '看圖（VIS）', compact: '壓縮', subagent: '子代理', review: '自動審核' };
   const draft = CP.draft ?? base;
   const sm = ((cur() || {}).engine_state || {}).summary;
   const tm = st.timing || {};
@@ -3382,7 +3404,7 @@ $('#navSet').onclick = () => openSettings();
 // ------------------------------------------------------------------ 設定
 const SECTIONS = [
   ['vendors', '模型商', '先加模型商（連線方式、位址、金鑰池），再在底下加模型。對話框的模型選單會照這裡分組。'],
-  ['aux', '模型用途', '主要模型是新對話預設；備用、看圖、壓縮、子代理每項都可以單獨指定服務商與模型，留空就自動（沿用目前對話的模型）。'],
+  ['aux', '模型用途', '主要模型是新對話預設；備用、看圖、壓縮、子代理、自動審核每項都可以單獨指定服務商與模型。看圖、壓縮、子代理留空就跟隨主模型；備用、自動審核留空就不使用。'],
   ['prompts', '提示詞與記憶', '內部提示詞模式，以及設定檔、人物檔、使用者檔、記憶檔。這些檔直接在這裡編輯，不用開資料夾。'],
   ['styles', '輸出風格', '每個對話可以選一種風格，內容會放進系統提示。內建的可以改，也可以自己新增；按愛心置頂，對話裡選風格時排最前面。'],
   ['compress', '壓縮', '超過門檻就把較早的對話摘要成一段，全文仍留在資料庫。這裡的設定存在插件 context，按「儲存壓縮設定」後生效。'],
@@ -3928,10 +3950,11 @@ async function renderCompressSec(box) {
 }
 // ---- 輔助模型
 const AUX = [
-  ['fallback', '備用模型', '自動切換', '主要模型一開始就出錯（限流、額度用完、連不上）時，改用這個重跑一次。留空就不切換。'],
+  ['fallback', '備用模型', '自動切換', '主要模型出錯（限流、額度用完、連不上，服務商自己的重試都用完）時，這一回合改用它接著做，做到一半也會接手；預算設「改用備用模型」時也用它。留空就不切換。'],
   ['vision', '看圖', '圖片分析', 'vision_analyze 工具看本機圖片時用的模型，要選支援看圖的。'],
   ['compact', '壓縮', '上下文壓縮', '把較早的對話寫成摘要。建議選便宜、上下文大的模型。'],
   ['subagent', '子代理', 'delegate_task', '子代理預設用的模型。需要 API 型連線（Claude Code CLI 不行）。'],
+  ['review', '自動審核', '先問我', '權限要問你的動作，先交給這個模型判斷（只給工具名稱、參數、工作目錄，不給對話內容）。判定安全就直接放行並在對話裡留一行紀錄，判不出來或有疑慮才問你。危險指令一律問你。留空就不審核。建議選便宜、快的模型。'],
 ];
 // ---- 統一下拉選單（取代原生 select，與對話框的浮動選單同風格）
 let SPICK_ANCHOR = null;
@@ -4040,15 +4063,16 @@ function auxRowHtml(k, n, tag, d) {
   const cur = S.cfg.aux[k] || '';
   const m = S.cfg.models.find((x) => x.id === cur);
   const dm = S.cfg.models.find((x) => x.id === S.cfg.default_model);
-  const follow = k === 'fallback' ? '跟隨主模型（不另設備用）' : '跟隨主模型';
-  const now = m ? `目前：${m.label || m.id}` : `目前：${follow}${dm && k !== 'fallback' ? `（${dm.label || dm.id}）` : ''}`;
+  const off = k === 'fallback' || k === 'review';
+  const follow = k === 'fallback' ? '跟隨主模型（不另設備用）' : k === 'review' ? '不使用（照權限問你）' : '跟隨主模型';
+  const now = m ? `目前：${m.label || m.id}` : `目前：${follow}${dm && !off ? `（${dm.label || dm.id}）` : ''}`;
   return `<div class="auxrow"><div><b>${n}<i>${tag}</i></b><small>${d}</small><div class="now">${esc(now)}</div></div>`
     + mpPairHtml('aux:' + k, cur, {
       filter: (x) => auxFits(k, x),
       blank: follow,
       set: (v) => { if (v) S.cfg.aux[k] = v; else delete S.cfg.aux[k]; setDirty(true); },
     })
-    + (dm && cur !== dm.id ? `<span class="ptlink" data-auxprim="${k}">設為主要模型</span>` : '')
+    + (dm && cur !== dm.id && k !== 'review' ? `<span class="ptlink" data-auxprim="${k}">設為主要模型</span>` : '')
     + '</div>';
 }
 function renderAux(box) {
@@ -4258,6 +4282,7 @@ function renderVendors(box) {
         <input data-mf="label" value="${esc(m.label || '')}" placeholder="顯示名稱">
         <input data-mf="model" value="${esc(m.model || '')}" placeholder="API 模型名稱" class="mono">
         <input data-mf="context_window" value="${esc(m.context_window || '')}" placeholder="200000" class="mono">
+        <input data-mf="price" value="${esc((m.price || []).join(' / '))}" placeholder="—" class="mono" title="美元／每百萬 token：輸入 / 輸出 / 快取讀取，例如 3 / 15 / 0.3。快取沒填就照輸入價；留空＝不算錢">
         <input data-mf="efforts" value="${esc(effs.join(', '))}" placeholder="${autoEff.length ? '自動 ' + autoEff.map((e) => EFFORT_LABEL[e] || e).join('/') : '沒有思考'}" title="${autoEff.length ? '留空＝自動偵測，目前偵測到：' + esc(autoEff.join(', ')) + '。要固定就填，例如 low, medium, high' : '沒偵測到思考強度；這個模型支援的話照 API 填，例如 low, medium, high'}" class="mono">
         <select data-mf="default_effort"><option value="">${effs.length ? '—' : '自動'}</option>${opt(effs, m.default_effort, EFFORT_LABEL)}</select>
         <span class="cell"><span class="sw sm${visOn ? ' on' : ''}" data-mvision title="${(st.learned && st.learned.no_vision) ? '自動偵測到不能直接看圖（下方可清掉重新偵測）' : m.vision === undefined ? '看圖：沒設定＝預設會看，撞到不支援會自動改走看圖模型' : '看圖'}"></span></span>
@@ -4276,7 +4301,7 @@ function renderVendors(box) {
           ${isOA ? `<label>思考參數</label><select data-vf="effort_style">${opt(['', 'openai', 'openrouter', 'deepseek', 'nim', 'none'], v.effort_style || '', { '': '自動（依位址判斷）', openai: 'OpenAI reasoning_effort', openrouter: 'OpenRouter reasoning', deepseek: 'DeepSeek thinking', nim: 'NVIDIA enable_thinking', none: '不送' })}</select>
             <label>思考回傳</label><select data-vf="echo_reasoning" title="模型上一步的思考要不要跟著送回去">${opt(['', 'all', 'off'], v.echo_reasoning === true ? 'all' : v.echo_reasoning === false ? 'off' : (v.echo_reasoning || ''), { '': '自動：工具呼叫鏈內保留，新回合捨棄', all: '每回合都保留（DeepSeek 必須）', off: '都不回傳' })}</select>` : ''}
         </div>
-        <div class="mtable"><div class="mth"><span>顯示名稱</span><span>API 模型名稱</span><span>上下文</span><span>思考強度</span><span>預設</span><span>看圖</span><span></span></div>
+        <div class="mtable"><div class="mth"><span>顯示名稱</span><span>API 模型名稱</span><span>上下文</span><span title="美元／每百萬 token：輸入 / 輸出 / 快取讀取">單價 $/M</span><span>思考強度</span><span>預設</span><span>看圖</span><span></span></div>
           ${mrows || '<div class="mtempty">還沒有模型</div>'}</div>
         ${learnedNote(models.map(([m]) => m))}
         <div class="vfoot"><span class="btn" data-addmodel>${ico('plus')}手動加模型</span>${v.provider !== 'claude_cli' ? `<span class="btn" data-fetchmodels>${ico('download')}從 API 取得模型</span>` : ''}${(discOf(v) || {}).has_key ? `<span class="btn" data-refreshmodels>${ico('download')}重新檢索</span>` : ''}<span class="btn" data-probe>${ico('play')}測試連線</span><span class="grow"></span>${FIXED_VENDORS.has(v.id) ? (v.key_pool && S.cfg.keys.some((k) => k.pool === v.key_pool) ? `<span class="btn danger" data-delkey>${ico('trash')}刪除 API key</span>` : '') : `<span class="btn danger" data-delvendor>${ico('trash')}刪除模型商</span>`}</div>
@@ -4524,11 +4549,11 @@ $('#setList').addEventListener('click', (e) => {
     const eye = e.target.closest('[data-keye]');
     if (eye) { const i = eye.previousElementSibling; i.type = i.type === 'password' ? 'text' : 'password'; }
   }
-  if (e.target.closest('#auxFollow')) { S.cfg.aux = {}; setDirty(true); renderSettings(); return; }
+  if (e.target.closest('#auxFollow')) { S.cfg.aux = S.cfg.aux.review ? { review: S.cfg.aux.review } : {}; setDirty(true); renderSettings(); return; }
   if (e.target.closest('#auxPrimary')) {
     const pid = S.cfg.default_model;
     if (!pid) { notify('error', '還沒設主要模型', '先在「主要模型」選一個。'); return; }
-    for (const [k] of AUX) S.cfg.aux[k] = pid;
+    for (const [k] of AUX) if (k !== 'review') S.cfg.aux[k] = pid;  // 自動審核要自己挑，不跟著一鍵設定
     setDirty(true); renderSettings(); return;
   }
   const apb = e.target.closest('[data-auxprim]');
@@ -4571,6 +4596,10 @@ $('#setList').addEventListener('input', (e) => {
     const f = el.dataset.mf;
     if (f === 'efforts') m.efforts = el.value.split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean);
     else if (f === 'context_window') m.context_window = el.value.trim() ? Number(el.value.replace(/[^0-9]/g, '')) : undefined;
+    else if (f === 'price') {
+      const nums = el.value.split(/[\/,，\s]+/).map((s) => s.trim()).filter(Boolean).map(Number).filter((n) => Number.isFinite(n) && n >= 0).slice(0, 3);
+      m.price = nums.length ? nums : undefined;
+    }
     else m[f] = el.value;
     setDirty(true); return;
   }

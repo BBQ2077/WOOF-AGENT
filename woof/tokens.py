@@ -46,6 +46,28 @@ def estimate_tools(specs: list[dict]) -> int:
                                          "parameters": t.get("schema")}, ensure_ascii=False)) for t in specs)
 
 
+def pruned_result(b: dict) -> dict:
+    """舊工具輸出換成一行佔位：保留工具名稱、成功或失敗、原本長度。"""
+    from woof.prompts import get as _p
+
+    out = b.get("output") or ""
+    text = _p("tool_pruned", name=b.get("name") or "tool", status="失敗" if b.get("is_error") else "成功", chars=len(out))
+    return {**b, "output": text, "pruned": True}
+
+
+def apply_prune(messages: list[dict], es: dict | None) -> list[dict]:
+    """engine_state.prune.through 之前（含）的工具結果換成佔位；沒設就原樣回傳。"""
+    through = int(((es or {}).get("prune") or {}).get("through") or 0)
+    if not through:
+        return messages
+    out = []
+    for m in messages:
+        if m.get("role") == "tool" and int(m.get("id") or 0) <= through:
+            m = {**m, "content": [pruned_result(b) if b.get("type") == "tool_result" else b for b in m.get("content") or []]}
+        out.append(m)
+    return out
+
+
 def used_of(usage: dict | None) -> int:
     """模型回報的上下文用量。舊資料沒有 context_used 時用 input＋output。"""
     if not usage:
@@ -70,7 +92,7 @@ def reestimate(session_id: str, window: int | None = None) -> dict:
         through = int(summ.get("through") or 0)
         hist = [m for m in hist if int(m.get("id") or 0) > through]
         n += estimate_text(summ["text"]) + 30
-    n += estimate_messages(hist)
+    n += estimate_messages(apply_prune(hist, es))
     snap = store.get_prompt_snapshot(session_id)
     n += estimate_text(snap["text"]) if snap else 0
     n += estimate_tools([t for t in active_tool_specs() if not getattr(store_tools().get(t["name"]), "bridge", False)])

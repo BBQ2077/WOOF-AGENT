@@ -9,7 +9,7 @@ from pathlib import Path
 import tomli_w
 
 ROOT = Path(__file__).resolve().parent.parent
-DATA = ROOT / "data"
+DATA = Path(os.environ["WOOF_DATA"]) if os.environ.get("WOOF_DATA") else ROOT / "data"  # 測試用暫存資料夾
 PLUGINS = ROOT / "plugins"
 WEB_DIST = ROOT / "web" / "dist"
 

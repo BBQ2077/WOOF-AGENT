@@ -44,7 +44,7 @@ TABLE = {
 DEFAULT_CUSTOM = dict(TABLE["ask"])
 
 TOOL_CAT = {
-    "read_file": "read", "search_files": "read", "vision_analyze": "read", "skill_view": "read", "skills_list": "read",
+    "read_file": "read", "search_files": "read", "list_tree": "read", "vision_analyze": "read", "skill_view": "read", "skills_list": "read",
     "current_time": "read", "system_info": "read", "todo": "read", "ask_user": "read",
     "tool_search": "read", "tool_describe": "read", "tool_call": "read", "session_search": "read",
     "write_file": "write", "patch": "write", "skill_write": "write", "Write": "write", "Edit": "write",

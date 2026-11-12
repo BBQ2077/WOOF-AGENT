@@ -209,7 +209,7 @@ async def tool_overview(ctx: TurnContext) -> list[dict]:
 
 # 子代理禁用的工具：唯讀不給任何會改東西的工具；寫入模式不給終端機（無法限定範圍）
 READ_ONLY_EXCLUDE = {"write_file", "patch", "terminal", "process", "skill_write"}
-WRITE_EXCLUDE = {"terminal", "process", "skill_write"}
+WRITE_EXCLUDE = {"process", "skill_write"}  # 寫入子代理可以用 terminal 跑測試，限制在 terminal 插件裡（範圍內、不能背景）
 
 
 def mutating_tools(read_only: bool) -> set[str]:
@@ -329,11 +329,11 @@ def find_model(model_id: str | None) -> dict | None:
 
 
 def aux_model(task: str, fallback: dict | None) -> dict | None:
-    """輔助工作（vision / compact / subagent / fallback）用的模型；沒設定就用 fallback。"""
+    """輔助工作（vision / compact / subagent / fallback / review）用的模型；沒設定就用 fallback。"""
     want = (REG.config.get("aux") or {}).get(task) or ""
     if want:
         return find_model(want)
-    if task == "fallback":
+    if task in ("fallback", "review"):  # 這兩個沒設定就是不啟用
         return fallback
     # 跟隨主要模型（設定頁「主要模型」）；主要模型不存在才退回目前對話的模型
     return find_model(REG.config.get("default_model") or "") or fallback
@@ -400,7 +400,7 @@ def _clip(text: str, call_id: str) -> str:
 
 
 # 「先問我」模式下不用確認的唯讀工具
-SAFE_TOOLS = {"read_file", "search_files", "web_search", "web_extract", "vision_analyze", "skill_view", "skills_list",
+SAFE_TOOLS = {"read_file", "search_files", "list_tree", "web_search", "web_extract", "vision_analyze", "skill_view", "skills_list",
               # 工具延遲載入的橋接：tool_call 拆開後每一筆照常確認
               "tool_search", "tool_describe", "tool_call"}
 _approvals: dict[str, dict] = {}
@@ -423,6 +423,33 @@ def reset_allow_all(session_id: str) -> None:
     _allow_all.discard(session_id)
 
 
+async def _auto_review(name: str, args: dict, ctx: TurnContext) -> str:
+    """設定了「自動審核」模型時，先問它這個動作安不安全。回放行理由；空字串＝要問使用者。
+    只給工具名稱、參數、工作目錄，不給對話內容。"""
+    model = aux_model("review", None)
+    if not model or model.get("provider") not in REG.providers:
+        return ""
+    raw = json.dumps(args, ensure_ascii=False, indent=1, default=str)
+    if len(raw) > 6000:
+        return ""  # 參數太長看不完整，交給人
+    text = f"工具：{name}\n工作目錄：{ctx.cwd}\n參數：\n{raw}"
+    try:
+        out = await asyncio.wait_for(
+            complete(model, _P("auto_review"), [{"role": "user", "content": [{"type": "text", "text": text}]}]), 30)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return ""
+    line = (out or "").strip().splitlines()[0].strip() if (out or "").strip() else ""
+    if line.upper().startswith("SAFE"):
+        try:
+            store.log_op(ctx.session_id, "review", name, 0, None, False)
+        except Exception:
+            pass
+        return line[4:].strip(" ：:-—") or "判定安全"
+    return ""
+
+
 async def _approved(call: dict, ctx: TurnContext) -> tuple[bool, str]:
     """權限檢查（woof/perms.py）：回傳（可否執行, 擋下時給模型看的原因）。"""
     from woof import perms
@@ -438,6 +465,11 @@ async def _approved(call: dict, ctx: TurnContext) -> tuple[bool, str]:
         return False, _P("perm_denied", reason=r["reason"])
     if r["decision"] == "auto" or (sid in _allow_all and not r["reason"].startswith("危險指令")):
         return True, ""
+    if not headless and not r["reason"].startswith("危險指令"):
+        verdict = await _auto_review(name, call.get("args") or {}, ctx)
+        if verdict:
+            await ctx.emit({"type": "notice", "session_id": sid, "text": f"自動審核放行 {name}：{verdict}"})
+            return True, ""
     fut = asyncio.get_running_loop().create_future()
     _approvals[cid] = {"session_id": sid, "id": cid, "name": name, "args": call.get("args") or {}, "future": fut,
                        "reason": r["reason"]}
@@ -633,6 +665,7 @@ async def run_model_loop(ctx: TurnContext) -> None:
     provider = REG.providers[ctx.model_cfg["provider"]]
     nudged = False  # 工具結果後模型給空內容，只請它文字總結一次
     overflow_retry = 0
+    ctx.fell_back = getattr(ctx, "fell_back", False)
     ctx.cont_counts = getattr(ctx, "cont_counts", None) or {}
     max_steps = MAX_STEPS
     for p in await REG.events.collect("max_steps", ctx):
@@ -701,6 +734,17 @@ async def run_model_loop(ctx: TurnContext) -> None:
                                 "text": "上下文超出模型上限，先壓縮再重送這一步…"})
                 if await _compact_now(ctx, True, "上下文超出模型上限"):
                     continue
+            # 這一步還沒輸出正文就失敗（服務商自己的重試、換 key、限流等待都用完了）：
+            # 回合中途也改用備用模型接著做，前面的工具結果都保留；每回合只換一次
+            fb = None if ctx.fell_back or text_buf["text"] else aux_model("fallback", None)
+            if fb and fb["id"] != ctx.model_cfg["id"] and fb.get("provider") in REG.providers:
+                old = ctx.model_cfg.get("label", ctx.model_cfg["id"])
+                ctx.fell_back = True
+                ctx.model_cfg, ctx.effort = fb, fb.get("default_effort")
+                provider = REG.providers[fb["provider"]]
+                await ctx.emit({"type": "notice", "session_id": ctx.session_id,
+                                "text": f"{old} 失敗（{str(e)[:160]}），這一回合改用備用模型 {fb.get('label', fb['id'])} 接著做"})
+                continue
             raise
 
         store.log_op(ctx.session_id, "model", ctx.model_cfg.get("id"), (time.time() - t_req) * 1000,
@@ -768,6 +812,18 @@ async def run_model_loop(ctx: TurnContext) -> None:
         await ctx.emit({"type": "message", "session_id": ctx.session_id, "message": m})
         # 工具結果之後、下一次呼叫模型之前：把執行中插入的句子併入，模型這一步就看得到
         await flush_steer(ctx.session_id, ctx.emit)
+        # 子代理：使用者在主對話插話了，先停下把進度交回去，主代理看到插話再決定要不要重派
+        if ctx.session.get("parent") and any(not (it.get("meta") or {}).get("internal")
+                                             for it in peek_steer(getattr(ctx, "root_session_id", ""))):
+            done = [x for x in store.get_messages(ctx.session_id) if x["role"] == "assistant"]
+            said = "\n".join(b.get("text", "") for x in done for b in x["content"] if b.get("type") == "text").strip()
+            steps = sum(1 for x in store.get_messages(ctx.session_id) if x["role"] == "tool")
+            text = (f"（使用者在主對話插話，子代理先停在這裡。已執行 {steps} 步工具，任務可能還沒完成。）"
+                    + (f"\n\n目前為止的進度：\n{said[-3000:]}" if said else ""))
+            m = store.add_message(ctx.session_id, "assistant", [{"type": "text", "text": text}],
+                                  {"model": ctx.model_cfg["id"], "interrupted_by_user": True})
+            await ctx.emit({"type": "message", "session_id": ctx.session_id, "message": m})
+            return
     s2 = mark_interrupted(ctx.session_id, f"已達單次最多 {max_steps} 步", "max_steps")
     if s2:
         await ctx.emit({"type": "session_updated", "session": s2})
@@ -786,6 +842,21 @@ async def run_turn(session_id: str, blocks: list[dict], emit: Emit) -> None:
                                "請在輸入框右下角重新選一個模型再送")
         raise RuntimeError("config.toml 裡還沒有設定任何模型")
     effort = session.get("effort") or model_cfg.get("default_effort")
+
+    # 預算：超過每日／每月上限時依設定只警告、暫停，或這一回合改用備用模型（排程、子代理同樣算在內）
+    from woof import cost
+    bst = cost.status(REG.config) if (REG.config.get("budget") or {}) else None
+    if bst and bst["over"] and cost.price_of(model_cfg) is not None:
+        why = "；".join(bst["over"])
+        if bst["action"] == "pause":
+            raise RuntimeError(f"{why}。已暫停送出（設定在右側面板「用量」的預算）")
+        fb = aux_model("fallback", None) if bst["action"] == "fallback" else None
+        if fb and fb["id"] != model_cfg["id"] and fb.get("provider") in REG.providers:
+            await emit({"type": "notice", "session_id": session_id,
+                        "text": f"{why}，這一回合改用備用模型 {fb.get('label', fb['id'])}"})
+            model_cfg, effort = fb, fb.get("default_effort")
+        else:
+            await emit({"type": "notice", "session_id": session_id, "text": f"{why}（只提醒，照常送出）"})
 
     note, told = settings_note(session)
     if note:
@@ -827,7 +898,7 @@ async def run_turn(session_id: str, blocks: list[dict], emit: Emit) -> None:
             # 主要模型一開始就失敗（還沒產生任何回覆）時，改用備用模型重跑一次
             fb = aux_model("fallback", None)
             produced = any(x["id"] > before for x in store.get_messages(session_id))
-            if not fb or fb["id"] == model_cfg["id"] or produced or fb.get("provider") not in REG.providers:
+            if getattr(ctx, "fell_back", False) or not fb or fb["id"] == model_cfg["id"] or produced or fb.get("provider") not in REG.providers:
                 raise
             await emit({"type": "notice", "session_id": session_id,
                         "text": f"{model_cfg.get('label', model_cfg['id'])} 失敗（{str(e)[:120]}），改用備用模型 {fb.get('label', fb['id'])}"})

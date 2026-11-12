@@ -155,6 +155,15 @@ def usage_summary(rng: str, sid: str | None) -> dict:
     }
 
 
+def usage_rows(since: float, sid: str | None = None) -> list[tuple]:
+    """(日期, 模型, 輸入, 輸出, 快取讀取) 依日期與模型加總，算金額用。"""
+    where, args = ("session_id=?", [sid]) if sid else ("ts>=?", [since])
+    with _lock:
+        return _db.execute(
+            f"SELECT date(ts,'unixepoch','localtime') d, model, SUM(input_tokens), SUM(output_tokens), SUM(cache_read) "
+            f"FROM usage_log WHERE {where} GROUP BY d, model", args).fetchall()
+
+
 def _session_row(r: sqlite3.Row) -> dict:
     d = dict(r)
     d["engine_state"] = json.loads(d.get("engine_state") or "{}")
@@ -334,6 +343,11 @@ def fork_session(sid: str, upto: int, title: str) -> dict | None:
             if isinstance(s2.get("kept"), list):
                 s2["kept"] = [idmap.get(x, x) if isinstance(x, int) else x for x in s2["kept"]]
             es["summary"] = s2
+    pr = (src.get("engine_state") or {}).get("prune")
+    if pr and pr.get("through"):
+        mapped = max((n for o, n in idmap.items() if o <= int(pr["through"])), default=0)
+        if mapped:
+            es["prune"] = {**pr, "through": mapped}
     return update_session(new["id"], engine_state=es, perm=src.get("perm") or "auto", created=src.get("created") or time.time())
 
 

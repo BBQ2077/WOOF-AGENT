@@ -212,6 +212,34 @@ def register(woof):
             return
         older, recent_ids = pending[:cut], {m["id"] for m in pending[cut:]}
 
+        # 先試只清舊工具輸出：較早、已經用過的工具結果換成一行佔位，夠降到門檻以下就不花模型呼叫寫摘要。
+        # 只在本來就要壓縮時做，平常不動，快取照舊
+        if not force:
+            done_through = int((es.get("prune") or {}).get("through") or 0)
+            saved, last_id, n_res = 0, 0, 0
+            for m in older:
+                if m["role"] != "tool" or m["id"] <= done_through:
+                    continue
+                for b in m["content"] or []:
+                    if b.get("type") == "tool_result":
+                        before = tokens.estimate_text(b.get("output") or "")
+                        after = tokens.estimate_text(tokens.pruned_result(b)["output"])
+                        if before > after:
+                            saved += before - after
+                            n_res += 1
+                last_id = m["id"]
+            if last_id and n_res and used - saved < window * trigger * 0.8:
+                cur = dict((store.get_session(ctx.session_id) or {}).get("engine_state") or {})
+                cur["prune"] = {"through": last_id, "at": time.time(), "count": n_res, "saved": saved}
+                s2 = store.update_session(ctx.session_id, engine_state=cur)
+                await ctx.emit({"type": "session_updated", "session": s2})
+                await ctx.emit({"type": "notice", "session_id": ctx.session_id,
+                                "text": f"上下文已用 {used / window:.0%}：先清掉 {n_res} 個較早的工具輸出（約省 {saved:,} token），"
+                                        "這次不用寫摘要；全文仍在資料庫"})
+                u = tokens.reestimate(ctx.session_id, window or None)
+                await ctx.emit({"type": "usage", "session_id": ctx.session_id, **u})
+                return True
+
         items = []
         for m in older:
             body = _text_of(m["content"])
@@ -256,15 +284,20 @@ def register(woof):
     def before_request(messages, ctx):
         from woof import store
 
+        from woof import tokens
+
         st = store.get_session(ctx.session_id) or {}
         summary = (st.get("engine_state") or {}).get("summary")
         if not summary or not summary.get("text"):
+            if (st.get("engine_state") or {}).get("prune"):
+                return tokens.apply_prune(messages, st.get("engine_state"))
             return None
         through = int(summary.get("through") or 0)
         kept = [m for m in messages if int(m.get("id") or 0) > through]
         # history() 目前不帶 id，退回用序號：訊息是按 id 排序的
         if not any("id" in m for m in messages):
             return None
+        kept = tokens.apply_prune(kept, st.get("engine_state"))
         body = _prompt_get("compact_head", summary=summary["text"])
         # 回合中途壓縮時，使用者這次的要求被摘要進去了：在摘要後面原文重述，模型才知道還在做什麼
         inf = int(summary.get("inflight") or 0)

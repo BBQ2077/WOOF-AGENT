@@ -66,6 +66,23 @@ def register(woof):
         if not command:
             return {"output": "command 不能是空的", "is_error": True}
         cwd = args.get("workdir") or ctx.cwd
+        # 寫入子代理：工作目錄鎖在主代理給的範圍內，不能開背景常駐（子代理結束後沒人收）
+        turn = getattr(ctx, "turn", None)
+        sub = bool(turn is not None and (getattr(turn, "session", None) or {}).get("parent"))
+        if sub:
+            from pathlib import Path as _P
+            scope = getattr(turn, "write_scope", None) or []
+            if not scope:
+                return {"output": "主代理沒有指定寫入範圍，子代理不能執行指令；請回報主代理", "is_error": True}
+            if args.get("background"):
+                return {"output": "子代理不能開背景常駐的指令；需要長時間執行的請回報主代理處理", "is_error": True}
+            wd = _P(cwd).resolve()
+            if not any(wd == s or s in wd.parents for s in scope):
+                if args.get("workdir"):
+                    return {"output": f"工作目錄 {wd} 在範圍外，只能在：" + "、".join(map(str, scope)), "is_error": True}
+                first = scope[0]
+                wd = first if first.is_dir() else first.parent
+            cwd = str(wd)
         timeout = min(int(args.get("timeout") or settings_num("default_timeout", 180)), 600)
         limit = settings_num("max_output", 30000)
 
@@ -104,6 +121,10 @@ def register(woof):
             await ctx.output("".join(pending))
 
         out = procs.read_log(task)
+        if task.ended is None and sub:
+            procs.stop_task(task.id)
+            return {"output": f"超過 {timeout} 秒還沒結束；子代理不能轉背景，已停止。\n最近輸出：\n{_tail(out, 4000)}",
+                    "is_error": True}
         if task.ended is None:
             task.background = True
             _arm_notify(task, args, loop)
