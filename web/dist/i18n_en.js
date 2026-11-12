@@ -1606,5 +1606,65 @@ window.WOOF_EN = {
 "／ 上限 {0} MB": "/ Limit {0} MB",
 "：檢索中…": ": Retrieving…",
 "：輸出風格已經用「設定變更」告訴模型了；其餘會在下次壓縮或開新對話時套用，也可以現在套用（下一則訊息要重新計算一次全部內容）。": "Output style has already been told to the model via 'Settings change'. The rest will be applied on the next compression or when starting a new chat, or can be applied now (next message will recalculate everything).",
-"：連線中…": ": Connecting…"
+"：連線中…": ": Connecting…",
+
+"環境": "Environment",
+
+"設定檔與資料夾": "Config files & folders",
+
+"搜尋設定": "Search settings",
+
+"找設定，例如「壓縮」「金鑰」「權限」": "Search settings, e.g. compression, keys, permissions",
+
+"前往": "Go",
+
+"沒有符合的設定項。": "No matching settings.",
+
+"「{0}」找到 {1} 項，點一下跳過去。": "{1} results for \"{0}\". Click one to jump there.",
+
+"「{0}」沒有符合的設定。換個說法試試，例如「壓縮」「金鑰」「權限」。": "No settings match \"{0}\". Try another word, e.g. compression, keys, permissions.",
+
+"服務商、連線方式與模型清單。對話框的模型選單照這裡分組。": "Providers, connection settings and the model list. The model menu in the chat groups them the same way.",
+
+"主要模型是新對話的預設；其餘每項可以各自指定服務商與模型，留空就跟隨主模型。": "The primary model is the default for new chats. Every other role can point at its own provider and model; leave it blank to follow the primary model.",
+
+"同一個金鑰池可以放多把 key，一把用完自動換下一把。": "A key pool can hold several keys; when one runs out the next one is used.",
+
+"WOOF 寫給模型的內部提示詞，以及設定檔、人物檔、使用者檔、記憶檔。": "The internal prompts WOOF writes for the model, plus the instructions, persona, user and memory files.",
+
+"每個對話可以選一種風格，內容會放進系統提示。": "Each chat can pick one style; its text goes into the system prompt.",
+
+"對話變長時把較早的內容摘要起來，全文仍留在資料庫。": "When a chat grows long, earlier turns are summarised; the full text stays in the database.",
+
+"模型要用工具時，依類別決定直接執行、先問你、或不允許。": "When the model wants to use a tool, each category decides whether it runs directly, asks you first, or is not allowed.",
+
+"每個工具一個開關，依插件分組。停用後模型看不到該工具。": "One switch per tool, grouped by plugin. A disabled tool is invisible to the model.",
+
+"知識文件，跟工具分開。預設全部關閉，需要哪個就勾哪個。": "Knowledge documents, kept apart from tools. All off by default; tick the ones you need.",
+
+"工作目錄、終端機、可預覽的資料夾，以及執行中按 Enter 的行為。": "Working directory, terminal, previewable folders, and what Enter does while the model is running.",
+
+"顏色、縮放與字級。只存在這台電腦，拉了立即生效。": "Colours, zoom and font size. Stored on this computer only; changes apply immediately.",
+
+"WOOF 對外提供 MCP 工具，也可以連外部的 MCP 伺服器。": "WOOF exposes MCP tools to outside clients and can also connect to external MCP servers.",
+
+"模型改檔前先存一份原檔，之後可以在對話的「檔案」分頁還原。": "A copy of each file is saved before the model changes it, so you can restore it from the Files tab of a chat.",
+"模型商與模型清單": "Providers & model list",
+
+"Skills 權限": "Skills permissions",
+
+"Skills 清單": "Skills list",
+
+"檔案還原用量": "File restore usage",
+
+"還原設定": "Restore settings",
+
+"介面縮放與字級": "Zoom & font size",
+
+"WOOF 的 MCP 服務": "WOOF's MCP service",
+
+"外部 MCP 伺服器": "External MCP servers",
+
+"版本與捷徑": "Version & shortcuts",
+
 };

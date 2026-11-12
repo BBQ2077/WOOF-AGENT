@@ -2072,7 +2072,7 @@ async function renderToolsSet(box) {
   for (const t of tools) (byP[t.plugin] = byP[t.plugin] || []).push(t);
   const onCount = tools.filter((t) => t.enabled).length;
   const onTok = tools.filter((t) => t.enabled).reduce((a, t) => a + (t.tokens_est || 0), 0);
-  box.innerHTML = `<div class="sk-top"><span>共 ${tools.length} 個工具，已啟用 ${onCount} 個，啟用中約 ${onTok.toLocaleString()} tokens</span>`
+  box.innerHTML = `<div class="sk-top" data-f="tAll"><span>共 ${tools.length} 個工具，已啟用 ${onCount} 個，啟用中約 ${onTok.toLocaleString()} tokens</span>`
     + `<span class="grow"></span><button class="btn sm" data-tools="allon">全部啟用</button><button class="btn sm" data-tools="alloff">全部停用</button></div>`
     + Object.keys(byP).sort().map((pl) => {
       const list = byP[pl];
@@ -2110,12 +2110,12 @@ async function renderSkillsSet(box) {
   const byCat = {};
   for (const s of info.skills) (byCat[s.category] = byCat[s.category] || []).push(s);
   const cats = Object.keys(byCat).sort();
-  box.innerHTML = `<div class="sk-perm">`
+  box.innerHTML = `<div class="sk-perm" data-f="skPerm">`
     + `<div class="trow"><span class="sk-l"><b>允許讀取</b><small>模型能列出已勾選的 skill，並用 skill_view 載入全文</small></span><span class="sw sm${rw('read', false) ? ' on' : ''}" data-skperm="read"></span></div>`
     + `<div class="trow"><span class="sk-l"><b>允許寫入</b><small>模型能用 skill_write 建立或覆寫 SKILL.md（只寫到 WOOF 的資料夾）</small></span><span class="sw sm${rw('write', false) ? ' on' : ''}" data-skperm="write"></span></div>`
     + `<div class="trow"><span class="sk-l"><b>讀取的外部資料夾</b><small>多個用 ; 分隔。留空＝只用 WOOF 自己的 data/skills，不讀任何外部技能庫。</small></span><input class="sk-dirs" value="${esc(sv.dirs || '')}" placeholder="留空＝不讀外部"><button class="btn sm" data-skdirs>套用資料夾</button></div>`
     + `</div>`
-    + `<div class="sk-top"><span>共 ${info.skills.length} 個 skill，已勾選 <b id="skCount">${on.size}</b> 個（預設全部關閉）</span><span class="grow"></span>`
+    + `<div class="sk-top" data-f="skList"><span>共 ${info.skills.length} 個 skill，已勾選 <b id="skCount">${on.size}</b> 個（預設全部關閉）</span><span class="grow"></span>`
     + `<button class="btn sm" data-skall="on">全部勾選</button><button class="btn sm" data-skall="off">全部取消</button></div>`
     + (info.skills.length ? '' : '<div class="blank">找不到任何 skill。外部技能庫要在上面填資料夾，或在 data/skills 建立。</div>')
     + cats.map((c) => {
@@ -3416,33 +3416,32 @@ setSide(!localStorage.getItem('woof.sideOff'));
 $('#togSide').onclick = () => setSide(document.body.classList.contains('side-off'));
 $('#navCron').onclick = () => openCron();
 $('#navPlug').onclick = () => { showView('plug'); refreshState(); };
-$('#navSet').onclick = () => openSettings();
+$('#navSet').onclick = () => { setFindClear(); openSettings(); };
 
 // ------------------------------------------------------------------ 設定
 const SECTIONS = [
-  ['vendors', '模型商', '先加模型商（連線方式、位址、金鑰池），再在底下加模型。對話框的模型選單會照這裡分組。'],
-  ['aux', '模型用途', '主要模型是新對話預設；備用、看圖、壓縮、子代理、自動審核每項都可以單獨指定服務商與模型。看圖、壓縮、子代理留空就跟隨主模型；備用、自動審核留空就不使用。'],
-  ['prompts', '提示詞與記憶', '內部提示詞模式，以及設定檔、人物檔、使用者檔、記憶檔。這些檔直接在這裡編輯，不用開資料夾。'],
-  ['styles', '輸出風格', '每個對話可以選一種風格，內容會放進系統提示。內建的可以改，也可以自己新增；按愛心置頂，對話裡選風格時排最前面。'],
-  ['compress', '壓縮', '超過門檻就把較早的對話摘要成一段，全文仍留在資料庫。這裡的設定存在插件 context，按「儲存壓縮設定」後生效。'],
-  ['perms', '權限', '模型要用工具時，依類別決定直接執行、先問你、或不允許。每個對話用輸入框下方的權限鈕選模式；「自訂」照這裡的表。危險指令與黑白名單所有模式都適用。'],
-  ['tools', '工具', '每個工具一個開關，依插件分組。停用後模型看不到該工具。全域生效；單一對話的覆寫在對話的「插件」面板。'],
-  ['skills', 'Skills', 'Skills 是知識文件，跟工具分開。預設全部關閉，需要哪個就勾哪個。讀取與寫入權限、資料夾都在這裡。'],
-  ['keys', 'API 金鑰', '同一個金鑰池可以放多把 key，一把用完自動換下一把。模型商用的和工具用的分開列。'],
-  ['snapshots', '檔案還原', '模型改檔前會先存一份原檔，之後可以在對話的「檔案」分頁還原。這裡設定保留多少、佔多少空間。'],
-  ['appearance', '外觀', '只存在這台電腦，拉了立即生效，不用儲存。'],
-  ['general', '一般', '工作目錄與介面可以預覽的資料夾。'],
-  ['mcp', 'MCP 伺服器', 'WOOF 自己對外提供 MCP 工具（對話、模型、設定、送訊息）。外部模型用下面的網址與權杖連上。只聽本機 127.0.0.1。'],
-  ['advanced', '進階', '設定檔、資料夾與開發者工具。'],
+  ['vendors', '模型商', '服務商、連線方式與模型清單。對話框的模型選單照這裡分組。'],
+  ['aux', '模型用途', '主要模型是新對話的預設；其餘每項可以各自指定服務商與模型，留空就跟隨主模型。'],
+  ['keys', 'API 金鑰', '同一個金鑰池可以放多把 key，一把用完自動換下一把。'],
+  ['prompts', '提示詞與記憶', 'WOOF 寫給模型的內部提示詞，以及設定檔、人物檔、使用者檔、記憶檔。'],
+  ['styles', '輸出風格', '每個對話可以選一種風格，內容會放進系統提示。'],
+  ['compress', '上下文壓縮', '對話變長時把較早的內容摘要起來，全文仍留在資料庫。'],
+  ['perms', '權限', '模型要用工具時，依類別決定直接執行、先問你、或不允許。'],
+  ['tools', '工具', '每個工具一個開關，依插件分組。停用後模型看不到該工具。'],
+  ['skills', 'Skills', '知識文件，跟工具分開。預設全部關閉，需要哪個就勾哪個。'],
+  ['general', '一般', '工作目錄、終端機、可預覽的資料夾，以及執行中按 Enter 的行為。'],
+  ['appearance', '外觀', '顏色、縮放與字級。只存在這台電腦，拉了立即生效。'],
+  ['mcp', 'MCP 伺服器', 'WOOF 對外提供 MCP 工具，也可以連外部的 MCP 伺服器。'],
+  ['snapshots', '檔案還原', '模型改檔前先存一份原檔，之後可以在對話的「檔案」分頁還原。'],
   ['about', '關於', ''],
 ];
 // 側欄分組：同一類放一個框，項目長短不一也整齊
 const SET_GROUPS = [
-  ['模型', ['vendors', 'aux', 'compress']],
-  ['對話', ['prompts', 'styles']],
-  ['能力', ['perms', 'tools', 'skills', 'mcp']],
-  ['資料', ['keys', 'snapshots']],
-  ['程式', ['appearance', 'general', 'advanced', 'about']],
+  ['模型', ['vendors', 'aux', 'keys']],
+  ['對話', ['prompts', 'styles', 'compress']],
+  ['能力', ['perms', 'tools', 'skills']],
+  ['環境', ['general', 'appearance']],
+  ['進階', ['mcp', 'snapshots', 'about']],
 ];
 async function renderMcpSec(box) {
   box.innerHTML = '<div class="blank">讀取中…</div>';
@@ -3450,7 +3449,7 @@ async function renderMcpSec(box) {
   try { info = await api('GET', '/api/mcp/info'); } catch (e) { box.innerHTML = `<div class="errbox">讀取失敗：${esc(e.message)}</div>`; return; }
   const st = info.running ? '<span class="tag t-ok">執行中</span>' : `<span class="tag t-ex">未啟動</span> ${esc(info.error || '')}`;
   const tools = ['list_sessions', 'get_session', 'list_models', 'list_vendors', 'get_config', 'get_prompts_mode', 'send_message', 'set_prompts_mode', 'set_compress'];
-  box.innerHTML = `<div class="mcpst">
+  box.innerHTML = `<div class="mcpst" data-f="mcpInfo">
       <div class="frow"><div><b>狀態</b></div><div>${st}</div></div>
       <div class="frow"><div><b>網址</b></div><div><code>${esc(info.url)}</code></div></div>
       <div class="frow"><div><b>權杖</b><small>外部模型連線時放在 Authorization: Bearer 後面</small></div><div class="mcp-tok"><code id="mcpTok">${esc(info.token)}</code><span class="btn" id="mcpCopy">複製</span></div></div>
@@ -3458,7 +3457,7 @@ async function renderMcpSec(box) {
 
     </div>
     <div class="sec-h">外部 MCP 伺服器（WOOF 當 client 去連）</div>
-    <div id="extMcp"></div>`;
+    <div id="extMcp" data-f="mcpExt"></div>`;
   $('#mcpCopy').onclick = () => { navigator.clipboard.writeText(info.token); notify('ok', '已複製權杖'); };
   renderExternalMcpSec($('#extMcp'));
 }
@@ -3666,13 +3665,142 @@ async function cronEdit(job, preset) {
   });
   if ($('#cronView').classList.contains('on')) renderCronView();
 }
-async function openSettings(sec) {
+// 搜尋用：每頁在 S.setQ 有值時顯示這裡的項目，點一下跳到對應分頁並捲到該項
+const SET_Q = {
+  vendors: [
+    ['vlist', '模型商與模型清單', '服務商 廠商 供應商 位址 base_url 金鑰池 連線方式 驗證 思考參數 顯示名稱 上下文 單價 看圖 思考強度 預設'],
+    ['vgal', '新增模型商', '範本 新增 加入 OpenRouter DeepSeek OpenAI 本機 Ollama'],
+  ],
+  aux: [
+    ['primary', '主要模型', '新對話 預設模型'],
+    ['aux:fallback', '備用模型', '自動切換 限流 額度用完 備援'],
+    ['aux:vision', '看圖', '圖片 視覺 圖片分析 vision_analyze'],
+    ['aux:compact', '壓縮', '上下文 摘要 摘要模型'],
+    ['aux:subagent', '子代理', 'delegate_task 分公司'],
+    ['aux:review', '自動審核', '審核 權限 放行 先問我'],
+    ['auxFollow', '全部跟隨主模型', ''],
+  ],
+  prompts: [
+    ['pmode', '內部提示詞模式', '精簡 常規 提示詞 系統'],
+    ['ipBox', '內部提示詞', '審核 規劃 接續 壓縮 看圖 還原預設'],
+    ['pfBox', '設定檔・人物檔・使用者檔・記憶檔', 'instructions SOUL USER MEMORY 記憶 人格'],
+  ],
+  styles: [['styList', '輸出風格', '風格 語氣 內建 自訂 置頂 新增']],
+  compress: [
+    ['c-window', '上下文大小', 'context window token 上限 多少'],
+    ['c-trigger', '壓縮門檻', '門檻 百分比 觸發 何時壓縮'],
+    ['c-keep', '保留最近幾輪', '保留 輪 最近'],
+    ['c-ratio', '摘要幅度', '摘要 比例 長度'],
+    ['c-method', '壓縮方式', '單次 多工 一次摘要'],
+    ['c-parallel', '同時跑幾段', '多工 平行 段數'],
+    ['cSave', '儲存壓縮設定', '儲存 立即壓縮'],
+  ],
+  perms: [
+    ['pmTable', '各模式的權限', '權限 模式 工具 類別 自動 先問 禁止 自訂'],
+    ['pmDefault', '新對話的預設權限', '預設 新對話'],
+    ['pmDanger', '危險指令先問', '危險 rm -rf 格式化'],
+    ['pmHard', '絕對禁止', '禁止 擋下 黑名單'],
+    ['pmAllow', '指令白名單', '白名單 允許 直接執行'],
+    ['pmDeny', '指令黑名單', '黑名單 禁止 擋下'],
+    ['pmHeadless', '沒人在旁邊時', '排程 沒人 自動 定時'],
+    ['pmTry', '試試看', '測試 檢查 指令'],
+  ],
+  tools: [['tAll', '工具', '工具 開關 停用 啟用 萬用 插件']],
+  skills: [
+    ['skPerm', 'Skills 權限', 'skills 讀取 寫入 資料夾 技能'],
+    ['skList', 'Skills 清單', 'skills 技能 勾選 分類'],
+  ],
+  keys: [
+    ['kSafe', '金鑰保護', '加密 遮罩 redact 保護 明文'],
+    ['kList', 'API 金鑰', 'key 金鑰池 模型商 搜尋 工具 firecrawl tavily'],
+    ['kAdd', '新增金鑰池', '新增 金鑰池'],
+  ],
+  snapshots: [
+    ['snpUse', '檔案還原用量', '快照 還原 容量 備份'],
+    ['snpSet', '還原設定', '保留 天數 上限 自動存 整理'],
+  ],
+  general: [
+    ['gBusy', '執行中按 Enter', '打斷 插話 排隊 interrupt steer queue'],
+    ['gWorkdir', '預設工作目錄', '工作目錄 資料夾 路徑'],
+    ['gTerm', '終端機', 'shell 終端機 Git Bash PowerShell 命令提示字元'],
+    ['gPreview', '可預覽資料夾', '預覽 圖片 資料夾 allowed_dirs'],
+    ['gCost', '花費與預算', '花費 預算 金額 上限 單價 計費'],
+    ['gFiles', '設定檔與資料夾', 'config.toml keys.toml 資料夾 開發者工具 console'],
+  ],
+  appearance: [
+    ['aLang', '介面語言', '語言 中文 English 英文'],
+    ['aMode', '色彩模式', '淺色 深色 系統 主題'],
+    ['aPreset', '配色', '配色 主題 色系 預設'],
+    ['aBase', '整體底色', '色相 濃度 背景 顏色'],
+    ['aArea', '各區域', '色相 濃度 主畫面 側欄 卡片 程式碼'],
+    ['aAccent', '強調色', '強調色 顏色 按鈕 連結'],
+    ['aSize', '介面縮放與字級', '縮放 字級 大小 字體'],
+  ],
+  mcp: [
+    ['mcpInfo', 'WOOF 的 MCP 服務', 'MCP 網址 權杖 token 對外'],
+    ['mcpExt', '外部 MCP 伺服器', 'MCP 外部 伺服器 stdio http 新增'],
+  ],
+  about: [['aboutAll', '版本與捷徑', '版本 關於 更新 捷徑 桌面']],
+};
+function setFind(q) {
+  const s = String(q || '').trim().toLowerCase();
+  const out = [];
+  if (!s) return out;
+  SECTIONS.forEach(([sec, name]) => {
+    (SET_Q[sec] || []).forEach(([id, t, kw]) => {
+      if ((t + ' ' + kw).toLowerCase().includes(s)) out.push({ sec, secName: name, id, t });
+    });
+  });
+  return out;
+}
+function setFindClear() {
+  S.setQ = '';
+  const i = $('#setQ'); if (i) i.value = '';
+}
+// 搜尋結果：列出所有分頁裡符合的設定項，點一下跳過去
+function renderSetSearch(q) {
+  const hits = setFind(q);
+  $('#setTitle').hidden = false;
+  $('#setTitle').textContent = '搜尋設定';
+  $('#setIntro').hidden = false;
+  $('#setIntro').textContent = hits.length ? `「${q}」找到 ${hits.length} 項，點一下跳過去。` : `「${q}」沒有符合的設定。換個說法試試，例如「壓縮」「金鑰」「權限」。`;
+  const box = $('#setList');
+  box.className = 'sec-search';
+  box.innerHTML = hits.length
+    ? `<div class="card setq-list">${hits.map((h) => `<div class="setq-item" data-qsec="${esc(h.sec)}" data-qid="${esc(h.id)}"><div><b>${esc(h.t)}</b><small>${esc(h.secName)}</small></div><span class="setq-go">前往</span></div>`).join('')}</div>`
+    : '<div class="blank">沒有符合的設定項。</div>';
+  box.onclick = (e) => {
+    const it = e.target.closest('[data-qid]'); if (!it) return;
+    setFindClear();
+    openSettings(it.dataset.qsec, it.dataset.qid);
+  };
+}
+async function openSettings(sec, focus) {
   if (sec) S.setSec = sec;
   if (!SECTIONS.some((x) => x[0] === S.setSec)) S.setSec = SECTIONS[0][0];
   showView('set');
   if (S.dirty) await flushSave();
   if (!S.cfg || !S.dirty) await loadCfg();
   renderSettings();
+  if (focus) setFocus(focus);
+}
+// 跳到某一項：等該分頁畫出來（有的分頁要先讀 API），再捲過去並閃一下
+async function setFocus(id, tries) {
+  for (let i = 0; i < (tries || 20); i++) {
+    const el = document.querySelector(`#setList [data-f="${id}"]`);
+    if (el) {
+      el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      el.classList.remove('setflash');
+      void el.offsetWidth;
+      el.classList.add('setflash');
+      setTimeout(() => el.classList.remove('setflash'), 1400);
+      const c = el.querySelector('input:not([type="range"]), select, textarea');
+      if (c && window.innerWidth > 900) c.focus({ preventScroll: true });
+      return true;
+    }
+    await new Promise((r) => setTimeout(r, 60));
+  }
+  return false;
 }
 async function loadCfg() {
   const c = await api('GET', '/api/settings');
@@ -3711,6 +3839,8 @@ function renderSettings() {
   const byId = Object.fromEntries(SECTIONS.map((s) => [s[0], s]));
   $('#setNav').innerHTML = '<div class="snh">設定</div>' + SET_GROUPS.map(([g, ids]) => `<div class="sng"><div class="sng-h">${g}</div>${
     ids.filter((id) => byId[id]).map((id) => `<div class="${S.setSec === id ? 'on' : ''}" data-sec="${id}">${byId[id][1]}</div>`).join('')}</div>`).join('');
+  const q = String(S.setQ || '').trim();
+  if (q) { renderSetSearch(q); return; }
   const sec = SECTIONS.find((s) => s[0] === S.setSec) || SECTIONS[0];
   $('#setTitle').textContent = sec[1];
   $('#setIntro').textContent = sec[2];
@@ -3719,9 +3849,14 @@ function renderSettings() {
   const box = $('#setList');
   box.onclick = null;
   box.className = 'sec-' + sec[0];
-  ({ mcp: renderMcpSec, aux: renderAux, compress: renderCompressSec, prompts: renderPromptsSec, vendors: renderVendors, keys: renderKeyEditor, appearance: renderAppearance, general: renderGeneral, perms: renderPermsSec, about: renderAbout, advanced: renderAdvanced, styles: renderStylesSec, snapshots: renderSnapshotsSec, tools: renderToolsSet, skills: renderSkillsSet })[sec[0]](box);
+  ({ mcp: renderMcpSec, aux: renderAux, compress: renderCompressSec, prompts: renderPromptsSec, vendors: renderVendors, keys: renderKeyEditor, appearance: renderAppearance, general: renderGeneral, perms: renderPermsSec, about: renderAbout, styles: renderStylesSec, snapshots: renderSnapshotsSec, tools: renderToolsSet, skills: renderSkillsSet })[sec[0]](box);
 }
-$('#setNav').onclick = (e) => { const d = e.target.closest('[data-sec]'); if (!d) return; S.setSec = d.dataset.sec; localStorage.setItem('woof.setSec', S.setSec); renderSettings(); };
+$('#setNav').onclick = (e) => { const d = e.target.closest('[data-sec]'); if (!d) return; setFindClear(); S.setSec = d.dataset.sec; localStorage.setItem('woof.setSec', S.setSec); renderSettings(); };
+$('#setQ').oninput = (e) => { S.setQ = e.target.value; renderSettings(); };
+$('#setQ').onkeydown = (e) => {
+  if (e.key === 'Escape') { setFindClear(); renderSettings(); e.target.blur(); }
+  if (e.key === 'Enter') { const f = $('.setq-item', $('#setList')); if (f) f.click(); }
+};
 window.addEventListener('beforeunload', () => { if (S.dirty) saveSettings({ auto: true }); });
 
 // ---- 權限：各模式 × 類別的表、危險指令、黑白名單、排程、試試看
@@ -3735,22 +3870,22 @@ async function renderPermsSec(box) {
     const [cls, txt] = DEC[d] || DEC.ask;
     return m === 'custom' ? `<td class="pm-c"><span class="tag ${cls} pm-edit" data-pc="${c}" title="點一下切換：自動 → 先問 → 禁止">${txt}</span></td>` : `<td><span class="tag ${cls}">${txt}</span></td>`;
   };
-  box.innerHTML = `<div class="card pm-card"><div class="card-hd"><b>各模式的權限</b><small>欄是模式、列是工具類別。目前這個對話用的是「${esc(PERM[now][0])}」。自訂欄可以點標籤切換。</small></div>
+  box.innerHTML = `<div class="card pm-card" data-f="pmTable"><div class="card-hd"><b>各模式的權限</b><small>欄是模式、列是工具類別。目前這個對話用的是「${esc(PERM[now][0])}」。自訂欄可以點標籤切換。</small></div>
     <div class="pm-wrap"><table class="pm-tb"><thead><tr><th></th>${modes.map((m) => `<th class="${m === now ? 'cur' : ''}">${esc(P_.modes[m][0])}</th>`).join('')}</tr></thead>
     <tbody>${Object.entries(P_.cats).map(([c, [n, d]]) => `<tr><th><b>${esc(n)}</b><small>${esc(d)}</small></th>${modes.map((m) => cell(m, c)).join('')}</tr>`).join('')}</tbody></table></div></div>
     <div class="card">
-      <div class="frow"><div><b>新對話的預設權限</b><small>開新對話時權限鈕的起始值，之後每個對話可以各自切換。</small></div><div class="fctl"><div class="seg">${modes.filter((m) => m !== 'custom').map((m) => `<b data-pdm="${m}" class="${st.default_mode === m ? 'on' : ''}">${esc(P_.modes[m][0])}</b>`).join('')}</div></div></div>
-      <div class="frow"><div><b>危險指令先問</b><small>在會自動執行的模式裡，碰到下面這些指令改成先問你。關掉就照模式直接執行。</small></div><div class="fctl"><span class="sw${st.danger_ask ? ' on' : ''}" data-pk="danger_ask"></span></div></div>
+      <div class="frow" data-f="pmDefault"><div><b>新對話的預設權限</b><small>開新對話時權限鈕的起始值，之後每個對話可以各自切換。</small></div><div class="fctl"><div class="seg">${modes.filter((m) => m !== 'custom').map((m) => `<b data-pdm="${m}" class="${st.default_mode === m ? 'on' : ''}">${esc(P_.modes[m][0])}</b>`).join('')}</div></div></div>
+      <div class="frow" data-f="pmDanger"><div><b>危險指令先問</b><small>在會自動執行的模式裡，碰到下面這些指令改成先問你。關掉就照模式直接執行。</small></div><div class="fctl"><span class="sw${st.danger_ask ? ' on' : ''}" data-pk="danger_ask"></span></div></div>
       <div class="pm-chips">${P_.danger.map((x) => `<span>${esc(x)}</span>`).join('')}</div>
-      <div class="frow"><div><b>絕對禁止</b><small>任何模式都擋，按「允許」也沒用。</small></div><div></div></div>
+      <div class="frow" data-f="pmHard"><div><b>絕對禁止</b><small>任何模式都擋，按「允許」也沒用。</small></div><div></div></div>
       <div class="pm-chips bad">${P_.hardline.map((x) => `<span>${esc(x)}</span>`).join('')}</div>
     </div>
     <div class="card">
-      <div class="frow"><div><b>指令白名單</b><small>開頭符合就直接執行，不問（例如 <code>git status</code>、<code>ls</code>）。指令裡有 &amp;&amp;、;、| 串接時不適用。一行一個。</small></div><textarea class="mono" rows="4" data-pl="allow_cmds" placeholder="git status&#10;git diff&#10;ls">${esc(st.allow_cmds.join(NL))}</textarea></div>
-      <div class="frow"><div><b>指令黑名單</b><small>指令裡出現這些字就擋下，任何模式都一樣。一行一個。</small></div><textarea class="mono" rows="3" data-pl="deny_cmds" placeholder="git push&#10;npm publish">${esc(st.deny_cmds.join(NL))}</textarea></div>
-      <div class="frow"><div><b>沒人在旁邊時</b><small>排程跑的對話碰到要先問的工具，沒有人能按允許。</small></div><div class="fctl"><div class="seg"><b data-ph="deny" class="${st.headless === 'deny' ? 'on' : ''}">擋下</b><b data-ph="approve" class="${st.headless === 'approve' ? 'on' : ''}">直接放行</b></div></div></div>
+      <div class="frow" data-f="pmAllow"><div><b>指令白名單</b><small>開頭符合就直接執行，不問（例如 <code>git status</code>、<code>ls</code>）。指令裡有 &amp;&amp;、;、| 串接時不適用。一行一個。</small></div><textarea class="mono" rows="4" data-pl="allow_cmds" placeholder="git status&#10;git diff&#10;ls">${esc(st.allow_cmds.join(NL))}</textarea></div>
+      <div class="frow" data-f="pmDeny"><div><b>指令黑名單</b><small>指令裡出現這些字就擋下，任何模式都一樣。一行一個。</small></div><textarea class="mono" rows="3" data-pl="deny_cmds" placeholder="git push&#10;npm publish">${esc(st.deny_cmds.join(NL))}</textarea></div>
+      <div class="frow" data-f="pmHeadless"><div><b>沒人在旁邊時</b><small>排程跑的對話碰到要先問的工具，沒有人能按允許。</small></div><div class="fctl"><div class="seg"><b data-ph="deny" class="${st.headless === 'deny' ? 'on' : ''}">擋下</b><b data-ph="approve" class="${st.headless === 'approve' ? 'on' : ''}">直接放行</b></div></div></div>
     </div>
-    <div class="card"><div class="card-hd"><b>試試看</b><small>輸入一個指令，看在各模式下會怎樣。</small></div>
+    <div class="card" data-f="pmTry"><div class="card-hd"><b>試試看</b><small>輸入一個指令，看在各模式下會怎樣。</small></div>
       <div class="pm-try"><input class="mono" id="pmCmd" placeholder="例如 rm -rf build" value="git push --force"><span class="btn sm" id="pmTry">檢查</span></div>
       <div class="pm-res" id="pmRes"></div></div>`;
   const save = async (patch, msg) => {
@@ -3787,15 +3922,15 @@ function renderPromptsSec(box) {
   const PM = { lean: ['精簡', '只留必要指令，不寫語氣與舉例。', '審核只看有沒有證據，明顯沒做才不通過。'],
     normal: ['常規', '判準說清楚，但不冗長。預設。', '允許措辭與排版小瑕疵，不因不完美就判不通過。'] };
   box.innerHTML = `<div class="card">
-    <div class="frow"><div><b>內部提示詞模式</b><small>子代理、審核、規劃、預案、看圖給模型的指令。改了就自動儲存，下一則訊息起生效。</small></div>
+    <div class="frow" data-f="pmode"><div><b>內部提示詞模式</b><small>子代理、審核、規劃、預案、看圖給模型的指令。改了就自動儲存，下一則訊息起生效。</small></div>
       <div class="fctl"><div class="seg">${seg('lean', '精簡')}${seg('normal', '常規')}</div></div></div>
     <div class="pm-ex"><b>${PM[mode][0]}</b><span>${PM[mode][1]}</span><small>例：${PM[mode][2]}</small></div>
   </div>
-  <div class="card ip-card">
+  <div class="card ip-card" data-f="ipBox">
     <div class="card-hd"><b>內部提示詞</b><small>WOOF 自己寫給模型的每一段話：審核、規劃、接續、壓縮、看圖。點開可以看全文、直接改（自動儲存），改壞了按「還原預設」。主模型的系統提示詞在對話的「上下文 → 總提示詞」。</small></div>
     <div id="ipBox"><div class="blank">讀取中…</div></div>
   </div>
-  <div class="card pf-card">
+  <div class="card pf-card" data-f="pfBox">
     <div class="card-hd"><b>設定檔・人物檔・使用者檔・記憶檔</b><small>存在 data/prompts/，每個對話都會把它們放進系統提示。</small></div>
     <div id="pfBox"><div class="blank">讀取中…</div></div>
   </div>`;
@@ -3924,7 +4059,7 @@ async function renderCompressSec(box) {
   const val = (k) => ((p.settings || {})[k] ?? (sc[k] || {}).default ?? '');
   const seg = (k, opts) => `<div class="seg" data-cseg="${k}">${opts.map((o) => `<b data-cv="${esc(o)}" class="${String(val(k)) === o ? 'on' : ''}">${esc(o)}</b>`).join('')}</div>`;
   const num = (k, min, max, unit = '', cls = '') => `<label class="cin ${cls}"><input type="number" data-cnum="${k}" min="${min}" max="${max}" value="${esc(String(val(k)))}"><span>${unit}</span></label>`;
-  const row = (title, hint, ctl) => `<div class="frow"><div><b>${title}</b><small>${hint}</small></div><div>${ctl}</div></div>`;
+  const row = (id, title, hint, ctl) => `<div class="frow" data-f="${id}"><div><b>${title}</b><small>${hint}</small></div><div>${ctl}</div></div>`;
   const method = String(val('method')) === '多工' ? '多工' : '單次';
   const cm = selectedModel();
   const capNow = cm && cm.context_window ? `<br>目前的模型 ${esc(cm.label)}：${Number(cm.context_window).toLocaleString()} token。` : '';
@@ -3934,16 +4069,16 @@ async function renderCompressSec(box) {
     </div>
     <div class="cmp-h">什麼時候壓縮</div>
     <div class="card cmp">
-      ${row('上下文大小', `0＝照模型本身的上下文窗口。填 100000 就當作只有 10 萬：壓縮門檻和對話框的用量圈都用它算。比模型本身大時以模型為準。${capNow}`, num('window', 0, 10000000, 'token', 'wide'))}
-      ${row('壓縮門檻', '用量達到上下文大小的這個百分比，就把較早的對話摘要起來。平常是回合結束後在背景做，你看回覆時就壓好了；同一回合工具結果疊太多、超過門檻時，會先壓縮再繼續。', num('trigger', 10, 95, '%'))}
+      ${row('c-window', '上下文大小', `0＝照模型本身的上下文窗口。填 100000 就當作只有 10 萬：壓縮門檻和對話框的用量圈都用它算。比模型本身大時以模型為準。${capNow}`, num('window', 0, 10000000, 'token', 'wide'))}
+      ${row('c-trigger', '壓縮門檻', '用量達到上下文大小的這個百分比，就把較早的對話摘要起來。平常是回合結束後在背景做，你看回覆時就壓好了；同一回合工具結果疊太多、超過門檻時，會先壓縮再繼續。', num('trigger', 10, 95, '%'))}
     </div>
     <div class="cmp-h">怎麼壓縮</div>
     <div class="card cmp">
-      ${row('保留最近幾輪', '你的一則加上模型的回覆（含中間的工具呼叫）算一輪。最近這幾輪原樣保留，不壓縮。', num('keep', 1, 30, '輪'))}
-      ${row('摘要幅度', '摘要長度佔原文的百分比，5 到 60。建議 10 到 30。', num('ratio', 5, 60, '%'))}
-      ${row('壓縮方式', '單次＝整段一次摘要。多工＝依字數分段，同時摘要後合併，長對話比較快。', seg('method', ['單次', '多工']))}
-      ${row('同時跑幾段', '只在多工時生效，1 到 8。', num('parallel', 1, 8, '段'))}
-      <div class="cmp-foot"><span class="btn primary" data-cmpsave>儲存壓縮設定</span><span class="btn" data-cmpnow${S.sid ? '' : ' style="opacity:.5"'}>立即壓縮目前對話</span></div>
+      ${row('c-keep', '保留最近幾輪', '你的一則加上模型的回覆（含中間的工具呼叫）算一輪。最近這幾輪原樣保留，不壓縮。', num('keep', 1, 30, '輪'))}
+      ${row('c-ratio', '摘要幅度', '摘要長度佔原文的百分比，5 到 60。建議 10 到 30。', num('ratio', 5, 60, '%'))}
+      ${row('c-method', '壓縮方式', '單次＝整段一次摘要。多工＝依字數分段，同時摘要後合併，長對話比較快。', seg('method', ['單次', '多工']))}
+      ${row('c-parallel', '同時跑幾段', '只在多工時生效，1 到 8。', num('parallel', 1, 8, '段'))}
+      <div class="cmp-foot" data-f="cSave"><span class="btn primary" data-cmpsave>儲存壓縮設定</span><span class="btn" data-cmpnow${S.sid ? '' : ' style="opacity:.5"'}>立即壓縮目前對話</span></div>
     </div>`;
   const vals = { method };
   const pick = (k, v) => { vals[k] = v; box.querySelectorAll(`[data-cseg="${k}"] b`).forEach((b) => b.classList.toggle('on', b.dataset.cv === v)); };
@@ -4164,7 +4299,7 @@ function subagentRowHtml(n, tag) {
   const names = list.map((id) => (S.cfg.models.find((x) => x.id === id) || {}).label || id);
   const now = `預設：${def ? (dm ? dm.label || dm.id : def) : `跟隨主模型${dm ? `（${dm.label || dm.id}）` : ''}`}`
     + (names.length ? `　可指派：${names.join('、')}` : '　可指派：只用預設');
-  return `<div class="auxrow auxwide"><div><b>${n}<i>${tag}</i></b>`
+  return `<div class="auxrow auxwide" data-f="aux:subagent"><div><b>${n}<i>${tag}</i></b>`
     + '<small>勾選子代理可以用的模型（可多選），主代理派工時依任務從勾選的裡面挑；沒指定時用標「預設」的那個，沒設預設就跟隨主模型。需要 API 型連線（Claude Code CLI 不行）。建議只勾便宜或免費的。</small>'
     + `<div class="now">${esc(now)}</div></div>`
     + mchkHtml('aux:subagent', list, {
@@ -4188,7 +4323,7 @@ function auxRowHtml(k, n, tag, d) {
   const off = k === 'fallback' || k === 'review';
   const follow = k === 'fallback' ? '不設備用（出錯就停下）' : k === 'review' ? '不使用（照權限問你）' : '跟隨主模型';
   const now = m ? `目前：${m.label || m.id}` : `目前：${follow}${dm && !off ? `（${dm.label || dm.id}）` : ''}`;
-  return `<div class="auxrow"><div><b>${n}<i>${tag}</i></b><small>${d}</small><div class="now">${esc(now)}</div></div>`
+  return `<div class="auxrow" data-f="aux:${k}"><div><b>${n}<i>${tag}</i></b><small>${d}</small><div class="now">${esc(now)}</div></div>`
     + mpPairHtml('aux:' + k, cur, {
       filter: (x) => auxFits(k, x),
       blank: follow,
@@ -4198,12 +4333,12 @@ function auxRowHtml(k, n, tag, d) {
 }
 function renderAux(box) {
   const dm = (S.models || []).find((x) => x.id === S.cfg.default_model);
-  const primary = `<div class="auxrow"><div><b>主要模型<i>新對話預設</i></b><small>新對話與每次開啟 app 時使用的模型。已存在的對話仍用它自己的模型。</small><div class="now">${esc(dm ? `目前：${dm.label}` : '目前：未設定（清單第一個可用）')}</div></div>`
+  const primary = `<div class="auxrow" data-f="primary"><div><b>主要模型<i>新對話預設</i></b><small>新對話與每次開啟 app 時使用的模型。已存在的對話仍用它自己的模型。</small><div class="now">${esc(dm ? `目前：${dm.label}` : '目前：未設定（清單第一個可用）')}</div></div>`
     + mpPairHtml('primary', S.cfg.default_model, { blank: '未設定', set: (v) => { S.cfg.default_model = v; setDirty(true); } }) + '</div>';
   const roles = AUX.filter(([k]) => k !== 'fallback');
   const fb = AUX.find(([k]) => k === 'fallback');
   box.innerHTML = `<div class="card">${primary}${roles.map(([k, n, tag, d]) => auxRowHtml(k, n, tag, d)).join('')}</div>
-  <div class="addbar"><span class="btn" id="auxFollow">全部跟隨主模型</span></div>
+  <div class="addbar" data-f="auxFollow"><span class="btn" id="auxFollow">全部跟隨主模型</span></div>
   <div class="cmp-h">備用模型</div>
   <div class="card">${auxRowHtml(...fb)}<div class="auxnote">這一項不受上面的「全部」影響；預設不設，出錯就停下來告訴你。</div></div>`;
 }
@@ -4211,12 +4346,24 @@ function renderAux(box) {
 // ---- 一般
 function renderGeneral(box) {
   box.innerHTML = `<div class="card">
-    <div class="frow"><div><b>執行中按 Enter</b><small>模型還在跑時送出新訊息的預設動作。另外兩種在輸入框右下角有圖示鍵；Ctrl+Enter 一律排隊</small></div>
+    <div class="frow" data-f="gBusy"><div><b>執行中按 Enter</b><small>模型還在跑時送出新訊息的預設動作。另外兩種在輸入框右下角有圖示鍵；Ctrl+Enter 一律排隊</small></div>
       <div class="seg">${['interrupt', 'steer', 'queue'].map((v) => `<b class="${busyMode() === v ? 'on' : ''}" data-busy="${v}" title="${BUSY_HINT[v]}">${BUSY_LABEL[v]}</b>`).join('')}</div></div>
-    <div class="frow"><div><b>預設工作目錄</b><small>新對話的工作目錄。每個對話可以在輸入框下方的資料夾或右側「檔案」另外換。</small></div><input data-g="workdir" value="${esc(S.cfg.workdir)}" class="mono"></div>
-    <div class="frow"><div><b>終端機</b><small>右側「終端」新開分頁用的 shell。</small></div><div class="fctl"><select data-g="terminal_shell">${[['auto', '自動（有 Git Bash 用 Git Bash）'], ...Object.entries(S.ptyShells || { bash: 'Git Bash', powershell: 'PowerShell', cmd: '命令提示字元' })].map(([v, n]) => `<option value="${v}"${(S.cfg.terminal_shell || 'auto') === v ? ' selected' : ''}>${esc(n)}</option>`).join('')}</select></div></div>
-    <div class="frow"><div><b>花費與預算</b><small>依模型單價算金額，可設每日、每月上限。打開後模型商的模型表多一欄「單價」，右側「額度」多一張預算卡。用免費模型或訂閱就不用開。</small></div><div class="fctl"><span class="sw${S.cfg.cost_on ? ' on' : ''}" id="costOn"></span></div></div>
-    <div class="frow"><div><b>可預覽資料夾</b><small>對話裡的圖片與檔案，只有這些資料夾底下的能直接顯示。一行一個。</small></div><textarea data-g="allowed_dirs" rows="3" class="mono">${esc(S.cfg.allowed_dirs.join(NL))}</textarea></div></div>`;
+    <div class="frow" data-f="gWorkdir"><div><b>預設工作目錄</b><small>新對話的工作目錄。每個對話可以在輸入框下方的資料夾或右側「檔案」另外換。</small></div><input data-g="workdir" value="${esc(S.cfg.workdir)}" class="mono"></div>
+    <div class="frow" data-f="gTerm"><div><b>終端機</b><small>右側「終端」新開分頁用的 shell。</small></div><div class="fctl"><select data-g="terminal_shell">${[['auto', '自動（有 Git Bash 用 Git Bash）'], ...Object.entries(S.ptyShells || { bash: 'Git Bash', powershell: 'PowerShell', cmd: '命令提示字元' })].map(([v, n]) => `<option value="${v}"${(S.cfg.terminal_shell || 'auto') === v ? ' selected' : ''}>${esc(n)}</option>`).join('')}</select></div></div>
+  </div>
+  <div class="card">
+    <div class="frow" data-f="gPreview"><div><b>可預覽資料夾</b><small>對話裡的圖片與檔案，只有這些資料夾底下的能直接顯示。一行一個。</small></div><textarea data-g="allowed_dirs" rows="3" class="mono">${esc(S.cfg.allowed_dirs.join(NL))}</textarea></div>
+    <div class="frow" data-f="gCost"><div><b>花費與預算</b><small>依模型單價算金額，可設每日、每月上限。打開後模型商的模型表多一欄「單價」，右側「額度」多一張預算卡。用免費模型或訂閱就不用開。</small></div><div class="fctl"><span class="sw${S.cfg.cost_on ? ' on' : ''}" id="costOn"></span></div></div>
+  </div>
+  <div class="card">
+    <div class="card-hd" data-f="gFiles"><b>設定檔與資料夾</b><small>想直接改檔案或看資料庫時從這裡打開。</small></div>
+    <div class="frow"><div><b>設定檔</b><small>模型商、模型、工作目錄（config.toml）</small></div><div class="fctl"><span class="btn" data-open="config.toml">開啟</span></div></div>
+    <div class="frow"><div><b>金鑰檔</b><small>所有 API 金鑰（keys.toml）。不要分享這個檔。</small></div><div class="fctl"><span class="btn" data-open="keys.toml">開啟</span></div></div>
+    <div class="frow"><div><b>資料夾</b><small>data：對話資料庫、上傳的圖片、紀錄、快照。plugins：插件。</small></div><div class="fctl"><span class="btn" data-open="data">data</span><span class="btn" data-open="plugins">plugins</span></div></div>
+    <div class="frow"><div><b>開發者工具</b><small>介面出問題時看 Console</small></div><div class="fctl"><span class="btn" id="devtools">開啟</span></div></div>
+  </div>`;
+  box.querySelectorAll('[data-open]').forEach((b) => (b.onclick = async () => { if (D) D.openPath((await D.root()) + '\\' + b.dataset.open); }));
+  $('#devtools', box).onclick = () => D && D.win('devtools');
 }
 
 // ---- 外觀
@@ -4244,25 +4391,25 @@ function renderAppearance(box) {
       </div></div>`;
   };
   box.innerHTML = `<div class="card">
-    <div class="frow"><div><b>介面語言</b><small>介面的按鈕、選單、設定與提示，以及模型回覆用的語言；已經寫好的對話內容不翻</small></div><div class="seg">${[['zh', '繁體中文'], ['en', 'English']].map(([v, n]) => `<b class="${uiLang() === v ? 'on' : ''}" data-lang="${v}">${n}</b>`).join('')}</div></div>
-    <div class="frow"><div><b>色彩模式</b><small>淺色、深色或跟著 Windows</small></div>
+    <div class="frow" data-f="aLang"><div><b>介面語言</b><small>介面的按鈕、選單、設定與提示，以及模型回覆用的語言；已經寫好的對話內容不翻</small></div><div class="seg">${[['zh', '繁體中文'], ['en', 'English']].map(([v, n]) => `<b class="${uiLang() === v ? 'on' : ''}" data-lang="${v}">${n}</b>`).join('')}</div></div>
+    <div class="frow" data-f="aMode"><div><b>色彩模式</b><small>淺色、深色或跟著 Windows</small></div>
       <div class="seg">${[['light', '淺色'], ['dark', '深色'], ['system', '跟隨系統']].map(([v, n]) => `<b class="${t.mode === v ? 'on' : ''}" data-mode="${v}">${n}</b>`).join('')}</div></div>
-    <div class="frow"><div><b>配色</b><small>一鍵套用整組顏色（各區域會改回跟著整體），之後可以再用下面拉桿微調</small></div>
+    <div class="frow" data-f="aPreset"><div><b>配色</b><small>一鍵套用整組顏色（各區域會改回跟著整體），之後可以再用下面拉桿微調</small></div>
       <div class="presets">${Object.entries(WoofTheme.presets).map(([n, p]) => `<span data-preset="${esc(n)}" style="--ph:${p.hue};--pt:${p.tint};--pa:${p.accent};--ps:${p.accentSat ?? 100}"><i></i>${esc(n)}</span>`).join('')}</div></div>
     </div>
-    <div class="cmp-h">整體底色</div>
+    <div class="cmp-h" data-f="aBase">整體底色</div>
     <div class="card">
     ${slider('hue', '整體色相', 0, 360, '°', 'hue', '沒有單獨調整的區域都跟著它')}
     ${slider('tint', '整體濃度', 0, 100, '', 'tint', '0 是純白，越大顏色越明顯')}
     </div>
-    <div class="cmp-h">各區域</div>
+    <div class="cmp-h" data-f="aArea">各區域</div>
     <div class="card">${THEME_AREAS.map(areaRow).join('')}</div>
-    <div class="cmp-h">強調色</div>
+    <div class="cmp-h" data-f="aAccent">強調色</div>
     <div class="card">
     ${slider('accentSat', '強調色濃度', 0, 100, '', '', '0 是黑白（跟標誌一致），越大越接近彩色')}
     ${slider('accent', '強調色', 0, 360, '°', 'hue', '按鈕、選取、連結的顏色；濃度 0 時不作用')}
     </div>
-    <div class="card">
+    <div class="card" data-f="aSize">
     ${slider('scale', '介面縮放', 80, 130, '%', '', '整個視窗的大小')}
     ${slider('chatSize', '對話字級', 12, 18, 'px', '', '只影響訊息與輸入框')}
     <div class="frow"><div><b>預覽</b><small>即時反映目前設定</small></div><div class="tprev"><div class="tp-side"><i class="on"></i><i></i><i></i></div><div class="tp-main"><div class="tp-user">幫我看這段程式</div><div class="tp-bot">好，問題在第 12 行。</div><div class="tp-code"></div><div class="tp-box"><span></span><b></b></div></div><div class="tp-right"></div></div></div>
@@ -4434,8 +4581,8 @@ function renderVendors(box) {
         <div class="vfoot"><span class="btn" data-addmodel>${ico('plus')}手動加模型</span>${v.provider !== 'claude_cli' ? `<span class="btn" data-fetchmodels>${ico('download')}從 API 取得模型</span>` : ''}${(discOf(v) || {}).has_key ? `<span class="btn" data-refreshmodels>${ico('download')}重新檢索</span>` : ''}<span class="btn" data-probe>${ico('play')}測試連線</span><span class="grow"></span>${FIXED_VENDORS.has(v.id) ? (v.key_pool && S.cfg.keys.some((k) => k.pool === v.key_pool) ? `<span class="btn danger" data-delkey>${ico('trash')}刪除 API key</span>` : '') : `<span class="btn danger" data-delvendor>${ico('trash')}刪除模型商</span>`}</div>
       </div></div>`;
   }).join('');
-  box.innerHTML = `<div class="list vlist">${rows || '<div class="blank">還沒有模型商<small>從下面的範本挑一個，或按「自訂模型商」填位址和 key。</small></div>'}</div>
-    <div class="vgal" id="vgal">${vendorGallery()}</div>`;
+  box.innerHTML = `<div class="list vlist" data-f="vlist">${rows || '<div class="blank">還沒有模型商<small>從下面的範本挑一個，或按「自訂模型商」填位址和 key。</small></div>'}</div>
+    <div class="vgal" id="vgal" data-f="vgal">${vendorGallery()}</div>`;
 }
 // 新增模型商：範本依類型分組、可搜尋；已加入的標出來，點一下跳到那一列
 const VENDOR_GROUPS = [
@@ -4777,11 +4924,11 @@ function renderKeyEditor(box) {
       <span class="btn sm" data-addkey="${esc(pool)}">${ico('plus')}加一把</span></div><div class="kbody">${rows || '<div class="qempty">還沒有 key</div>'}</div></div>`;
   };
   const a = pools.filter((p) => llm.has(p)), b = pools.filter((p) => !llm.has(p));
-  box.innerHTML = `<div class="ksafe"><div><b>金鑰保護</b><small>${S.cfg.keys_encrypted ? 'keys.toml 裡的 key 用這台電腦的 Windows 帳號加密，檔案被複製走也解不開；換電腦要重新貼 key。' : '這台電腦不支援加密，keys.toml 是明文，不要分享這個檔案。'}畫面上只顯示前 6 碼和後 4 碼。</small></div>
+  box.innerHTML = `<div class="ksafe" data-f="kSafe"><div><b>金鑰保護</b><small>${S.cfg.keys_encrypted ? 'keys.toml 裡的 key 用這台電腦的 Windows 帳號加密，檔案被複製走也解不開；換電腦要重新貼 key。' : '這台電腦不支援加密，keys.toml 是明文，不要分享這個檔案。'}畫面上只顯示前 6 碼和後 4 碼。</small></div>
       <label class="ktog"><input type="checkbox" data-redact ${S.cfg.redact_secrets !== false ? 'checked' : ''}><span>工具輸出遮罩金鑰</span><small>終端、讀檔、網頁內容裡出現 key 時，換成「前 6 碼…後 4 碼」再給模型看、存進對話</small></label></div>
-    <h3 class="sh">模型商金鑰</h3>${a.map(block).join('') || '<div class="blank">沒有模型商使用金鑰池</div>'}
-    <h3 class="sh">搜尋與工具金鑰</h3>${b.map(block).join('') || '<div class="blank">沒有工具類的金鑰池</div>'}
-    <div class="addbar"><span class="btn" id="addPool">${ico('plus')}新增金鑰池</span></div>`;
+    <div data-f="kList"><h3 class="sh">模型商金鑰</h3>${a.map(block).join('') || '<div class="blank">沒有模型商使用金鑰池</div>'}
+    <h3 class="sh">搜尋與工具金鑰</h3>${b.map(block).join('') || '<div class="blank">沒有工具類的金鑰池</div>'}</div>
+    <div class="addbar" data-f="kAdd"><span class="btn" id="addPool">${ico('plus')}新增金鑰池</span></div>`;
 }
 
 // ---- MCP / 進階
@@ -4844,7 +4991,7 @@ async function loadMcp() {
 function renderAbout(box) {
   box.innerHTML = `<div class="ab-hero"><span class="brand-mark xl"><svg><use href="#i-woof"/></svg></span>
       <b>WOOF</b><small id="aboutVer">個人 AI agent 桌面程式</small></div>
-    <div class="ab-wrap">
+    <div class="ab-wrap" data-f="aboutAll">
       <div class="ab-h">版本資訊</div>
       <dl class="ab-dl" id="aboutGrid"><div><dt>讀取中…</dt><dd></dd></div></dl>
       <div class="ab-h" id="abLnkH" hidden>捷徑</div>
@@ -4866,22 +5013,13 @@ function renderAbout(box) {
     };
   });
 }
-function renderAdvanced(box) {
-  box.innerHTML = `<div class="card">
-    <div class="frow"><div><b>設定檔</b><small>模型商、模型、工作目錄（config.toml）</small></div><div class="fctl"><span class="btn" data-open="config.toml">開啟</span></div></div>
-    <div class="frow"><div><b>金鑰檔</b><small>所有 API 金鑰（keys.toml）。不要分享這個檔。</small></div><div class="fctl"><span class="btn" data-open="keys.toml">開啟</span></div></div>
-    <div class="frow"><div><b>資料夾</b><small>data：對話資料庫、上傳的圖片、紀錄、快照。plugins：插件。</small></div><div class="fctl"><span class="btn" data-open="data">data</span><span class="btn" data-open="plugins">plugins</span></div></div>
-    <div class="frow"><div><b>開發者工具</b><small>介面出問題時看 Console</small></div><div class="fctl"><span class="btn" id="devtools">開啟</span></div></div></div>`;
-  box.querySelectorAll('[data-open]').forEach((b) => (b.onclick = async () => { if (D) D.openPath((await D.root()) + '\\' + b.dataset.open); }));
-  $('#devtools').onclick = () => D && D.win('devtools');
-}
 // ---- 輸出風格：內建可改（可還原）、自訂可刪；愛心置頂
 async function renderStylesSec(box) {
   box.innerHTML = '<div class="card"><div class="blank">讀取中…</div></div>';
   const list = await loadStyles();
   const rows = list.filter((s) => s.id !== 'default');
   const tag = (s) => s.builtin ? `<span class="tag t-off">${s.edited ? '內建・已修改' : '內建'}</span>` : '<span class="tag t-off">自訂</span>';
-  box.innerHTML = `<div class="card sty-list">
+  box.innerHTML = `<div class="card sty-list" data-f="styList">
     ${rows.map((s) => `<div class="sty" data-sid="${esc(s.id)}">
       <span class="sty-pin${s.pinned ? ' on' : ''}" data-spin title="${s.pinned ? '取消置頂' : '置頂'}">${ico(s.pinned ? 'heart-f' : 'heart')}</span>
       <div class="sty-main"><div class="sty-hd"><b>${esc(s.name)}</b>${tag(s)}</div><p>${esc(s.text)}</p></div>
@@ -4932,13 +5070,13 @@ async function renderSnapshotsSec(box) {
   const pct = Math.min(100, u.bytes / (c.max_total_mb * 1048576) * 100);
   const num = (k, min, max, unit) => `<label class="cin"><input type="number" data-snum="${k}" min="${min}" max="${max}" value="${c[k]}"><span>${unit}</span></label>`;
   const row = (t, h, ctl) => `<div class="frow"><div><b>${t}</b><small>${h}</small></div><div class="fctl">${ctl}</div></div>`;
-  box.innerHTML = `<div class="card snp-use">
+  box.innerHTML = `<div class="card snp-use" data-f="snpUse">
       <div class="snp-num"><b>${fmtBytes(u.bytes)}</b><span>／ 上限 ${c.max_total_mb} MB</span></div>
       <div class="snp-bar"><i style="width:${pct.toFixed(1)}%"></i></div>
       <small>${u.sessions} 個對話・${u.checkpoints} 個還原點${u.logical ? `・若每次存整份要 ${fmtBytes(u.logical)}` : ''}${u.last_prune ? `・上次整理 ${fmtTime(u.last_prune)}` : ''}</small>
       <small>同一個檔第一次存完整內容，之後只存改動的那幾段；內容相同的只存一份，全部再壓縮。</small>
     </div>
-    <div class="card">
+    <div class="card" data-f="snpSet">
       ${row('自動存原檔', '模型寫檔、改檔前先存一份。關掉之後就不能還原。', `<div class="seg" data-snen>${[[true, '開'], [false, '關']].map(([v, n]) => `<b data-v="${v}" class="${c.enabled === v ? 'on' : ''}">${n}</b>`).join('')}</div>`)}
       ${row('每個對話保留', '超過就刪掉這個對話最舊的還原點。', num('max_per_session', 1, 500, '個'))}
       ${row('保留天數', '對話超過這麼多天沒有新的還原點，就整個清掉。', num('retention_days', 1, 3650, '天'))}
