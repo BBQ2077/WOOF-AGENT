@@ -3968,7 +3968,7 @@ async function renderCompressSec(box) {
 }
 // ---- 輔助模型
 const AUX = [
-  ['fallback', '備用模型', '自動切換', '主要模型出錯（限流、額度用完、連不上，服務商自己的重試都用完）時，這一回合改用它接著做，做到一半也會接手；預算設「改用備用模型」時也用它。留空就不切換。'],
+  ['fallback', '備用模型', '預設不用', '主要模型出錯（限流、額度用完、連不上，服務商自己的重試都用完）時，這一回合改用它接手。預設留空：直接停下來告訴你比換一個不熟的模型接著做安全。真的要設就挑一個你也信得過的。'],
   ['vision', '看圖', '圖片分析', 'vision_analyze 工具看本機圖片時用的模型，要選支援看圖的。'],
   ['compact', '壓縮', '上下文壓縮', '把較早的對話寫成摘要。建議選便宜、上下文大的模型。'],
   ['subagent', '子代理', 'delegate_task', '子代理預設用的模型。需要 API 型連線（Claude Code CLI 不行）。'],
@@ -4186,7 +4186,7 @@ function auxRowHtml(k, n, tag, d) {
   const m = S.cfg.models.find((x) => x.id === cur);
   const dm = S.cfg.models.find((x) => x.id === S.cfg.default_model);
   const off = k === 'fallback' || k === 'review';
-  const follow = k === 'fallback' ? '跟隨主模型（不另設備用）' : k === 'review' ? '不使用（照權限問你）' : '跟隨主模型';
+  const follow = k === 'fallback' ? '不設備用（出錯就停下）' : k === 'review' ? '不使用（照權限問你）' : '跟隨主模型';
   const now = m ? `目前：${m.label || m.id}` : `目前：${follow}${dm && !off ? `（${dm.label || dm.id}）` : ''}`;
   return `<div class="auxrow"><div><b>${n}<i>${tag}</i></b><small>${d}</small><div class="now">${esc(now)}</div></div>`
     + mpPairHtml('aux:' + k, cur, {
@@ -4194,15 +4194,18 @@ function auxRowHtml(k, n, tag, d) {
       blank: follow,
       set: (v) => { if (v) S.cfg.aux[k] = v; else delete S.cfg.aux[k]; setDirty(true); },
     })
-    + (dm && cur !== dm.id && k !== 'review' ? `<span class="ptlink" data-auxprim="${k}">設為主要模型</span>` : '')
     + '</div>';
 }
 function renderAux(box) {
   const dm = (S.models || []).find((x) => x.id === S.cfg.default_model);
   const primary = `<div class="auxrow"><div><b>主要模型<i>新對話預設</i></b><small>新對話與每次開啟 app 時使用的模型。已存在的對話仍用它自己的模型。</small><div class="now">${esc(dm ? `目前：${dm.label}` : '目前：未設定（清單第一個可用）')}</div></div>`
     + mpPairHtml('primary', S.cfg.default_model, { blank: '未設定', set: (v) => { S.cfg.default_model = v; setDirty(true); } }) + '</div>';
-  box.innerHTML = `<div class="card">${primary}${AUX.map(([k, n, tag, d]) => auxRowHtml(k, n, tag, d)).join('')}</div>
-  <div class="addbar"><span class="btn" id="auxFollow">全部跟隨主模型</span><span class="btn primary" id="auxPrimary">全部設為主要模型</span></div>`;
+  const roles = AUX.filter(([k]) => k !== 'fallback');
+  const fb = AUX.find(([k]) => k === 'fallback');
+  box.innerHTML = `<div class="card">${primary}${roles.map(([k, n, tag, d]) => auxRowHtml(k, n, tag, d)).join('')}</div>
+  <div class="addbar"><span class="btn" id="auxFollow">全部跟隨主模型</span></div>
+  <div class="cmp-h">備用模型</div>
+  <div class="card">${auxRowHtml(...fb)}<div class="auxnote">這一項不受上面的「全部」影響；預設不設，出錯就停下來告訴你。</div></div>`;
 }
 
 // ---- 一般
@@ -4678,15 +4681,13 @@ $('#setList').addEventListener('click', (e) => {
       .catch((err) => notify('error', '沒存到', err.message));
     return;
   }
-  if (e.target.closest('#auxFollow')) { S.cfg.aux = S.cfg.aux.review ? { review: S.cfg.aux.review } : {}; setDirty(true); renderSettings(); return; }
-  if (e.target.closest('#auxPrimary')) {
-    const pid = S.cfg.default_model;
-    if (!pid) { notify('error', '還沒設主要模型', '先在「主要模型」選一個。'); return; }
-    for (const [k] of AUX) if (k !== 'review') S.cfg.aux[k] = pid;  // 自動審核要自己挑，不跟著一鍵設定
-    setDirty(true); renderSettings(); return;
+  if (e.target.closest('#auxFollow')) {
+    // 只動看圖、壓縮、子代理；備用模型單獨一區，自動審核要自己挑
+    const keep = {};
+    if (S.cfg.aux.fallback) keep.fallback = S.cfg.aux.fallback;
+    if (S.cfg.aux.review) keep.review = S.cfg.aux.review;
+    S.cfg.aux = keep; setDirty(true); renderSettings(); return;
   }
-  const apb = e.target.closest('[data-auxprim]');
-  if (apb && S.cfg.default_model) { S.cfg.aux[apb.dataset.auxprim] = S.cfg.default_model; setDirty(true); renderSettings(); return; }
   if (S.setSec === 'appearance') {
     const md2 = e.target.closest('[data-mode]'); if (md2) { WoofTheme.set({ mode: md2.dataset.mode }); renderSettings(); }
     const pr = e.target.closest('[data-preset]'); if (pr) { WoofTheme.set({ ...WoofTheme.presets[pr.dataset.preset], areas: {} }); renderSettings(); }
