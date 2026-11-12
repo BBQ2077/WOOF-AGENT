@@ -5981,6 +5981,13 @@ function petPaint() {
   if (mood) mood.textContent = (PET.st && PET.st.mood) || '';
   const nm = $('#petName');
   if (nm) nm.textContent = (PET.cfg && PET.cfg.name) || '小麥';
+  const sb = $('#petSug');
+  if (sb) {
+    const sug = (PET.st && PET.st.sug) || [];
+    sb.innerHTML = sug.length
+      ? sug.map((x) => `<button class="sugbtn" data-pet="sug" data-say="${esc(x)}">${esc(x)}</button>`).join('')
+      : '';
+  }
   const h = $('#petHist');
   if (h) {
     const list = PET.hist.slice(-40);
@@ -6006,10 +6013,10 @@ function petEvent(p) {
   petPaint();
 }
 
-async function petSay() {
+async function petSay(forced) {
   const inp = $('#petIn');
   if (!inp || PET.busy) return;
-  const text = inp.value.trim();
+  const text = String(forced || inp.value).trim();
   if (!text) return;
   PET.busy = true; inp.value = ''; inp.disabled = true;
   PET.hist.push({ role: 'user', text });
@@ -6047,19 +6054,55 @@ async function petSave(patch) {
   } catch (e) { notify('error', '存不起來', e.message); return null; }
 }
 
+function petMenu(anchor) {
+  const old = $('#petMenu');
+  if (old) { old.remove(); return; }
+  const r = anchor.getBoundingClientRect();
+  const m = document.createElement('div');
+  m.id = 'petMenu';
+  m.className = 'mi petmenu';
+  m.innerHTML = '<div data-pm="poke">看一眼</div><div data-pm="file">編輯寵物檔</div>'
+    + '<div data-pm="reset">清空牠的記憶</div><div data-pm="set">寵物設定</div>';
+  document.body.appendChild(m);
+  m.style.left = `${Math.max(8, r.right - 150)}px`;
+  m.style.top = `${r.bottom + 6}px`;
+  const close = (ev) => {
+    if (ev && m.contains(ev.target)) return;
+    m.remove();
+    document.removeEventListener('click', close, true);
+    document.removeEventListener('keydown', esc);
+  };
+  const esc = (ev) => { if (ev.key === 'Escape') close(); };
+  setTimeout(() => {
+    document.addEventListener('click', close, true);
+    document.addEventListener('keydown', esc);
+  }, 0);
+  m.addEventListener('click', (ev) => {
+    const it = ev.target.closest('[data-pm]');
+    if (!it) return;
+    close();
+    const k = it.dataset.pm;
+    if (k === 'poke') petPoke();
+    if (k === 'set') { openSettings('pet'); }
+    if (k === 'file') { openSettings('pet'); }
+    if (k === 'reset') {
+      confirmBox('清掉牠記得的事？', '牠自己的對話與摘要會清空。主對話完全不受影響。', { ok: '清空', danger: true })
+        .then((ok) => ok && api('POST', '/api/pet/reset', {}).then((d) => {
+          PET.st = d.state || PET.st; PET.hist = []; petPaint();
+          notify('ok', '牠忘記了', '重新開始。');
+        }));
+    }
+  });
+}
+
 $('#panePet').addEventListener('click', (e) => {
   const b = e.target.closest('[data-pet]');
   if (!b) return;
   const k = b.dataset.pet;
   if (k === 'say') petSay();
+  if (k === 'sug') petSay(b.dataset.say || '');
+  if (k === 'menu') petMenu(b);
   if (k === 'poke') petPoke();
-  if (k === 'reset') {
-    confirmBox('清掉牠記得的事？', '牠自己的對話與摘要會清空。主對話完全不受影響。', { ok: '清空', danger: true })
-      .then((ok) => ok && api('POST', '/api/pet/reset', {}).then((d) => {
-        PET.st = d.state || PET.st; PET.hist = []; petPaint();
-        notify('ok', '牠忘記了', '重新開始。');
-      }));
-  }
 });
 $('#panePet').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && e.target.id === 'petIn') { e.preventDefault(); petSay(); }

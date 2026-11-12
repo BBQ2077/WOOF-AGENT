@@ -7,7 +7,7 @@
 <script src="theme.js?v=15"></script>
 <link rel="icon" type="image/png" href="brand/favicon.png">
 <link rel="stylesheet" href="vendor/hljs.css">
-<link rel="stylesheet" href="app.css?v=83">
+<link rel="stylesheet" href="app.css?v=85">
 </head>
 <body>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
@@ -171,17 +171,16 @@
       </div>
       <div class="pane" id="panePet">
         <div class="petwrap">
+          <div class="pethead"><span class="petttl">寵物</span>
+            <span class="petmore" data-pet="menu" title="更多">⋯</span></div>
           <div class="petstage">
             <div class="petbub" id="petBub"></div>
             <img id="petImg" alt="" draggable="false">
             <div class="petname"><b id="petName" class="noi18n">小麥</b><span id="petMood"></span><span class="petro">唯讀</span></div>
           </div>
-          <div class="petbtns">
-            <button class="btn sm" data-pet="poke" title="叫牠現在看一眼">看一眼</button>
-            <button class="btn sm" data-pet="reset" title="清掉牠記得的事">重來</button>
-          </div>
           <div class="pethist" id="petHist"></div>
-          <div class="petin"><input id="petIn" placeholder="跟小麥說話…"><button class="btn sm" data-pet="say">送出</button></div>
+          <div class="petsug" id="petSug"></div>
+          <div class="petin"><input id="petIn" placeholder="跟小麥說話…"><button class="petSend" data-pet="say">送出</button></div>
         </div>
       </div>
       <div class="pane on" id="paneTasks"></div>
@@ -200,7 +199,7 @@
 <script src="vendor/marked.min.js"></script>
 <script src="vendor/purify.min.js"></script>
 <script src="vendor/highlight.min.js"></script>
-<script src="i18n_en.js?v=26"></script>
-<script src="app.js?v=145"></script>
+<script src="i18n_en.js?v=28"></script>
+<script src="app.js?v=146"></script>
 </body>
 </html>

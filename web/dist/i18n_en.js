@@ -1922,4 +1922,7 @@ window.WOOF_EN = {
 "預設關，也就是完全唯讀：牠只看得到你的對話，不能寫進去。打開後牠講的話才會用腳印（🐾）出現在對話裡。": "Off by default, which means fully read-only: it can read your chats but never write. When on, its lines appear in the chat with a paw print (🐾).",
 "牠會看著你開著的對話，偶爾說一兩句。": "It watches the chat you have open and chimes in now and then.",
 "想找牠說話，直接打字就好。": "Want to talk to it? Just type below.",
+"編輯寵物檔": "Edit pet file",
+"寵物設定": "Pet settings",
+"建議回覆": "Suggested replies",
 };

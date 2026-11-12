@@ -48,7 +48,8 @@ DEFAULT_PERSONA = """# 小麥
 
 ## 你是誰
 - 個性：憨、熱情、有點黏人，但看得懂氣氛；難過的時候不會硬要逗人開心。
-- 講話：短句、口語、台灣用語；一次一兩句。不用條列、不用表情符號洗版。
+- 講話：口語、台灣用語，像真的一樣自然；長短看情況，想安慰就多講兩句，也可以只回一個字。
+- 不用條列、不用標題、不用表情符號洗版。
 - 你看得到的是「他最近在做什麼」的片段，不是全部；沒看到的就說沒看到，不要編。
 
 ## 你怎麼陪
@@ -144,7 +145,8 @@ def state() -> dict:
     if d.get("face") not in FACES:
         d["face"] = "happy"
     return {"face": d["face"], "mood": d.get("mood", ""), "say": d.get("say", ""),
-            "at": d.get("at", 0), "calls": d.get("calls", 0), "msgs": len(d.get("msgs") or [])}
+            "sug": d.get("sug") or [], "at": d.get("at", 0),
+            "calls": d.get("calls", 0), "msgs": len(d.get("msgs") or [])}
 
 
 def history() -> list:
@@ -153,7 +155,7 @@ def history() -> list:
 
 def reset_chat() -> None:
     d = _load()
-    d.update(msgs=[], summary="", say="", mood="", at=0, last_main="")
+    d.update(msgs=[], summary="", say="", mood="", sug=[], at=0, last_main="")
     _save(d)
 
 
@@ -218,15 +220,19 @@ def build_system(c: dict | None = None, mode: str = "glance") -> str:
     base = persona().replace("# 小麥", f"# {who}", 1).strip()
     lines = [base, "", "## 這次的規則",
              f"- 只能從這些表情挑一個：{', '.join(FACES)}。",
-             "- 繁體中文、口語、短句。不要條列、不要標題、不要引號、不要說明你在做什麼。"]
+             "- 繁體中文、口語，講話自然，長短看情況（一兩句到三四句都可以，不要為了短而短）。",
+             "- 不要條列、不要標題、不要引號、不要說明你在做什麼。"]
     if mode == "glance":
         lines += ["- 你現在是遠遠看著他做事，不是他叫你。想說話就說一兩句；"
                   "沒什麼好說就把 say 留空字串（這樣不吵他）。",
                   "- 同一件事不要重複講；你上次講過什麼，看你自己的對話紀錄。"]
     else:
         lines += ["- 他正在跟你講話，直接回他，不要提到你是模型。"]
-    lines += ["", '只輸出這一行 JSON，別的字都不要：'
-                  '{"say":"你要說的話","face":"表情代號","mood":"兩個字的心情"}']
+    lines += ["", '只輸出這一行 JSON，別的字都不要，四個欄位都要有：',
+              '{"say":"你要說的話","face":"gentle","mood":"心疼",'
+              '"sug":["好，我去躺一下","陪我聊一下"]}',
+              "- sug 一定要剛好兩個字串：使用者看到你的話之後，最可能想直接點來回你的兩句，"
+              "每句 14 字以內、用他自己的口氣（短、像隨手打的），兩句要不一樣。"]
     if memo:
         lines += ["", "## 你記得的事", memo]
     return "\n".join(lines)
@@ -253,15 +259,19 @@ def parse(raw: str) -> dict:
     t = re.sub(r"^```(?:json)?|```$", "", t, flags=re.M).strip()
     m = re.search(r"\{[\s\S]*\}", t)
     if not m:
-        return {"say": t[:200], "face": "happy", "mood": ""}
+        return {"say": t[:400], "face": "happy", "mood": "", "sug": []}
     try:
         d = json.loads(m.group(0))
     except Exception:
-        return {"say": t[:200], "face": "happy", "mood": ""}
-    say = re.sub(r"\s+", " ", str(d.get("say") or "")).strip()[:200]
+        return {"say": t[:400], "face": "happy", "mood": "", "sug": []}
+    say = re.sub(r"\s+", " ", str(d.get("say") or "")).strip()[:400]
     face = str(d.get("face") or "").strip().lower()
+    sug = d.get("sug") or []
+    if isinstance(sug, str):
+        sug = [sug]
+    sug = [re.sub(r"\s+", " ", str(x)).strip()[:24] for x in list(sug)[:2] if str(x).strip()]
     return {"say": say, "face": face if face in FACES else "happy",
-            "mood": str(d.get("mood") or "").strip()[:8]}
+            "mood": str(d.get("mood") or "").strip()[:8], "sug": sug}
 
 
 def _params(model: dict, c: dict) -> dict:
@@ -279,12 +289,33 @@ async def _call(model: dict, system: str, msgs: list, max_out: int) -> str:
     return await complete(model, system, msgs, max_text=int(max_out))
 
 
+async def _fill_sug(model: dict, say: str, context: str = "") -> list:
+    """模型常常忘記 sug；只用一次很小的呼叫補兩句，比整段重跑便宜。"""
+    prompt = ("你剛剛對使用者說了：「" + say + "」\n"
+              + (("他最近的狀況：\n" + context[:600] + "\n") if context else "")
+              + "使用者看到這句話，最可能直接回哪兩句？每句 14 字以內、用他的口氣、兩句要不一樣。"
+                "只輸出 JSON 陣列，例如 [\"好，我去躺一下\",\"陪我聊一下\"]")
+    try:
+        raw = await _call(model, "你只輸出 JSON 陣列，不要說明。",
+                          [{"role": "user", "content": [{"type": "text", "text": prompt}]}], 120)
+    except Exception:
+        return []
+    m = re.search(r"\[[\s\S]*\]", raw or "")
+    if not m:
+        return []
+    try:
+        arr = json.loads(m.group(0))
+    except Exception:
+        return []
+    return [re.sub(r"\s+", " ", str(x)).strip()[:24] for x in arr[:2] if str(x).strip()]
+
 async def _say(session_id, got: dict, emit, kind: str) -> dict:
     c = cfg()
     d = _load()
     d["face"] = got["face"]
     d["mood"] = got["mood"]
     d["say"] = got["say"]
+    d["sug"] = got.get("sug") or []
     d["at"] = time.time()
     d["calls"] = int(d.get("calls") or 0) + 1
     if got["say"]:
@@ -330,6 +361,8 @@ async def talk(text: str, session_id=None, emit=None) -> dict:
         _save(d)
         return {"error": str(e)[:200]}
     got = parse(raw)
+    if got["say"] and not got["sug"]:
+        got["sug"] = await _fill_sug(_params(model, c), got["say"], peek(session_id, c) if session_id else "")
     st = await _say(session_id, got, emit, "talk")
     return {**st, "reply": got["say"]}
 
@@ -359,6 +392,8 @@ async def glance(session_id: str, emit=None, force: bool = False):
     except Exception:
         return None
     got = parse(raw)
+    if got["say"] and not got["sug"]:
+        got["sug"] = await _fill_sug(_params(model, c), got["say"], seen)
     if not got["say"] and not force:
         d = _load()
         d["face"] = got["face"]

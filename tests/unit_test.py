@@ -1277,6 +1277,20 @@ class Pet(unittest.TestCase):
             self.assertIn(f, system)
         self.assertIn("say", system)
 
+    def test_parse_sug(self):
+        p = self.up()
+        got = p.parse('{"say":"去睡吧","face":"gentle","mood":"心疼","sug":["好，晚安","你也早點睡"]}')
+        self.assertEqual(got["sug"], ["好，晚安", "你也早點睡"])
+        self.assertEqual(p.parse('{"say":"嗨"}')["sug"], [])
+        self.assertEqual(p.parse('{"say":"嗨","sug":"單獨一句"}')["sug"], ["單獨一句"])
+
+    def test_reply_not_forced_short(self):
+        p = self.up()
+        system = p.build_system({"name": "小麥", "effort": "off"}, "talk")
+        self.assertNotIn("三十", system)
+        self.assertIn("sug", system)
+
+
     def test_faces_have_images(self):
         from woof.config import WEB_DIST
 
