@@ -127,11 +127,11 @@ async def usage_api(range: str = "today", sid: str = ""):
 async def budget_save(body: dict):
     from woof import config as wcfg, cost
 
+    cfg = wcfg.load_config()
     try:
-        b = cost.clean_budget(body)
+        b = cost.clean_budget({**(cfg.get("budget") or {}), **body})  # 只送有改的欄位（例如設定頁只切開關）
     except ValueError as e:
         raise HTTPException(400, str(e))
-    cfg = wcfg.load_config()
     cfg["budget"] = b
     save_config(cfg)
     REG.config["budget"] = b

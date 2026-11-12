@@ -12,9 +12,10 @@ help = "一次 delegate_task 最多並行的子代理數"
 
 [settings.models]
 type = "models"
+filter = "api"
 label = "可指派的模型"
 default = ""
-help = "主代理派子代理時可以挑的模型。都不勾＝不能挑，一律用「設定 → 模型用途 → 子代理」。建議只勾便宜或免費的，避免模型自己挑貴的"
+help = "主代理派子代理時可以挑的模型（可多選）。都不勾＝一律用預設子代理模型。「設定 → 模型用途 → 子代理」也能改，兩邊是同一份。建議只勾便宜或免費的"
 
 [settings.max_per_turn]
 type = "number"

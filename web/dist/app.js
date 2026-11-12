@@ -1956,9 +1956,8 @@ let BUDGET = null;
 function renderBudget(b) {
   const box = $('#budgetBox'); if (!box || !b) return;
   BUDGET = b;
-  const head = `<div class="qtop"><div class="qhd"><b>花費與預算</b><small>${b.enabled ? '依模型單價計算，沒填單價的不算' : '用免費模型或訂閱時不需要'}</small></div>`
-    + `<span class="sw${b.enabled ? ' on' : ''}" data-bgon title="${b.enabled ? '關閉' : '開啟'}"></span></div>`;
-  if (!b.enabled) { box.innerHTML = `<div class="qcard bgcard">${head}</div>`; return; }
+  if (!b.enabled) { box.innerHTML = ''; return; }   // 在「設定 → 一般 → 花費與預算」開啟
+  const head = '<div class="qtop"><div class="qhd"><b>花費與預算</b><small>依模型單價計算，沒填單價的不算</small></div></div>';
   const row = (name, spent, cap) => {
     const p = cap ? Math.min(100, Math.round(spent / cap * 100)) : 0;
     const cls = !cap ? '' : spent >= cap ? ' over' : spent >= cap * 0.8 ? ' near' : '';
@@ -1976,18 +1975,15 @@ function renderBudget(b) {
 }
 async function saveBudget(patch) {
   const box = $('#budgetBox'); if (!box || !BUDGET) return;
-  const body = { enabled: BUDGET.enabled, daily: BUDGET.daily, monthly: BUDGET.monthly, action: BUDGET.action, ...patch };
+  const body = { ...(patch || {}) };
   box.querySelectorAll('input[data-bg]').forEach((el) => { if (!(el.dataset.bg in (patch || {}))) body[el.dataset.bg] = el.value.trim(); });
   try {
     renderBudget(await api('POST', '/api/budget', body));
-    if (S.cfg) S.cfg.cost_on = !!body.enabled;
-    if ('enabled' in (patch || {})) loadUsage();
   } catch (e) { toast('預算沒存：' + e.message); }
 }
 document.addEventListener('change', (e) => { if (e.target.closest && e.target.closest('#budgetBox input[data-bg]')) saveBudget(); });
 document.addEventListener('click', (e) => {
   if (!e.target.closest) return;
-  if (e.target.closest('#budgetBox [data-bgon]')) { saveBudget({ enabled: !BUDGET.enabled }); return; }
   const act = e.target.closest('#budgetBox [data-bgact]');
   if (act) saveBudget({ action: act.dataset.bgact });
 });
@@ -3189,7 +3185,7 @@ function pluginForm(p) {
     else if (f.type === 'bool') ctl = `<span class="sw sm${v ? ' on' : ''}" data-setsw="${key}"></span>`;
     else if (f.type === 'model') ctl = modelSelectHtml(key, v, p.name, f.filter);
     else if (f.type === 'order') ctl = orderHtml(key, v, f.options || []);
-    else if (f.type === 'models') ctl = modelsMultiHtml(key, v);
+    else if (f.type === 'models') ctl = modelsMultiHtml(key, v, p.name, f.filter);
     else if (String(v).includes(NL) || f.type === 'textarea') ctl = `<textarea data-set="${key}" rows="4">${esc(v)}</textarea>`;
     else ctl = `<input data-set="${key}" data-type="${f.type || 'text'}" value="${esc(v)}"${f.type === 'secret' ? ' type="password"' : ''}>`;
     return `<label>${esc(f.label || key)}${f.help ? `<small>${esc(f.help)}</small>` : ''}</label><div>${ctl}</div>`;
@@ -3298,10 +3294,9 @@ function orderHtml(key, v, options, names = {}) {
     + '</div>';
 }
 // 多選模型（例如子代理可指派的模型）：只列聊天模型，顯示名稱＋模型商
-function modelsMultiHtml(key, v) {
-  const ms = (S.models || []).filter((m) => m.kind !== 'image' && m.kind !== 'video' && !m.hidden);
-  const names = Object.fromEntries(ms.map((m) => [m.id, `${m.label}${m.vendor_label || m.vendor ? ' · ' + (m.vendor_label || m.vendor) : ''}`]));
-  return orderHtml(key, v, ms.map((m) => m.id), names).replace('class="ordlist"', 'class="ordlist noord"');   // 只是勾選，不用排序
+function modelsMultiHtml(key, v, name, filter) {
+  const f = filter === 'api' ? (m) => m.provider !== 'claude_cli' : null;
+  return mchkHtml(`plug:${name}:${key}`, v, { filter: f, set: (list) => savePluginSetting(name, key, list.join(',')) });
 }
 function orderEdit(b) {
   const box = b.closest('[data-order]');
@@ -3323,11 +3318,11 @@ $('#plugGrid').addEventListener('click', (e) => {
   const ob = e.target.closest('[data-ordon],[data-ordmv]');
   if (ob) { e.stopPropagation(); orderEdit(ob); }
 }, true);
-async function savePluginSetting(name, key, v) {
+async function savePluginSetting(name, key, v, quiet) {
   const p = S.plugins.find((x) => x.name === name);
   try {
     const r = await api('POST', `/api/plugins/${name}`, { settings: { ...p.settings, [key]: v } });
-    if (r.error) notify('error', `${name} 套用設定後載入失敗`, r.error); else notify('ok', '已儲存');
+    if (r.error) notify('error', `${name} 套用設定後載入失敗`, r.error); else if (!quiet) notify('ok', '已儲存');
   } catch (err) { notify('error', '儲存失敗', err.message); }
 }
 $('#plugGrid').addEventListener('change', (e) => {
@@ -4074,6 +4069,84 @@ document.addEventListener('click', (e) => {
     openSpick(mb, items, p.cur, (mid) => mpSet(id, mid));
   }
 });
+// ---- 多選模型：跟模型商頁一樣依服務商分組、可收合，每個模型一個勾選框；可再指定一個「預設」
+const MCHK = {};             // id -> { sel:Set, def, o }
+const MCHK_OPEN = new Set(); // 展開中的「id|服務商」
+function mchkHtml(id, selected, o) {
+  const sel = new Set((Array.isArray(selected) ? selected : String(selected || '').split(',')).map((x) => x.trim()).filter(Boolean));
+  MCHK[id] = { sel, def: o.def || '', o };
+  const filter = o.filter || (() => true);
+  const ms = (S.models || []).filter((m) => m.kind !== 'image' && m.kind !== 'video' && !m.hidden && filter(m));
+  const groups = new Map();
+  for (const m of ms) {
+    const k = m.vendor || '';
+    if (!groups.has(k)) groups.set(k, { label: m.vendor_label || m.vendor || '其他', list: [] });
+    groups.get(k).list.push(m);
+  }
+  const hasDef = 'def' in o;
+  const rows = [...groups].map(([vid, g]) => {
+    const n = g.list.filter((m) => sel.has(m.id)).length;
+    const open = MCHK_OPEN.has(id + '|' + vid);
+    const all = n === g.list.length;
+    const items = g.list.map((m) => {
+      const on = sel.has(m.id), isDef = hasDef && MCHK[id].def === m.id;
+      const subs = [m.model && m.model !== m.label ? m.model : '', m.no_key ? '還沒設 API key' : '', m.vision ? '看圖' : ''].filter(Boolean).join(' · ');
+      return `<div class="mci${on ? ' on' : ''}" data-mcm="${esc(m.id)}"><span class="cbx${on ? ' on' : ''}">${on ? ico('check') : ''}</span>`
+        + `<span class="mcn"><b>${esc(m.label || m.id)}</b>${subs ? `<small>${esc(subs)}</small>` : ''}</span>`
+        + (hasDef ? `<span class="mcdef${isDef ? ' on' : ''}" data-mcdef="${esc(m.id)}" title="${isDef ? '目前的預設' : '設為預設'}">${isDef ? '預設' : '設為預設'}</span>` : '')
+        + '</div>';
+    }).join('');
+    return `<div class="mcg${open ? ' open' : ''}" data-mcv="${esc(vid)}"><div class="mcgh">${avatar(g.label)}`
+      + `<div class="vname"><b>${esc(g.label)}</b><small>${g.list.length} 個模型</small></div>`
+      + `<span class="mccount${n ? ' on' : ''}">${n ? `已勾 ${n}` : '未勾'}</span>`
+      + `<span class="ptlink" data-mcall="${all ? 0 : 1}">${all ? '全部取消' : '全選'}</span>${ico('right', 'chev')}</div>`
+      + `<div class="mcgb">${items}</div></div>`;
+  }).join('');
+  return `<div class="mchk" data-mcid="${esc(id)}">${rows || '<div class="blank">沒有可選的模型</div>'}</div>`;
+}
+function mchkRefresh(id) {
+  const p = MCHK[id]; if (!p) return;
+  const el = [...document.querySelectorAll('.mchk')].find((x) => x.dataset.mcid === id);
+  if (el) el.outerHTML = mchkHtml(id, [...p.sel], { ...p.o, ...('def' in p.o ? { def: p.def } : {}) });
+}
+function mchkCommit(id) {
+  const p = MCHK[id];
+  const order = (S.models || []).map((m) => m.id).filter((x) => p.sel.has(x));
+  if ('def' in p.o) p.o.def = p.def;
+  p.o.set(order, p.def);
+  mchkRefresh(id);
+}
+document.addEventListener('click', (e) => {
+  const box = e.target.closest && e.target.closest('.mchk'); if (!box) return;
+  const id = box.dataset.mcid, p = MCHK[id]; if (!p) return;
+  e.stopPropagation();
+  const g = e.target.closest('.mcg'), vid = g ? g.dataset.mcv : '';
+  const d = e.target.closest('[data-mcdef]');
+  if (d) {
+    const mid = d.dataset.mcdef;
+    p.def = p.def === mid ? '' : mid;
+    if (p.def) p.sel.add(mid);
+    mchkCommit(id); return;
+  }
+  const all = e.target.closest('[data-mcall]');
+  if (all) {
+    const ids = [...g.querySelectorAll('[data-mcm]')].map((x) => x.dataset.mcm);
+    for (const x of ids) { if (all.dataset.mcall === '1') p.sel.add(x); else { p.sel.delete(x); if (p.def === x) p.def = ''; } }
+    MCHK_OPEN.add(id + '|' + vid);
+    mchkCommit(id); return;
+  }
+  const it = e.target.closest('[data-mcm]');
+  if (it) {
+    const mid = it.dataset.mcm;
+    if (p.sel.has(mid)) { p.sel.delete(mid); if (p.def === mid) p.def = ''; } else p.sel.add(mid);
+    mchkCommit(id); return;
+  }
+  if (e.target.closest('.mcgh')) {
+    const k = id + '|' + vid;
+    MCHK_OPEN.has(k) ? MCHK_OPEN.delete(k) : MCHK_OPEN.add(k);
+    g.classList.toggle('open');
+  }
+}, true);
 // 輔助模型各用途：服務商 → 模型
 function auxFits(task, m) {
   const v = S.cfg.vendors.find((x) => x.id === m.vendor) || {};
@@ -4082,7 +4155,33 @@ function auxFits(task, m) {
   if (task === 'vision' && !m.vision) return false;
   return true;
 }
+function subagentRowHtml(n, tag) {
+  const pl = (S.plugins || []).find((x) => x.name === 'subagent');
+  if (!pl) return '';
+  const list = String((pl.settings || {}).models || '').split(',').map((x) => x.trim()).filter(Boolean);
+  const def = S.cfg.aux.subagent || '';
+  const dm = S.cfg.models.find((x) => x.id === (def || S.cfg.default_model));
+  const names = list.map((id) => (S.cfg.models.find((x) => x.id === id) || {}).label || id);
+  const now = `預設：${def ? (dm ? dm.label || dm.id : def) : `跟隨主模型${dm ? `（${dm.label || dm.id}）` : ''}`}`
+    + (names.length ? `　可指派：${names.join('、')}` : '　可指派：只用預設');
+  return `<div class="auxrow auxwide"><div><b>${n}<i>${tag}</i></b>`
+    + '<small>勾選子代理可以用的模型（可多選），主代理派工時依任務從勾選的裡面挑；沒指定時用標「預設」的那個，沒設預設就跟隨主模型。需要 API 型連線（Claude Code CLI 不行）。建議只勾便宜或免費的。</small>'
+    + `<div class="now">${esc(now)}</div></div>`
+    + mchkHtml('aux:subagent', list, {
+      filter: (x) => auxFits('subagent', x), def,
+      set: (sel, d) => {
+        if (d) S.cfg.aux.subagent = d; else delete S.cfg.aux.subagent;
+        setDirty(true);
+        pl.settings = { ...(pl.settings || {}), models: sel.join(',') };
+        savePluginSetting('subagent', 'models', sel.join(','), true);   // 設定頁自己會顯示存檔狀態
+        const row = document.querySelector('.auxrow.auxwide .now');
+        if (row) { const t = subagentRowHtml(n, tag).match(/<div class="now">([\s\S]*?)<\/div>/); if (t) row.innerHTML = t[1]; }
+      },
+    })
+    + '</div>';
+}
 function auxRowHtml(k, n, tag, d) {
+  if (k === 'subagent' && (S.plugins || []).some((x) => x.name === 'subagent')) return subagentRowHtml(n, tag);
   const cur = S.cfg.aux[k] || '';
   const m = S.cfg.models.find((x) => x.id === cur);
   const dm = S.cfg.models.find((x) => x.id === S.cfg.default_model);
@@ -4113,6 +4212,7 @@ function renderGeneral(box) {
       <div class="seg">${['interrupt', 'steer', 'queue'].map((v) => `<b class="${busyMode() === v ? 'on' : ''}" data-busy="${v}" title="${BUSY_HINT[v]}">${BUSY_LABEL[v]}</b>`).join('')}</div></div>
     <div class="frow"><div><b>預設工作目錄</b><small>新對話的工作目錄。每個對話可以在輸入框下方的資料夾或右側「檔案」另外換。</small></div><input data-g="workdir" value="${esc(S.cfg.workdir)}" class="mono"></div>
     <div class="frow"><div><b>終端機</b><small>右側「終端」新開分頁用的 shell。</small></div><div class="fctl"><select data-g="terminal_shell">${[['auto', '自動（有 Git Bash 用 Git Bash）'], ...Object.entries(S.ptyShells || { bash: 'Git Bash', powershell: 'PowerShell', cmd: '命令提示字元' })].map(([v, n]) => `<option value="${v}"${(S.cfg.terminal_shell || 'auto') === v ? ' selected' : ''}>${esc(n)}</option>`).join('')}</select></div></div>
+    <div class="frow"><div><b>花費與預算</b><small>依模型單價算金額，可設每日、每月上限。打開後模型商的模型表多一欄「單價」，右側「額度」多一張預算卡。用免費模型或訂閱就不用開。</small></div><div class="fctl"><span class="sw${S.cfg.cost_on ? ' on' : ''}" id="costOn"></span></div></div>
     <div class="frow"><div><b>可預覽資料夾</b><small>對話裡的圖片與檔案，只有這些資料夾底下的能直接顯示。一行一個。</small></div><textarea data-g="allowed_dirs" rows="3" class="mono">${esc(S.cfg.allowed_dirs.join(NL))}</textarea></div></div>`;
 }
 
@@ -4571,6 +4671,12 @@ $('#setList').addEventListener('click', (e) => {
     if (del) { S.cfg.keys.splice(+del.dataset.kdel, 1); setDirty(true); renderSettings(); return; }
     const eye = e.target.closest('[data-keye]');
     if (eye) { const i = eye.previousElementSibling; i.type = i.type === 'password' ? 'text' : 'password'; }
+  }
+  if (e.target.closest('#costOn')) {
+    const on = !S.cfg.cost_on;
+    api('POST', '/api/budget', { enabled: on }).then((b) => { S.cfg.cost_on = on; e.target.closest('#costOn').classList.toggle('on', on); renderBudget(b); loadUsage(); })
+      .catch((err) => notify('error', '沒存到', err.message));
+    return;
   }
   if (e.target.closest('#auxFollow')) { S.cfg.aux = S.cfg.aux.review ? { review: S.cfg.aux.review } : {}; setDirty(true); renderSettings(); return; }
   if (e.target.closest('#auxPrimary')) {

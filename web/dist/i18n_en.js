@@ -1,5 +1,14 @@
 // 介面英文對照：key 是介面上的中文原文（{0} {1} 是會變動的部分），value 是英文
 window.WOOF_EN = {
+"勾選子代理可以用的模型（可多選），主代理派工時依任務從勾選的裡面挑；沒指定時用標「預設」的那個，沒設預設就跟隨主模型。需要 API 型連線（Claude Code CLI 不行）。建議只勾便宜或免費的。": "Check the models sub-agents may use (multiple allowed); the main agent picks among them per task. When it does not pick, the one marked \"Default\" is used, or the main model if none. Needs an API connection (not Claude Code CLI). Prefer cheap or free models.",
+"設為預設": "Set as default",
+"目前的預設": "Current default",
+"未勾": "None",
+"已勾 {0}": "{0} checked",
+"沒有可選的模型": "No models to choose",
+"依模型單價算金額，可設每日、每月上限。打開後模型商的模型表多一欄「單價」，右側「額度」多一張預算卡。用免費模型或訂閱就不用開。": "Calculates spending from model prices and lets you set daily and monthly caps. When on, the model table gets a Price column and the Quota panel shows a budget card. Not needed with free models or subscriptions.",
+"沒存到": "Not saved",
+"可指派：只用預設": "Assignable: default only",
 "還沒設備用模型，超過時只會提醒": "No fallback model set; going over will only warn",
 "花費與預算": "Spending & budget",
 "依模型單價計算，沒填單價的不算": "Based on model prices; models without a price are not counted",
