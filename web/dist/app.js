@@ -4850,7 +4850,7 @@ function onThemeInput(el) {
 // ---- 模型商
 const discOf = (v) => ((S.cfg && S.cfg.discovery) || {})[v.id];
 // 固定模型商：不能刪模型商，只能刪 API key
-const FIXED_VENDORS = new Set(['anthropic', 'xai', 'openrouter', 'deepseek', 'openai', 'nvidia', 'ollama', 'claude-sub', 'claude-cli']);
+const FIXED_VENDORS = new Set(['anthropic', 'xai', 'openrouter', 'deepseek', 'openai', 'nvidia', 'ollama', 'claude-cli']);
 function discAgo(ts) {
   if (!ts) return '未檢索';
   const s = Date.now() / 1000 - ts;

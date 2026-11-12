@@ -493,9 +493,7 @@ def default_config_root() -> Path:
     env = os.environ.get("WOOF_CONFIG_ROOT")
     if env:
         return Path(env)
-    if (ROOT / "config.toml").exists():
-        return ROOT
-    return Path("C:/Users/user/hermes-files/WOOF")
+    return ROOT  # 沒有 WOOF_CONFIG_ROOT 就用這個程式所在的那份
 
 
 def load_keys_into_memory(root: Path) -> tuple[list[str], list[str]]:
