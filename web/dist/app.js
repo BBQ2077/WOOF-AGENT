@@ -5989,10 +5989,10 @@ function petPaint() {
     const sug = (PET.st && PET.st.sug) || [];
     const quick = (PET.cfg && PET.cfg.quick) || [];
     sb.innerHTML = (sug.length
-      ? `<div class="sugrow">${sug.map((x) => `<button class="sugbtn" data-pet="sug" data-say="${esc(x)}">${esc(x)}</button>`).join('')}</div>`
+      ? `<div class="sugrow model">${sug.map((x) => `<button class="sugbtn" data-pet="sug" data-say="${esc(x)}">${esc(x)}</button>`).join('')}</div>`
       : '')
       + (quick.length
-        ? `<div class="sugrow fixed">${quick.map((x) => `<button class="sugbtn fix" data-pet="sug" data-say="${esc(x)}">${esc(x)}</button>`).join('')}</div>`
+        ? `<div class="sugrow quick">${quick.map((x) => `<button class="sugbtn fix" data-pet="sug" data-say="${esc(x)}">${esc(x)}</button>`).join('')}</div>`
         : '');
   }
   const h = $('#petHist');

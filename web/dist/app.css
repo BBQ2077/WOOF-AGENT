@@ -1607,3 +1607,12 @@ body.pane2 #paneA{padding:0}
 
 .sugrow .sugbtn{flex:1 1 0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sugrow{width:100%}
+
+/* 模型建議：兩欄等高，字多就換行長高；固定回覆：一排小膠囊；輸入框佔滿 */
+.petsug .sugrow.model{display:grid;grid-template-columns:1fr 1fr;gap:8px;align-items:stretch}
+.petsug .sugrow.model .sugbtn{width:100%;height:auto;min-height:40px;padding:9px 12px;border-radius:16px;
+  white-space:normal;word-break:break-word;line-height:1.4;text-align:center;text-wrap:balance;
+  display:flex;align-items:center;justify-content:center;flex:none}
+.petsug .sugrow.quick{display:flex;gap:8px;justify-content:flex-start;flex-wrap:nowrap}
+.petsug .sugrow.quick .sugbtn{flex:0 0 auto;height:34px;padding:0 14px;border-radius:999px;
+  font-size:12.5px;white-space:nowrap;max-width:none}

@@ -357,7 +357,7 @@ def build_system(c: dict | None = None, mode: str = "glance") -> str:
               '{"say":"你要說的話","face":"gentle","mood":"心疼",'
               '"sug":["好，我去躺一下","陪我聊一下"]}',
               "- sug 一定要剛好兩個字串：他看到你的話之後，最可能想直接點來回你的兩句，"
-              "每句 8 個字以內、用他自己的口氣（短、像隨手打的，不要長句），兩句要不一樣。"]
+              "每句 12 個字以內、用他自己的口氣（像隨手打的，不要長句），兩句要不一樣。"]
     if memo:
         lines += ["", "## 你記得的事", memo]
     return "\n".join(lines)
@@ -402,7 +402,7 @@ def parse(raw: str) -> dict:
     sug = d.get("sug") or []
     if isinstance(sug, str):
         sug = [sug]
-    sug = [re.sub(r"\s+", " ", str(x)).strip()[:16] for x in list(sug)[:2] if str(x).strip()]
+    sug = [re.sub(r"\s+", " ", str(x)).strip()[:20] for x in list(sug)[:2] if str(x).strip()]
     return {"say": say, "face": face if face in FACES else "happy",
             "mood": str(d.get("mood") or "").strip()[:8], "sug": sug, "_ok": True}
 
@@ -442,7 +442,7 @@ async def _fill_sug(model: dict, say: str, context: str = "") -> list:
     """模型常常忘記 sug；只用一次很小的呼叫補兩句，比整段重跑便宜。"""
     prompt = ("你剛剛對使用者說了：「" + say + "」\n"
               + (("他最近的狀況：\n" + context[:600] + "\n") if context else "")
-              + "使用者看到這句話，最可能直接回哪兩句？每句 8 個字以內、用他的口氣、兩句要不一樣。"
+              + "使用者看到這句話，最可能直接回哪兩句？每句 12 個字以內、用他的口氣、兩句要不一樣。"
                 '只輸出 JSON 陣列，例如 ["好，我去躺一下","陪我聊一下"]')
     try:
         raw = await _call(model, "你只輸出 JSON 陣列，不要說明。",
@@ -456,7 +456,7 @@ async def _fill_sug(model: dict, say: str, context: str = "") -> list:
         arr = json.loads(m.group(0))
     except Exception:
         return []
-    return [re.sub(r"\s+", " ", str(x)).strip()[:16] for x in list(arr)[:2] if str(x).strip()]
+    return [re.sub(r"\s+", " ", str(x)).strip()[:20] for x in list(arr)[:2] if str(x).strip()]
 
 
 async def _say(session_id, got: dict, emit, kind: str) -> dict:
