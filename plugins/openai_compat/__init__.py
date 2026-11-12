@@ -1,4 +1,4 @@
-"""OpenAI 相容端點（Chat Completions）。
+"""OpenAI 相容端點（Chat Completions／Responses API）。
 
 config.toml 的模型欄位：
   provider = "openai_compat"
@@ -10,6 +10,8 @@ config.toml 的模型欄位：
   端點回「不支援這個參數／不能看圖」就記住並改掉重送（data/model_caps.json）。
   echo_reasoning = "all" / "off"      思考內容回傳給 API 的範圍；沒寫＝只回傳這一回合（工具呼叫鏈）裡的思考，
                                       使用者開始新的一回合時，舊回合的思考就不送了。DeepSeek 自動用 "all"（它要求帶工具時每回合都回傳）
+  api_style = "chat" / "responses"    走哪種 API：沒寫＝chat（Chat Completions）；"responses" 走 /responses；
+                                      模型商層級可一起設（woof/loader.py 的 VENDOR_FIELDS），模型自己寫的優先。
 """
 from __future__ import annotations
 
@@ -87,6 +89,108 @@ def _to_chat(messages: list[dict], vision: bool, echo: str) -> list[dict]:
             if notes:  # 重點便條：工具結果後面另起一則，工具結果本身一個字都不動，快取前綴不受影響
                 out.append({"role": "user", "content": "\n".join(notes)})
     return out
+
+
+_REASONING_MODELS = ("gpt-5", "gpt-6", "o1", "o3", "o4", "codex")
+
+
+def _api_style(model: dict) -> str:
+    """用哪種 API：寫 "responses" 走 /v1/responses、寫 "chat" 走 Chat Completions。
+
+    沒寫時只有官方 OpenAI 的推理模型（gpt-5／gpt-6／o 系列）預設走 Responses，官方建議這類模型
+    用 Responses 做工具呼叫；其他相容服務商一律維持 Chat Completions，行為不變。
+    """
+    v = str(model.get("api_style") or "").lower()
+    if v in ("chat", "responses"):
+        return v
+    mid = str(model.get("model") or model.get("id") or "").lower()
+    if "://api.openai.com" in str(model.get("base_url") or "") and mid.startswith(_REASONING_MODELS):
+        return "responses"
+    return "chat"
+
+
+def _to_responses(messages: list[dict], vision: bool, echo: str) -> list[dict]:
+    """WOOF 中立格式 → Responses API 的 input 陣列。
+
+    user／assistant 訊息、function_call、function_call_output 都是一筆 item；
+    reasoning item 只在有 id 時原樣送回（沒有 id 的舊思考無法回傳）。
+    echo 的 turn 範圍跟 Chat Completions 一樣：只保留使用者最後一則訊息之後的思考。
+    """
+    out: list[dict] = []
+    turn_start = 0
+    for k, m in enumerate(messages):
+        if m["role"] == "user" and not (m.get("meta") or {}).get("internal"):
+            turn_start = k
+    for k, m in enumerate(messages):
+        role, blocks = m["role"], m["content"]
+        if role == "user":
+            parts = []
+            for b in blocks:
+                if b["type"] in ("text", "note"):
+                    parts.append({"type": "input_text", "text": b["text"]})
+                elif b["type"] == "image":
+                    if vision:
+                        mt, data = load_image_b64(b)
+                        parts.append({"type": "input_image", "image_url": f"data:{mt};base64,{data}"})
+                    else:
+                        parts.append({"type": "input_text", "text": f"[使用者附上一張圖片：{b['path']}，此模型無法直接看圖]"})
+            if parts:
+                out.append({"role": "user", "content": parts})
+        elif role == "assistant":
+            # reasoning 先送（官方要求帶工具時把 reasoning 跟 function_call 一起回傳）
+            if echo == "all" or (echo == "turn" and k > turn_start):
+                for b in blocks:
+                    if b["type"] != "thinking":
+                        continue
+                    for d in b.get("details") or []:
+                        if not isinstance(d, dict) or not d.get("id"):
+                            continue
+                        item: dict = {"type": "reasoning", "id": d["id"],
+                                      "summary": d.get("summary") or [{"type": "summary_text", "text": b.get("text", "")}]}
+                        if d.get("content"):
+                            item["content"] = d["content"]
+                        if d.get("encrypted_content"):
+                            item["encrypted_content"] = d["encrypted_content"]
+                        out.append(item)
+            text = "".join(b["text"] for b in blocks if b["type"] == "text")
+            if text:
+                out.append({"type": "message", "role": "assistant",
+                            "content": [{"type": "output_text", "text": text}]})
+            for b in blocks:
+                if b["type"] == "tool_call":
+                    call = {"type": "function_call", "name": b["name"],
+                            "arguments": json.dumps(b.get("args") or {}, ensure_ascii=False),
+                            "call_id": b["id"]}
+                    if b.get("item_id"):
+                        call["id"] = b["item_id"]
+                    out.append(call)
+        elif role == "tool":
+            for b in blocks:
+                if b["type"] == "tool_result":
+                    out.append({"type": "function_call_output", "call_id": b["id"],
+                                "output": b["output"] or "(無輸出)"})
+            notes = [b["text"] for b in blocks if b["type"] == "note"]
+            if notes:
+                out.append({"role": "user", "content": [{"type": "input_text", "text": "\n".join(notes)}]})
+    return out
+
+
+def _get(obj, name, default=None):
+    """SDK 物件或 dict 都拿得到欄位（串流事件、response、usage 用）。"""
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+
+def _as_dict(obj):
+    if isinstance(obj, dict):
+        return obj
+    if obj is None:
+        return {}
+    dump = getattr(obj, "model_dump", None)
+    return dump() if callable(dump) else {}
 
 
 def _merge_detail(details: list[dict], item: dict) -> None:
@@ -180,6 +284,20 @@ def _effort_kwargs(style: str, effort: str | None) -> dict:
         # NVIDIA NIM Nemotron（Lightning、Omni、Laguna）：chat_template_kwargs.enable_thinking（實測 2026-11-11）
         return {"extra_body": {"chat_template_kwargs": {"enable_thinking": effort != "off"}}}
     return {}
+
+
+def _responses_reasoning(model: dict, effort: str | None) -> dict:
+    """Responses API 的 reasoning 參數：思考強度 reasoning.effort 跟摘要 summary。
+
+    強度換算跟 Chat Completions 一樣（"off" 送 minimal），學到的拒收值兩邊共用；
+    summary 要 "auto" 才會回摘要，摘要就當畫面顯示的思考內容。
+    """
+    if not effort or model.get("effort_style", "none") == "none":
+        return {}
+    v = caps.effort_value(model["id"], "minimal" if effort == "off" else effort)
+    if v is None:
+        return {}
+    return {"reasoning": {"effort": v, "summary": "auto"}}
 
 
 def _wire_effort(model: dict, effort: str | None) -> str | None:
@@ -293,6 +411,14 @@ class OpenAICompat:
                 raise
 
     async def _once(self, key: str, model: dict, system: str, messages: list[dict], tools: list[dict], effort):
+        if _api_style(model) == "responses":
+            async for ev in self._once_responses(key, model, system, messages, tools, effort):
+                yield ev
+            return
+        async for ev in self._once_chat(key, model, system, messages, tools, effort):
+            yield ev
+
+    async def _once_chat(self, key: str, model: dict, system: str, messages: list[dict], tools: list[dict], effort):
         client = openai.AsyncOpenAI(api_key=key, base_url=model.get("base_url"), timeout=600,
                                     max_retries=int(model.get("max_retries", 2)))
         chat = [{"role": "system", "content": system}] + _to_chat(
@@ -394,6 +520,140 @@ class OpenAICompat:
                 cd = cd.model_dump() if hasattr(cd, "model_dump") else {}
             if cd.get("reasoning_tokens"):
                 meta["hidden_reasoning"] = int(cd["reasoning_tokens"])
+        yield {"type": "message", "content": content, "meta": meta}
+
+    async def _once_responses(self, key: str, model: dict, system: str, messages: list[dict],
+                              tools: list[dict], effort):
+        """Responses API（POST /responses）：送出 item 陣列，串流事件一個一個回來。
+
+        思考是 reasoning item（摘要靠 reasoning.summary，原文要 include 才有）；
+        工具呼叫是 function_call item，回結果用 call_id 對應的 function_call_output。
+        """
+        client = openai.AsyncOpenAI(api_key=key, base_url=model.get("base_url"), timeout=600,
+                                    max_retries=int(model.get("max_retries", 2)))
+        echo = _echo_mode(model)
+        kw: dict = {
+            "model": model.get("model") or model["id"],
+            "instructions": system,
+            "input": _to_responses(messages, bool(model.get("vision")), echo),
+            "stream": True,
+            "store": False,
+            "max_output_tokens": int(model.get("max_tokens") or self.woof.settings.get("max_tokens") or 32000),
+        }
+        if tools:
+            kw["tools"] = [{"type": "function", "name": t["name"], "description": t["description"],
+                            "parameters": t["schema"]} for t in tools]
+        if echo != "off":  # 不在伺服器端留存時，要靠加密的思考內容才送得回下一輪
+            kw["include"] = ["reasoning.encrypted_content"]
+        kw.update(_responses_reasoning(model, effort))
+        if model.get("extra_body"):
+            kw["extra_body"] = model["extra_body"]
+
+        text = ""
+        sums: dict[str, str] = {}     # reasoning item → 思考摘要（畫面顯示這個）
+        rtexts: dict[str, str] = {}   # reasoning item → 思考原文（有 include 才會來）
+        items: dict[str, dict] = {}   # item id → 工具呼叫／思考 item，照出現順序
+        usage = None
+        out_det: dict = {}
+        stop = ""
+        resp = await client.responses.create(**kw)
+        async for ev in resp:
+            kind = _get(ev, "type", "")
+            if kind == "response.output_text.delta":
+                d = _get(ev, "delta") or ""
+                text += d
+                yield {"type": "text_delta", "text": d}
+            elif kind in ("response.reasoning_summary_text.delta", "response.reasoning_text.delta"):
+                d = _get(ev, "delta") or ""
+                if d:
+                    bucket = sums if kind == "response.reasoning_summary_text.delta" else rtexts
+                    iid = _get(ev, "item_id") or ""
+                    bucket[iid] = bucket.get(iid, "") + d
+                    yield {"type": "thinking_delta", "text": d}
+            elif kind == "response.output_item.added":
+                item = _as_dict(_get(ev, "item"))
+                iid = item.get("id") or f"item_{_get(ev, 'output_index', len(items))}"
+                if item.get("type") == "function_call":
+                    items[iid] = {"type": "function_call", "id": iid, "name": item.get("name") or "",
+                                  "call_id": item.get("call_id") or "", "args": item.get("arguments") or ""}
+                elif item.get("type") == "reasoning":
+                    items[iid] = {"type": "reasoning", "id": iid,
+                                  "encrypted_content": item.get("encrypted_content") or ""}
+            elif kind == "response.function_call_arguments.delta":
+                it = items.get(_get(ev, "item_id") or "")
+                if it is not None:
+                    it["args"] += _get(ev, "delta") or ""
+            elif kind == "response.function_call_arguments.done":
+                it = items.get(_get(ev, "item_id") or "")
+                if it is not None and _get(ev, "arguments") is not None:
+                    it["args"] = _get(ev, "arguments")
+            elif kind == "response.output_item.done":
+                item = _as_dict(_get(ev, "item"))
+                iid = item.get("id") or ""
+                if item.get("type") == "function_call":
+                    it = items.setdefault(iid, {"type": "function_call", "id": iid, "name": "",
+                                                "call_id": "", "args": ""})
+                    it["name"] = item.get("name") or it["name"]
+                    it["call_id"] = item.get("call_id") or it["call_id"]
+                    if item.get("arguments") is not None:
+                        it["args"] = item["arguments"]
+                elif item.get("type") == "reasoning":
+                    it = items.setdefault(iid, {"type": "reasoning", "id": iid})
+                    if item.get("encrypted_content"):
+                        it["encrypted_content"] = item["encrypted_content"]
+            elif kind in ("response.completed", "response.incomplete"):
+                r = _as_dict(_get(ev, "response"))
+                usage = _get(r, "usage") or usage
+                if _get(r, "status") == "incomplete":
+                    reason = _get(_as_dict(_get(r, "incomplete_details")), "reason") or ""
+                    if reason in ("max_output_tokens", "max_tokens"):
+                        stop = "max_tokens"
+            elif kind in ("response.failed", "error"):
+                obj = _get(ev, "response") or ev
+                msg = _get(_as_dict(_get(obj, "error")) or obj, "message") or "Responses API 回報錯誤"
+                raise RuntimeError(f"Responses API 錯誤：{' '.join(str(msg).split())[:200]}")
+
+        thinking = "".join(sums.values()) or "".join(rtexts.values())
+        details: list[dict] = []
+        for iid, it in items.items():
+            if it["type"] != "reasoning":
+                continue
+            d: dict = {"type": "reasoning", "id": iid}
+            if sums.get(iid):
+                d["summary"] = [{"type": "summary_text", "text": sums[iid]}]
+            if rtexts.get(iid):
+                d["content"] = [{"type": "reasoning_text", "text": rtexts[iid]}]
+            if it.get("encrypted_content"):
+                d["encrypted_content"] = it["encrypted_content"]
+            details.append(d)
+
+        content: list[dict] = []
+        if thinking or details:
+            block: dict = {"type": "thinking", "text": thinking}
+            if details:
+                block["details"] = details
+            content.append(block)
+        if text:
+            content.append({"type": "text", "text": text})
+        for it in items.values():
+            if it["type"] != "function_call":
+                continue
+            try:
+                args = json.loads(it["args"]) if it["args"].strip() else {}
+            except json.JSONDecodeError:
+                args = {"_raw": it["args"]}
+            content.append({"type": "tool_call", "id": it["call_id"] or new_call_id(), "name": it["name"],
+                            "args": args, "item_id": it["id"]})
+        if usage:
+            det = _as_dict(_get(usage, "input_tokens_details"))
+            out_det = _as_dict(_get(usage, "output_tokens_details"))
+            yield {"type": "usage", "input_tokens": _get(usage, "input_tokens"),
+                   "output_tokens": _get(usage, "output_tokens"),
+                   "cache_read": det.get("cached_tokens"), "cache_write": det.get("cache_write_tokens")}
+        meta = {"stop_reason": stop} if stop else {}
+        # 有算思考 token 卻只回摘要、沒內容時，畫面標「有思考、沒回傳內容」（跟 Chat Completions 一樣）
+        if usage and not thinking and out_det.get("reasoning_tokens"):
+            meta["hidden_reasoning"] = int(out_det["reasoning_tokens"])
         yield {"type": "message", "content": content, "meta": meta}
 
 

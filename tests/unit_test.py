@@ -1,16 +1,19 @@
-"""純函式單元測試：權限判斷、思考強度換算、排程下次時間、成本、壓縮前清舊工具輸出、目錄樹。
+"""純函式單元測試：權限判斷、思考強度換算、排程下次時間、成本、壓縮前清舊工具輸出、目錄樹、Responses API 串流。
 
 用暫存資料夾當 data（WOOF_DATA），不碰真正的對話資料庫。執行：
   .venv/Scripts/python tests/unit_test.py
 """
 import asyncio
+import json
 import os
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 TMP = tempfile.mkdtemp(prefix="woof_test_")
@@ -353,6 +356,208 @@ class EmptyReply(unittest.TestCase):
         msgs, seen = self._run([dict(cut), dict(cut)])
         self.assertEqual(len(seen), 2)  # 請它精簡思考重來一次
         self.assertIn("輸出上限", msgs[-1]["content"][0]["text"])
+
+
+class ResponsesAPI(unittest.TestCase):
+    """Responses API（/v1/responses）：本機假伺服器回放官方格式的串流事件，不連網。"""
+
+    @staticmethod
+    def _plugin():
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "oa_plugin", ROOT / "plugins" / "openai_compat" / "__init__.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def _serve(self, plans):
+        class H(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.0"  # 沒有 Content-Length：送完就關，串流照樣一段一段來
+
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                self.server.seen.append({"path": self.path,
+                                         "body": json.loads(self.rfile.read(n) or b"{}")})
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                for ev in (self.server.plan.pop(0) if self.server.plan else []):
+                    name = ev.get("type") or ev.get("object") or "message"
+                    self.wfile.write(f"event: {name}\ndata: {json.dumps(ev)}\n\n".encode())
+                    self.wfile.flush()
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        srv.plan = list(plans)
+        srv.seen = []
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        return f"http://127.0.0.1:{srv.server_address[1]}/v1", srv
+
+    def _run(self, plans, messages, tools=None, effort="high", mid="gpt-5.2", **extra):
+        mod = self._plugin()
+        base, srv = self._serve(plans)
+        model = {"id": mid, "provider": "openai_compat", "model": mid, "label": mid, "base_url": base,
+                 "effort_style": "openai", "vision": False, "api_style": "responses", **extra}
+        prov = mod.OpenAICompat(types.SimpleNamespace(settings={}, keys=lambda *a: None))
+
+        async def collect():
+            return [ev async for ev in prov._once("test-key", model, "你是 WOOF", messages, tools or [], effort)]
+
+        return asyncio.run(collect()), srv
+
+    @staticmethod
+    def _text_plan():
+        return [
+            {"type": "response.created", "response": {"id": "resp_1", "status": "in_progress"}},
+            {"type": "response.output_item.added", "output_index": 0,
+             "item": {"type": "reasoning", "id": "rs_1", "summary": []}},
+            {"type": "response.reasoning_summary_text.delta", "item_id": "rs_1", "output_index": 0,
+             "summary_index": 0, "delta": "先看題目"},
+            {"type": "response.output_item.done", "output_index": 0,
+             "item": {"type": "reasoning", "id": "rs_1",
+                      "summary": [{"type": "summary_text", "text": "先看題目"}],
+                      "encrypted_content": "enc_abc"}},
+            {"type": "response.output_item.added", "output_index": 1,
+             "item": {"type": "message", "id": "msg_1", "role": "assistant", "content": []}},
+            {"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 1,
+             "content_index": 0, "delta": "答案是"},
+            {"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 1,
+             "content_index": 0, "delta": " 42"},
+            {"type": "response.output_item.done", "output_index": 1,
+             "item": {"type": "message", "id": "msg_1", "role": "assistant",
+                      "content": [{"type": "output_text", "text": "答案是 42"}]}},
+            {"type": "response.completed", "response": {
+                "id": "resp_1", "status": "completed",
+                "usage": {"input_tokens": 120, "output_tokens": 30, "total_tokens": 150,
+                          "input_tokens_details": {"cached_tokens": 64},
+                          "output_tokens_details": {"reasoning_tokens": 9}}}},
+        ]
+
+    def test_text_thinking_usage(self):
+        evs, srv = self._run([self._text_plan()],
+                             [{"role": "user", "content": [{"type": "text", "text": "1+1"}]}])
+        self.assertEqual("".join(e["text"] for e in evs if e["type"] == "thinking_delta"), "先看題目")
+        self.assertEqual("".join(e["text"] for e in evs if e["type"] == "text_delta"), "答案是 42")
+        msg = [e for e in evs if e["type"] == "message"][-1]
+        blocks = {b["type"]: b for b in msg["content"]}
+        self.assertEqual(blocks["text"]["text"], "答案是 42")
+        d = blocks["thinking"]["details"][0]
+        self.assertEqual((d["id"], d["encrypted_content"]), ("rs_1", "enc_abc"))
+        self.assertEqual(d["summary"][0]["text"], "先看題目")
+        u = [e for e in evs if e["type"] == "usage"][0]
+        self.assertEqual((u["input_tokens"], u["output_tokens"], u["cache_read"]), (120, 30, 64))
+        self.assertEqual(srv.seen[0]["path"], "/v1/responses")
+        body = srv.seen[0]["body"]
+        self.assertEqual(body["instructions"], "你是 WOOF")
+        self.assertEqual(body["reasoning"], {"effort": "high", "summary": "auto"})
+        self.assertFalse(body["store"])
+        self.assertIn("reasoning.encrypted_content", body["include"])
+        self.assertEqual(body["input"], [{"role": "user", "content": [{"type": "input_text", "text": "1+1"}]}])
+        self.assertEqual(body["max_output_tokens"], 32000)
+
+    @staticmethod
+    def _tool_plan():
+        return [
+            {"type": "response.output_item.added", "output_index": 0,
+             "item": {"type": "function_call", "id": "fc_1", "call_id": "call_abc",
+                      "name": "read_file", "arguments": ""}},
+            {"type": "response.function_call_arguments.delta", "item_id": "fc_1", "output_index": 0,
+             "delta": "{\"path\": "},
+            {"type": "response.function_call_arguments.delta", "item_id": "fc_1", "output_index": 0,
+             "delta": "\"README.md\"}"},
+            {"type": "response.output_item.done", "output_index": 0,
+             "item": {"type": "function_call", "id": "fc_1", "call_id": "call_abc", "name": "read_file",
+                      "arguments": "{\"path\": \"README.md\"}"}},
+            {"type": "response.completed", "response": {
+                "id": "resp_2", "status": "completed",
+                "usage": {"input_tokens": 50, "output_tokens": 8}}},
+        ]
+
+    def test_tool_round_trip(self):
+        tools = [{"name": "read_file", "description": "讀檔", "schema": {"type": "object", "properties": {}}}]
+        evs, srv = self._run([self._tool_plan()],
+                             [{"role": "user", "content": [{"type": "text", "text": "看 README"}]}], tools=tools)
+        msg = [e for e in evs if e["type"] == "message"][-1]
+        call = [b for b in msg["content"] if b["type"] == "tool_call"][0]
+        self.assertEqual((call["id"], call["item_id"], call["name"]), ("call_abc", "fc_1", "read_file"))
+        self.assertEqual(call["args"], {"path": "README.md"})
+        body = srv.seen[0]["body"]
+        self.assertEqual((body["tools"][0]["type"], body["tools"][0]["name"]), ("function", "read_file"))
+        self.assertEqual(body["tools"][0]["parameters"], {"type": "object", "properties": {}})
+
+        # 第二輪：工具呼叫跟結果送回去，call_id 要對得上
+        messages = [{"role": "user", "content": [{"type": "text", "text": "看 README"}]},
+                    {"role": "assistant", "content": [call]},
+                    {"role": "tool", "content": [{"type": "tool_result", "id": "call_abc", "output": "# WOOF"}]}]
+        _, srv2 = self._run([self._text_plan()], messages, tools=tools)
+        items = srv2.seen[0]["body"]["input"]
+        fc = [i for i in items if i.get("type") == "function_call"][0]
+        self.assertEqual((fc["id"], fc["call_id"], fc["name"]), ("fc_1", "call_abc", "read_file"))
+        self.assertEqual(json.loads(fc["arguments"]), {"path": "README.md"})
+        out = [i for i in items if i.get("type") == "function_call_output"][0]
+        self.assertEqual((out["call_id"], out["output"]), ("call_abc", "# WOOF"))
+
+    def test_reasoning_echoed_back(self):
+        detail = {"type": "reasoning", "id": "rs_1",
+                  "summary": [{"type": "summary_text", "text": "想過"}], "encrypted_content": "enc_abc"}
+        messages = [{"role": "user", "content": [{"type": "text", "text": "嗨"}]},
+                    {"role": "assistant", "content": [{"type": "thinking", "text": "想過", "details": [detail]},
+                                                      {"type": "text", "text": "你好"}]},
+                    {"role": "user", "content": [{"type": "text", "text": "再說一次"}]}]
+        # 預設只在這一回合（工具呼叫鏈）內回傳思考：新回合不送舊思考
+        _, srv = self._run([self._text_plan()], messages)
+        self.assertFalse([i for i in srv.seen[0]["body"]["input"] if i.get("type") == "reasoning"])
+        # echo_reasoning = "all"：每回合都送，加密的思考內容原樣帶回
+        _, srv = self._run([self._text_plan()], messages, echo_reasoning="all")
+        r = [i for i in srv.seen[0]["body"]["input"] if i.get("type") == "reasoning"][0]
+        self.assertEqual((r["id"], r["encrypted_content"]), ("rs_1", "enc_abc"))
+        self.assertEqual(r["summary"][0]["text"], "想過")
+        # echo_reasoning = "off"：不回傳也不要求加密內容
+        _, srv = self._run([self._text_plan()], messages, echo_reasoning="off")
+        self.assertNotIn("include", srv.seen[0]["body"])
+
+    def test_image_and_stop(self):
+        img = Path(tempfile.mkdtemp(prefix="woof_img_")) / "a.png"
+        img.write_bytes(b"\x89PNG\r\n\x1a\n")
+        messages = [{"role": "user", "content": [
+            {"type": "text", "text": "看圖"}, {"type": "image", "path": str(img), "media_type": "image/png"}]}]
+        plan = [{"type": "response.output_item.added", "output_index": 0,
+                 "item": {"type": "message", "id": "msg_1", "role": "assistant"}},
+                {"type": "response.output_text.delta", "item_id": "msg_1", "delta": "一張圖"},
+                {"type": "response.incomplete", "response": {
+                    "id": "resp_3", "status": "incomplete",
+                    "incomplete_details": {"reason": "max_output_tokens"},
+                    "usage": {"input_tokens": 10, "output_tokens": 400,
+                              "output_tokens_details": {"reasoning_tokens": 300}}}}]
+        evs, srv = self._run([plan], messages, vision=True)
+        part = srv.seen[0]["body"]["input"][0]["content"][1]
+        self.assertEqual(part["type"], "input_image")
+        self.assertTrue(part["image_url"].startswith("data:image/png;base64,"))
+        msg = [e for e in evs if e["type"] == "message"][-1]
+        self.assertEqual(msg["meta"], {"stop_reason": "max_tokens", "hidden_reasoning": 300})
+
+    def test_other_vendors_stay_chat(self):
+        mod = self._plugin()
+        self.assertEqual(mod._api_style({"id": "gpt-5.2", "base_url": "https://api.openai.com/v1"}), "responses")
+        self.assertEqual(mod._api_style({"id": "m", "model": "deepseek-chat",
+                                         "base_url": "https://api.deepseek.com"}), "chat")
+        self.assertEqual(mod._api_style({"id": "gpt-5.2", "base_url": "https://api.openai.com/v1",
+                                         "api_style": "chat"}), "chat")
+        self.assertEqual(mod._api_style({"id": "llama-3", "base_url": "https://api.openai.com/v1"}), "chat")
+
+        chunk = lambda delta, fin=None: {"id": "c1", "object": "chat.completion.chunk", "created": 1,
+                                         "model": "compat-1",
+                                         "choices": [{"index": 0, "delta": delta, "finish_reason": fin}]}
+        evs, srv = self._run([[chunk({"content": "嗨"}), chunk({}, "stop")]],
+                             [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+                             effort=None, mid="compat-1", api_style="chat")
+        self.assertEqual(srv.seen[0]["path"], "/v1/chat/completions")
+        self.assertIn("messages", srv.seen[0]["body"])
+        self.assertEqual([e["text"] for e in evs if e["type"] == "text_delta"], ["嗨"])
 
 
 if __name__ == "__main__":

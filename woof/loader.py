@@ -27,7 +27,7 @@ from typing import Any, Awaitable, Callable
 from . import caps, keypool, store
 from .config import PLUGINS, load_config
 
-VENDOR_FIELDS = ("provider", "base_url", "key_pool", "auth", "effort_style", "echo_reasoning", "max_retries", "rate_limit_wait", "headers")
+VENDOR_FIELDS = ("provider", "base_url", "key_pool", "auth", "effort_style", "echo_reasoning", "max_retries", "rate_limit_wait", "headers", "api_style")
 
 
 def merge_models(cfg: dict) -> list[dict]:

@@ -4425,7 +4425,8 @@ function renderVendors(box) {
           ${isOA ? `<label>API 位址</label><input data-vf="base_url" value="${esc(v.base_url || '')}" placeholder="https://…/v1" class="mono">` : ''}
           ${v.provider !== 'claude_cli' ? `<label>金鑰池</label><select data-vf="key_pool"><option value="">（不用 key）</option>${opt(pools, v.key_pool)}<option value="__new">＋ 新的金鑰池…</option></select>` : ''}
           ${isOA ? `<label>思考參數</label><select data-vf="effort_style">${opt(['', 'openai', 'openrouter', 'deepseek', 'nim', 'none'], v.effort_style || '', { '': '自動（依位址判斷）', openai: 'OpenAI reasoning_effort', openrouter: 'OpenRouter reasoning', deepseek: 'DeepSeek thinking', nim: 'NVIDIA enable_thinking', none: '不送' })}</select>
-            <label>思考回傳</label><select data-vf="echo_reasoning" title="模型上一步的思考要不要跟著送回去">${opt(['', 'all', 'off'], v.echo_reasoning === true ? 'all' : v.echo_reasoning === false ? 'off' : (v.echo_reasoning || ''), { '': '自動：工具呼叫鏈內保留，新回合捨棄', all: '每回合都保留（DeepSeek 必須）', off: '都不回傳' })}</select>` : ''}
+            <label>思考回傳</label><select data-vf="echo_reasoning" title="模型上一步的思考要不要跟著送回去">${opt(['', 'all', 'off'], v.echo_reasoning === true ? 'all' : v.echo_reasoning === false ? 'off' : (v.echo_reasoning || ''), { '': '自動：工具呼叫鏈內保留，新回合捨棄', all: '每回合都保留（DeepSeek 必須）', off: '都不回傳' })}</select>
+            <label>API 介面</label><select data-vf="api_style" title="這個模型商走哪種 OpenAI API。沒設定＝自動：官方 OpenAI 的推理模型走 Responses，其他相容端點維持 Chat Completions。模型自己在設定檔寫了就以模型的為準">${opt(['', 'chat', 'responses'], v.api_style || '', { '': '自動（推理模型走 Responses）', chat: 'Chat Completions', responses: 'Responses API' })}</select>` : ''}
         </div>
         <div class="mtable${S.cfg.cost_on ? ' priced' : ''}"><div class="mth"><span>顯示名稱</span><span>API 模型名稱</span><span>上下文</span>${S.cfg.cost_on ? '<span title="美元／每百萬 token：輸入 / 輸出 / 快取讀取">單價 $/M</span>' : ''}<span>思考強度</span><span>預設</span><span>看圖</span><span></span></div>
           ${mrows || '<div class="mtempty">還沒有模型</div>'}</div>
@@ -4752,7 +4753,7 @@ $('#setList').addEventListener('change', (e) => {
       });
       return;
     }
-    if (el.dataset.vf === 'echo_reasoning' && !val) delete v.echo_reasoning; else v[el.dataset.vf] = val;
+    if ((el.dataset.vf === 'echo_reasoning' || el.dataset.vf === 'api_style') && !val) delete v[el.dataset.vf]; else v[el.dataset.vf] = val;
     setDirty(true); renderSettings(); return;
   }
   const tr = el.closest('.mtr');
