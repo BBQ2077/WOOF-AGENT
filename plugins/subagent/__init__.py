@@ -133,7 +133,8 @@ async def _generate(woof, m: dict, t: dict, parent, progress) -> dict:
     prompt = str(t.get("goal") or "").strip()
     extra = str(t.get("context") or "").strip()
     text = prompt + "\n" + extra
-    ratio = (re.search(r"\b(21:9|16:9|9:16|4:3|3:4|3:2|2:3|1:1)\b", text) or [None, ""])[1]
+    rx = "|".join(re.escape(x) for x in media.ALL_RATIOS)
+    ratio = (re.search(rf"(?<![\d.:])({rx})(?![\d.:])", text) or [None, ""])[1]
     name = m.get("label", m["id"])
 
     def keep(path: str) -> str:
@@ -153,17 +154,19 @@ async def _generate(woof, m: dict, t: dict, parent, progress) -> dict:
                 refs.append(str(fp))
         await progress(f"用 {name} 生成圖片中…" + (f"（參考圖 {len(refs)} 張）" if refs else ""))
         r = await media.gen_image(woof, m, prompt, images=refs, ratio=ratio)
-        return {"gen": f"已生成圖片（{name}，{r['seconds']} 秒）：{r['path']}{keep(r['path'])}\n回覆使用者時寫上 MEDIA:{r['path']} 讓介面顯示。"}
+        adj = f"（{'；'.join(r['notes'])}）" if r.get("notes") else ""
+        return {"gen": f"已生成圖片（{name}，{r['seconds']} 秒）{adj}：{r['path']}{keep(r['path'])}\n回覆使用者時寫上 MEDIA:{r['path']} 讓介面顯示。"}
     sec = re.search(r"(\d{1,2})\s*(?:秒|s\b|sec)", text)
-    secs = max(4, min(12, int(sec.group(1)))) if sec else 5
-    aspect = ratio if ratio in ("16:9", "9:16", "1:1") else "16:9"
+    res = (re.search(r"\b(360p|480p|720p|1080p|4k)\b", text, re.I) or [None, ""])[1]
+    p, _ = media.settle(m, ratio=ratio, seconds=int(sec.group(1)) if sec else None, resolution=res)
 
     async def prog(pct, st):
         await progress(f"進度 {pct}%（{st}）")
 
-    await progress(f"用 {name} 生成影片中（{secs} 秒、{aspect}，通常 1–3 分鐘）…")
-    r = await media.gen_video(woof, m, prompt, seconds=secs, aspect=aspect, progress=prog)
-    return {"gen": f"已生成影片（{name}，{r['video_seconds']} 秒長）：{r['path']}{keep(r['path'])}\n回覆使用者時寫上 MEDIA:{r['path']} 讓介面顯示。"}
+    await progress(f"用 {name} 生成影片中（{p.get('seconds')} 秒、{p.get('ratio')}，通常 1–3 分鐘）…")
+    r = await media.gen_video(woof, m, prompt, seconds=p.get("seconds"), aspect=p.get("ratio") or "", resolution=res, progress=prog)
+    adj = f"（{'；'.join(r['notes'])}）" if r.get("notes") else ""
+    return {"gen": f"已生成影片（{name}，{r['video_seconds']} 秒長）{adj}：{r['path']}{keep(r['path'])}\n回覆使用者時寫上 MEDIA:{r['path']} 讓介面顯示。"}
 
 
 def register(woof):

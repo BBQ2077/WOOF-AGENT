@@ -108,6 +108,8 @@ class TurnContext:
         # 子代理用：權限跟著哪個對話、哪些工具不給用、額外的系統提示
         self.root_session_id = session["id"]
         self.tool_exclude: set[str] = set()
+        # 這個對話手動開的工具（全域「設定中停用」的才算），送出時排在工具清單最後面
+        self.tool_include: set[str] = set((session.get("engine_state") or {}).get("tools_on") or [])
         self.extra_system = ""
         # 寫入子代理可改的範圍（None＝不限；唯讀子代理用不到）
         self.write_scope: list | None = None
@@ -169,7 +171,7 @@ def tool_cost(name: str, description: str, schema) -> tuple[int, int]:
 
 async def tool_specs_for(ctx: TurnContext) -> list[dict]:
     """這一步實際送給模型的工具：先排除停用的，再交給 tool_specs 掛鉤（例如工具延遲載入）。"""
-    return await REG.events.pipe("tool_specs", active_tool_specs(ctx.tool_exclude), ctx)
+    return await REG.events.pipe("tool_specs", active_tool_specs(ctx.tool_exclude, getattr(ctx, "tool_include", None)), ctx)
 
 
 async def tool_overview(ctx: TurnContext) -> list[dict]:
@@ -177,7 +179,8 @@ async def tool_overview(ctx: TurnContext) -> list[dict]:
     from woof.agent.tasks import PLAN_TOOLS
     es = ctx.session.get("engine_state") or {}
     reasons: dict[str, str] = {}
-    for n in disabled_tools():
+    inc = set(getattr(ctx, "tool_include", None) or ()) & disabled_tools()
+    for n in disabled_tools() - inc:
         reasons[n] = "設定中停用"
     off = set(es.get("plugins_off") or [])
     for n, t in REG.tools.items():
@@ -192,8 +195,9 @@ async def tool_overview(ctx: TurnContext) -> list[dict]:
     for ex in [ctx.tool_exclude]:
         for n in ex:
             reasons.setdefault(n, "這個對話停用")
-    sent = {t["name"]: t for t in await REG.events.pipe(
-        "tool_specs", [t for t in REG.tool_specs() if t["name"] not in reasons], ctx)}
+    pre = [t for t in REG.tool_specs() if t["name"] not in reasons]
+    pre = [t for t in pre if t["name"] not in inc] + [t for t in pre if t["name"] in inc]
+    sent = {t["name"]: t for t in await REG.events.pipe("tool_specs", pre, ctx)}
     out = []
     for t in REG.tool_specs():
         tool = REG.tools.get(t["name"])
@@ -205,7 +209,8 @@ async def tool_overview(ctx: TurnContext) -> list[dict]:
         deferred = n not in reasons and n not in sent
         out.append({"name": n, "plugin": getattr(tool, "plugin", ""), "description": t["description"],
                     "enabled": n not in reasons, "reason": reasons.get(n, "") or ("延遲載入：用到時才載入說明" if deferred else ""),
-                    "deferred": deferred, "chars": chars, "tokens_est": 0 if deferred else tok})
+                    "deferred": deferred, "chars": chars, "tokens_est": 0 if deferred else tok,
+                    "session_on": n in inc and n not in reasons})
     for n, t in sent.items():
         if n not in REG.tools or n in reasons:
             chars, tok = tool_cost(n, t["description"], t.get("schema"))
@@ -369,9 +374,13 @@ def disabled_tools() -> set[str]:
     return set(REG.config.get("disabled_tools") or [])
 
 
-def active_tool_specs(exclude: set[str] | None = None) -> list[dict]:
-    off = disabled_tools() | (exclude or set())
-    return [t for t in REG.tool_specs() if t["name"] not in off]
+def active_tool_specs(exclude: set[str] | None = None, include: set[str] | None = None) -> list[dict]:
+    """include＝這個對話手動開的（全域停用的工具）：排在最後面，前面的工具順序不變。"""
+    ex = exclude or set()
+    inc = set(include or ()) & disabled_tools()
+    off = disabled_tools() | ex
+    specs = REG.tool_specs()
+    return [t for t in specs if t["name"] not in off] + [t for t in specs if t["name"] in inc and t["name"] not in ex]
 
 
 async def complete(model_cfg: dict, system: str, messages: list[dict], max_text: int = 0) -> str:
@@ -512,7 +521,7 @@ async def _run_tool(call: dict, ctx: TurnContext) -> dict:
         output, is_error = f"找不到工具：{name}", True
     elif isinstance(args, dict) and "_raw" in args:
         output, is_error = _P("raw_args"), True
-    elif name in disabled_tools() or name in getattr(ctx, "tool_exclude", ()):
+    elif (name in disabled_tools() and name not in getattr(ctx, "tool_include", ())) or name in getattr(ctx, "tool_exclude", ()):
         output, is_error = f"工具 {name} 已被停用", True
     elif not (ok := await _approved(call, ctx))[0]:
         output, is_error = ok[1], True

@@ -3233,7 +3233,8 @@ function renderCtxPanel() {
     <div class="cp-sec">
       <div class="cp-sh"><b>本回合工具</b><span class="pr-badge">${onTools} / ${tools.length} 個會送出${nDefer ? `・${nDefer} 個延遲載入` : ''}・約 ${tools.filter((t) => t.enabled).reduce((a, t) => a + (t.tokens_est || 0), 0).toLocaleString()} tokens</span></div>
       <small class="cp-note">模型這一回合真正看得到的工具。灰色的是被排除，後面寫原因。每個工具的「字元」是名稱、說明與參數結構的 JSON 長度；tok 是粗估（英文約 4 字元 1 token，中文約 1.5 字元 1 token），實際計費以模型回報為準。</small>
-      ${tools.map((t) => `<div class="cp-tool" style="${t.enabled && !t.deferred ? '' : 'opacity:.55'}"><span>${esc(t.name)}</span><b>${esc(t.plugin)}${t.reason ? ' · ' + esc(t.reason) : ''}<em class="ctx-tok">${(t.chars || 0).toLocaleString()} 字 ≈ ${(t.tokens_est || 0).toLocaleString()} tok</em></b></div>`).join('') || '<small class="cp-note">沒有任何工具。</small>'}
+      <small class="cp-note">「設定中停用」的工具可以只在這個對話打開，排在工具清單最後面。開或關的那一則訊息，快取要重算一次（工具清單在快取最前面，放哪裡都一樣），之後照常命中。</small>
+      ${tools.map((t) => `<div class="cp-tool" style="${t.enabled && !t.deferred ? '' : 'opacity:.55'}"><span>${esc(t.name)}</span><b>${esc(t.plugin)}${t.session_on ? ' · 這個對話開著' : t.reason ? ' · ' + esc(t.reason) : ''}<em class="ctx-tok">${(t.chars || 0).toLocaleString()} 字 ≈ ${(t.tokens_est || 0).toLocaleString()} tok</em>${t.session_on ? `<span class="btn cp-tbtn" data-cp="toolOff" data-tn="${esc(t.name)}">關掉</span>` : t.reason === '設定中停用' ? `<span class="btn cp-tbtn" data-cp="toolOn" data-tn="${esc(t.name)}">這個對話開</span>` : ''}</b></div>`).join('') || '<small class="cp-note">沒有任何工具。</small>'}
     </div>
     <div class="cp-sec">
       <div class="cp-sh"><b>輔助模型與搜尋</b></div>
@@ -3272,6 +3273,14 @@ $('#ctxPanel').addEventListener('click', async (e) => {
   if (k === 'webset') { closeCtxPanel(); showView('plug'); return; }
   if (k === 'compact') { await compactNow(); await refreshCtxPanel(); return; }
   if (k === 'style') { pickStyle(b); return; }
+  if (k === 'toolOn' || k === 'toolOff') {
+    try {
+      await api('POST', `/api/sessions/${S.sid}/tools`, { name: b.dataset.tn, on: k === 'toolOn' });
+      notify('ok', k === 'toolOn' ? `這個對話開了 ${b.dataset.tn}` : `這個對話關了 ${b.dataset.tn}`, '下一則訊息起生效');
+      await refreshCtxPanel();
+    } catch (err) { notify('error', '改不了', err.message); }
+    return;
+  }
   if (k === 'refreshPrompt') {
     try { await api('DELETE', `/api/sessions/${S.sid}/prompt-snapshot`); notify('ok', '下一則訊息起套用新的系統提示詞'); await refreshCtxPanel(); }
     catch (err) { notify('error', '套用失敗', err.message); }
@@ -5615,9 +5624,32 @@ function genRowHtml(k, n, tag, d) {
         const row = document.querySelector(`.auxrow[data-f="aux:${k}"] .now`);
         const mm = S.cfg.models.find((x) => x.id === v);
         if (row) row.textContent = mm ? `目前：${mm.label || mm.id}` : '目前：自動（第一個有 key 的）';
+        renderGenParams(k, v || '');
       },
     })
-    + '</div>';
+    + `</div><div class="genp" data-genp="${k}"></div>`;
+}
+// 生成參數：選了生圖／影片模型後，列出它能調的比例、解析度、秒數（依官方文件），存成這個模型的預設
+async function renderGenParams(k, mid) {
+  const box = document.querySelector(`.genp[data-genp="${k}"]`);
+  if (!box) return;
+  if (!mid) { box.innerHTML = '<small>選定模型後，這裡會列出它能調的參數（比例、解析度、秒數）。</small>'; return; }
+  let s;
+  try { s = await api('GET', `/api/media/spec?model=${encodeURIComponent(mid)}`); } catch { box.innerHTML = ''; return; }
+  const cur = s.current || {};
+  const sel = (key, label, opts) => (opts && opts.length
+    ? `<label>${label}<select data-gp="${key}">${opts.map((o) => `<option${String(o) === String(cur[key]) ? ' selected' : ''}>${esc(String(o))}</option>`).join('')}</select></label>` : '');
+  const secs = s.seconds
+    ? `<label>秒數<input type="number" data-gp="seconds" min="${s.seconds[0]}" max="${s.seconds[1]}" value="${esc(String(cur.seconds || ''))}"><em>${s.seconds[0]}–${s.seconds[1]}</em></label>` : '';
+  box.innerHTML = `<div class="genp-row">${sel('ratio', '比例', s.ratios)}${sel('size', '解析度', s.sizes)}${sel('resolution', '解析度', s.resolutions)}${secs}</div>
+    <small>${esc(s.note || '')} 主模型沒指定就用這裡的值；指定了不支援的會換成最接近的，並回報改了什麼。${s.doc ? ` <a class="genp-doc" data-href="${esc(s.doc)}">官方文件</a>` : ''}</small>`;
+  box.onclick = (e) => { const a = e.target.closest('.genp-doc'); if (a) window.open(a.dataset.href, '_blank'); };
+  box.onchange = async () => {
+    const body = {};
+    box.querySelectorAll('[data-gp]').forEach((x) => { body[x.dataset.gp] = x.type === 'number' ? (Number(x.value) || '') : x.value; });
+    try { await api('PUT', `/api/media/gen/${encodeURIComponent(mid)}`, body); notify('ok', '已存生成參數'); }
+    catch (err) { notify('error', '存不了', err.message); }
+  };
 }
 function auxRowHtml(k, n, tag, d) {
   if (k === 'image' || k === 'video') return genRowHtml(k, n, tag, d);
@@ -5649,6 +5681,8 @@ function renderAux(box) {
   <div class="card">${AUX.filter(([k]) => gen.includes(k)).map((a) => auxRowHtml(...a)).join('')}<div class="auxnote">不跟隨主模型。主模型派子代理時 model 填 image／video 就用這裡選的；image_generate／video_generate 工具開著的話也用同一個。</div></div>
   <div class="cmp-h">備用模型</div>
   <div class="card">${auxRowHtml(...fb)}<div class="auxnote">這一項不受上面的「全部」影響；預設不設，出錯就停下來告訴你。</div></div>`;
+  const mpl = (S.plugins || []).find((x) => x.name === 'media');
+  gen.forEach((k) => renderGenParams(k, String(((mpl && mpl.settings) || {})[`${k}_model`] || '')));
 }
 
 // ---- 一般

@@ -1836,3 +1836,11 @@ body.pane2 #paneA{padding:0}
 #setList .petset .petlook.off{opacity:.45}
 #petMenu .pm-sep:hover{background:var(--line)}
 #petMenu .pm-hd:hover{background:none}
+.genp{padding:0 20px 14px;font-size:11.5px;color:var(--faint);line-height:1.55}
+.genp-row{display:flex;flex-wrap:wrap;gap:8px 18px;margin:0 0 6px}
+.genp-row label{display:flex;flex:none;width:auto;white-space:nowrap;align-items:center;gap:6px;color:var(--text);font-size:12px}
+.genp-row select,.genp-row input{height:28px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--text);padding:0 6px;font-size:12px}
+.genp-row input{width:60px}
+.genp-row em{font-style:normal;color:var(--faint)}
+.genp-doc{cursor:pointer;color:var(--acc);text-decoration:underline}
+.cp-tool .cp-tbtn{margin-left:8px;padding:1px 8px;font-size:11px;font-weight:500}

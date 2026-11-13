@@ -2315,6 +2315,59 @@ async def set_gate(sid: str, body: dict):
     return {"ok": True, "mode": mode}
 
 
+@app.post("/api/sessions/{sid}/tools")
+async def set_session_tool(sid: str, body: dict):
+    """這個對話手動開／關一個全域停用的工具。body: {"name", "on"}。開的工具排在工具清單最後面。"""
+    s = store.get_session(sid)
+    if not s:
+        raise HTTPException(404)
+    name = str(body.get("name") or "")
+    if name not in REG.tools:
+        raise HTTPException(400, f"沒有工具 {name}")
+    st = dict(s.get("engine_state") or {})
+    on = [x for x in (st.get("tools_on") or []) if x != name]
+    if body.get("on"):
+        on.append(name)
+    st["tools_on"] = on
+    store.update_session(sid, engine_state=st)
+    return {"ok": True, "tools_on": on}
+
+
+@app.get("/api/media/spec")
+async def media_spec(model: str):
+    """生成模型能調的參數（比例、解析度、秒數）和目前的預設值，給「模型用途 → 生圖・生影片」顯示。"""
+    from woof import media
+
+    m = REG.model_cfg(model) or next((x for x in REG.config.get("models", []) if x["id"] == model), None)
+    if not m:
+        raise HTTPException(404)
+    return media.spec(m)
+
+
+@app.put("/api/media/gen/{mid}")
+async def media_gen_set(mid: str, body: dict):
+    """存某個生成模型的預設生成參數（models[].gen）。body: {"ratio", "size", "resolution", "seconds"}，空值＝用預設。"""
+    from woof import media
+
+    cfg = load_config()
+    m = next((x for x in cfg.get("models", []) if x.get("id") == mid), None)
+    if not m:
+        raise HTTPException(404)
+    gen = {k: body[k] for k in ("ratio", "size", "resolution", "seconds") if body.get(k) not in (None, "")}
+    if gen:
+        m["gen"] = gen
+    else:
+        m.pop("gen", None)
+    save_config(cfg)
+    live = next((x for x in REG.config.get("models", []) if x.get("id") == mid), None)
+    if live is not None:
+        if gen:
+            live["gen"] = gen
+        else:
+            live.pop("gen", None)
+    return media.spec(REG.model_cfg(mid) or live or m)
+
+
 @app.post("/api/sessions/{sid}/goal/stop")
 async def stop_goal_ep(sid: str):
     from woof.agent import tasks

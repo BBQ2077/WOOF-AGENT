@@ -1,5 +1,13 @@
 // 介面英文對照：key 是介面上的中文原文（{0} {1} 是會變動的部分），value 是英文
 window.WOOF_EN = {
+  '這個對話開': 'Enable here',
+  '這個對話開著': 'On in this chat',
+  '關掉': 'Turn off',
+  '比例': 'Ratio',
+  '解析度': 'Resolution',
+  '秒數': 'Seconds',
+  '官方文件': 'Docs',
+  '已存生成參數': 'Generation settings saved',
   '生圖・生影片': 'Image & video generation',
   '生影片': 'Video generation',
   '方案模式': 'Plan mode',

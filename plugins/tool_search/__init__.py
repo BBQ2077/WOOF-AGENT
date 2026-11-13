@@ -118,7 +118,7 @@ def register(woof):
 
     def _pool(ctx) -> dict[str, dict]:
         """這個回合可以透過橋接取用的工具（已排除停用的）。"""
-        allowed = loop.active_tool_specs(getattr(ctx, "tool_exclude", None))
+        allowed = loop.active_tool_specs(getattr(ctx, "tool_exclude", None), getattr(ctx, "tool_include", None))
         return {t["name"]: t for t in allowed if t["name"] not in BRIDGE}
 
     async def h_search(args, tctx):

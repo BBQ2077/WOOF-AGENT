@@ -24,8 +24,8 @@ def register(woof):
         return None
 
     def missing(kind: str) -> dict:
-        return {"output": f"沒有可用的{media.KIND_LABEL[kind]}模型：到「設定 → 模型商」加一個（例如 Agnes 的 agnes-{kind}-…），"
-                          f"或在插件「media」指定", "is_error": True}
+        return {"output": f"沒有可用的{media.KIND_LABEL[kind]}模型：到「設定 → 模型商」加一個，"
+                          f"再到「設定 → 模型用途 → 生圖・生影片」選", "is_error": True}
 
     async def image_generate(args: dict, tctx) -> dict:
         m = pick("image")
@@ -45,7 +45,8 @@ def register(woof):
         await tctx.output(f"用 {m.get('label', m['id'])} 生成圖片中…\n")
         r = await media.gen_image(woof, m, prompt, images=refs, size=str(args.get("size") or ""),
                                   ratio=str(args.get("ratio") or ""))
-        return {"output": f"已生成（{m.get('label', m['id'])}，{r['seconds']} 秒）：{r['path']}\n"
+        adj = f"（{'；'.join(r['notes'])}）" if r.get("notes") else ""
+        return {"output": f"已生成（{m.get('label', m['id'])}，{r['seconds']} 秒）{adj}：{r['path']}\n"
                           f"回覆使用者時寫上 MEDIA:{r['path']} 讓介面顯示這張圖。"}
 
     async def video_generate(args: dict, tctx) -> dict:
@@ -60,9 +61,10 @@ def register(woof):
         async def prog(pct, st):
             await tctx.output(f"進度 {pct}%（{st}）\n")
 
-        r = await media.gen_video(woof, m, prompt, seconds=int(args.get("seconds") or 5),
-                                  aspect=str(args.get("aspect_ratio") or "16:9"), progress=prog)
-        return {"output": f"已生成影片（{m.get('label', m['id'])}，{r['video_seconds']} 秒長）：{r['path']}\n"
+        r = await media.gen_video(woof, m, prompt, seconds=args.get("seconds"), aspect=str(args.get("aspect_ratio") or ""),
+                                  resolution=str(args.get("resolution") or ""), progress=prog)
+        adj = f"（{'；'.join(r['notes'])}）" if r.get("notes") else ""
+        return {"output": f"已生成影片（{m.get('label', m['id'])}，{r['video_seconds']} 秒長）{adj}：{r['path']}\n"
                           f"回覆使用者時寫上 MEDIA:{r['path']} 讓介面顯示這段影片。"}
 
     woof.add_tool(
@@ -71,19 +73,20 @@ def register(woof):
         "完成後回傳檔案路徑，回覆時寫 MEDIA:<路徑> 讓使用者看到。",
         {"type": "object", "properties": {
             "prompt": {"type": "string", "description": "要生成的畫面描述"},
-            "ratio": {"type": "string", "enum": ["1:1", "3:4", "4:3", "16:9", "9:16", "2:3", "3:2", "21:9"], "description": "長寬比，預設 1:1"},
-            "size": {"type": "string", "description": "解析度級距，例如 1K、2K（預設 1K）"},
+            "ratio": {"type": "string", "description": "長寬比，例如 16:9；不填用設定的預設，不支援的換成最接近的"},
+            "size": {"type": "string", "description": "解析度，例如 1K、2K；不填用設定的預設"},
             "images": {"type": "array", "items": {"type": "string"}, "description": "參考圖的本機路徑（選填）"},
         }, "required": ["prompt"]},
         image_generate,
     )
     woof.add_tool(
         "video_generate",
-        "生成短影片（文字生影片，4–12 秒）。要等 1–3 分鐘，使用者明確要影片才用。完成後回覆時寫 MEDIA:<路徑>。",
+        "生成短影片（文字生影片）。要等 1–3 分鐘，使用者明確要影片才用。完成後回覆時寫 MEDIA:<路徑>。",
         {"type": "object", "properties": {
             "prompt": {"type": "string", "description": "畫面、動作、鏡頭運動、光線"},
-            "seconds": {"type": "integer", "minimum": 4, "maximum": 12, "description": "長度，預設 5"},
-            "aspect_ratio": {"type": "string", "enum": ["16:9", "9:16", "1:1"], "description": "預設 16:9"},
+            "seconds": {"type": "integer", "description": "長度（秒）；不填用設定的預設，超出模型範圍會自動調整"},
+            "aspect_ratio": {"type": "string", "description": "例如 16:9、9:16；不填用設定的預設"},
+            "resolution": {"type": "string", "description": "例如 720p；不填用設定的預設"},
         }, "required": ["prompt"]},
         video_generate,
     )
