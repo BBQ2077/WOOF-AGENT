@@ -1089,6 +1089,8 @@ async def get_settings():
     return {
         "workdir": cfg.get("workdir") or "",
         "terminal_shell": cfg.get("terminal_shell") or "auto",
+        "api_retries": _api_retries_cfg(cfg),
+        "cmd_timeout": _cmd_timeout(),
         "allowed_dirs": cfg.get("allowed_dirs") or [],
         "vendors": cfg.get("vendors") or [],
         "discovery": await vendor_discovery(),
@@ -1117,6 +1119,23 @@ def _read_keys_raw() -> dict:
         return {}
 
 
+def _clamp_int(v, lo: int, hi: int, dflt: int) -> int:
+    try:
+        return max(lo, min(hi, int(float(v))))
+    except (TypeError, ValueError):
+        return dflt
+
+
+def _api_retries_cfg(cfg: dict) -> int:
+    return _clamp_int(cfg.get("api_retries", 3), 0, 10, 3)
+
+
+def _cmd_timeout() -> int:
+    p = REG.plugins.get("terminal")
+    s = (getattr(p, "settings", None) or {}) if p else {}
+    return _clamp_int(s.get("default_timeout", 180), 10, 600, 180)
+
+
 @app.post("/api/settings")
 async def put_settings(body: dict):
     cfg = load_config()
@@ -1128,6 +1147,17 @@ async def put_settings(body: dict):
     if "terminal_shell" in body:
         sh = str(body["terminal_shell"] or "auto")
         cfg["terminal_shell"] = sh if sh in ("auto", "bash", "powershell", "pwsh", "cmd") else "auto"
+    if "api_retries" in body:
+        cfg["api_retries"] = _clamp_int(body["api_retries"], 0, 10, 3)
+    if "cmd_timeout" in body:
+        v = _clamp_int(body["cmd_timeout"], 10, 600, 180)
+        if v != _cmd_timeout():   # 存在 terminal 插件的設定裡（插件頁那格也是它），記憶體裡的同一份一起改，馬上生效
+            cur = dict((store.get_plugin_state("terminal") or {}).get("settings") or {})
+            cur["default_timeout"] = v
+            store.set_plugin_state("terminal", settings=cur)
+            p = REG.plugins.get("terminal")
+            if p is not None and isinstance(getattr(p, "settings", None), dict):
+                p.settings["default_timeout"] = v
     if "allowed_dirs" in body:
         cfg["allowed_dirs"] = [str(d).strip() for d in body["allowed_dirs"] if str(d).strip()]
     if "vendors" in body:

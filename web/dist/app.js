@@ -4682,7 +4682,7 @@ const SECTIONS = [
   ['tools', '工具', '每個工具的總開關（含 Skill、記憶的讀和寫），依插件分組。停用後模型看不到該工具；整個插件的啟停、安裝在「插件」頁，單一對話在「上下文 → 本回合工具」。'],
   ['skills', 'Skills', '有哪些 skill 文件、從哪些資料夾讀、勾選哪些（預設全部關閉）。讀寫的開關在「工具」。'],
   ['presets', '模式預設組', '把「哪些插件可用」和「工具權限」打包成一個模式，一鍵套用。'],
-  ['general', '一般', '工作目錄、終端機、可預覽的資料夾，以及執行中按 Enter 的行為。'],
+  ['general', '一般', '工作目錄、API 重試、指令逾時、終端機、可預覽的資料夾，以及執行中按 Enter 的行為。'],
   ['appearance', '外觀', '顏色、縮放與字級。只存在這台電腦，拉了立即生效。'],
   ['mcp', 'MCP 伺服器', 'WOOF 對外提供 MCP 工具，也可以連外部的 MCP 伺服器。'],
   ['snapshots', '檔案還原', '模型改檔前先存一份原檔，之後可以在對話的「檔案」分頁還原。'],
@@ -5739,6 +5739,8 @@ function renderGeneral(box) {
     <div class="frow" data-f="gBusy"><div><b>執行中按 Enter</b><small>模型還在跑時送出新訊息的預設動作。另外兩種在輸入框右下角有圖示鍵；Ctrl+Enter 一律排隊</small></div>
       <div class="seg">${['interrupt', 'steer', 'queue'].map((v) => `<b class="${busyMode() === v ? 'on' : ''}" data-busy="${v}" title="${BUSY_HINT[v]}">${BUSY_LABEL[v]}</b>`).join('')}</div></div>
     <div class="frow" data-f="gWorkdir"><div><b>預設工作目錄</b><small>新對話的工作目錄。每個對話可以在輸入框下方的資料夾或右側「檔案」另外換。</small></div><input data-g="workdir" value="${esc(S.cfg.workdir)}" class="mono"></div>
+    <div class="frow" data-f="gRetry"><div><b>API 失敗自動重試</b><small>連線中斷、逾時、5xx、限流時等一下重送同一步（3、6、12…秒，最多 60 秒），用完才換備用模型或報錯。0＝不重試。</small></div><div class="fctl"><input data-g="api_retries" type="number" min="0" max="10" step="1" value="${esc(String(S.cfg.api_retries ?? 3))}" class="num"><span class="unit">次</span></div></div>
+    <div class="frow" data-f="gCmdTimeout"><div><b>指令逾時</b><small>模型跑指令時前景最多等幾秒，超過就轉背景繼續跑（子代理則停止）。上限 600。</small></div><div class="fctl"><input data-g="cmd_timeout" type="number" min="10" max="600" step="10" value="${esc(String(S.cfg.cmd_timeout ?? 180))}" class="num"><span class="unit">秒</span></div></div>
     <div class="frow" data-f="gTerm"><div><b>終端機</b><small>右側「終端」新開分頁用的 shell。</small></div><div class="fctl"><select data-g="terminal_shell">${[['auto', '自動（有 Git Bash 用 Git Bash）'], ...Object.entries(S.ptyShells || { bash: 'Git Bash', powershell: 'PowerShell', cmd: '命令提示字元' })].map(([v, n]) => `<option value="${v}"${(S.cfg.terminal_shell || 'auto') === v ? ' selected' : ''}>${esc(n)}</option>`).join('')}</select></div></div>
   </div>
   <div class="card">

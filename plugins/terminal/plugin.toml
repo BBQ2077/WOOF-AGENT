@@ -8,6 +8,7 @@ enabled = true
 type = "number"
 default = 180
 label = "前景指令逾時（秒）"
+in_settings = "general"
 
 [settings.max_output]
 type = "number"

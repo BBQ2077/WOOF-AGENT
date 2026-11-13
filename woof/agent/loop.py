@@ -666,6 +666,66 @@ _OVERFLOW_PAT = (
 )
 
 
+def _status(e: Exception):
+    return getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
+
+
+def is_too_large_error(e: Exception) -> bool:
+    s = str(e).lower()
+    return _status(e) == 413 or "payload too large" in s or "request entity too large" in s or "error code: 413" in s
+
+
+_TRANSIENT_STATUS = {408, 409, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 529}
+_TRANSIENT_PAT = ("timed out", "timeout", "connection", "overloaded", "temporarily", "try again", "server disconnected",
+                  "eof occurred", "reset by peer", "bad gateway", "service unavailable", "remoteprotocolerror")
+
+
+def is_transient_error(e: Exception) -> bool:
+    """暫時性錯誤：等一下重送可能就好。金鑰、格式、額度、內容政策這類重送也一樣的不算。"""
+    if is_too_large_error(e) or is_overflow_error(e):
+        return False
+    code = _status(e)
+    if code is not None:
+        return int(code) in _TRANSIENT_STATUS
+    if type(e).__name__ in ("APIConnectionError", "APITimeoutError", "ConnectError", "ReadTimeout", "ReadError",
+                            "RemoteProtocolError", "TimeoutError", "ConnectionResetError"):
+        return True
+    s = f"{type(e).__name__} {e}".lower()
+    return any(p in s for p in _TRANSIENT_PAT)
+
+
+def api_retries() -> int:
+    """API 暫時性錯誤自動重試幾次（設定 → 一般；config.toml 的 api_retries），預設 3。"""
+    try:
+        return max(0, min(10, int(REG.config.get("api_retries", 3))))
+    except (TypeError, ValueError):
+        return 3
+
+
+def retry_wait(e: Exception, n: int) -> int:
+    """第 n 次重試等幾秒：3、6、12、24、48，最多 60；服務商有說 Retry-After 就照它（最多 120）。"""
+    import random
+
+    ra = None
+    try:
+        ra = float(getattr(getattr(e, "response", None), "headers", {}).get("retry-after") or 0)
+    except (TypeError, ValueError, AttributeError):
+        ra = None
+    if ra and ra > 0:
+        return int(min(ra, 120)) or 1
+    return max(1, min(60, int(3 * 2 ** (n - 1) * random.uniform(0.85, 1.15))))
+
+
+def _short_err(e: Exception) -> str:
+    code = _status(e)
+    msg = str(getattr(e, "message", "") or e).strip().splitlines()[0][:120] if str(e).strip() else type(e).__name__
+    return f"HTTP {code}：{msg}" if code and str(code) not in msg else msg
+
+
+def _has_tool_images(messages: list[dict]) -> bool:
+    return any(m.get("role") == "tool" and any(b.get("images") for b in m.get("content") or []) for m in messages)
+
+
 def is_overflow_error(e: Exception) -> bool:
     s = str(e).lower()
     return any(p in s for p in _OVERFLOW_PAT)
@@ -748,6 +808,9 @@ async def run_model_loop(ctx: TurnContext) -> None:
     provider = REG.providers[ctx.model_cfg["provider"]]
     nudged = False  # 工具結果後模型給空內容，只請它文字總結一次
     overflow_retry = 0
+    big_retry = 0        # 413（請求太大）：收起舊圖再送
+    too_large = False
+    api_retry = 0        # 連線／伺服器暫時性錯誤：等一下重送同一步（每一步成功就歸零）
     ctx.fell_back = getattr(ctx, "fell_back", False)
     ctx.cont_counts = getattr(ctx, "cont_counts", None) or {}
     max_steps = MAX_STEPS
@@ -766,6 +829,11 @@ async def run_model_loop(ctx: TurnContext) -> None:
         hist = history(ctx.session_id)
         through = hist[-1]["id"] if hist else 0
         messages = await REG.events.pipe("before_request", hist, ctx)
+        messages, moved = trim_images(ctx.session_id, messages, force=too_large)
+        too_large = False
+        if moved:
+            await ctx.emit({"type": "notice", "session_id": ctx.session_id,
+                            "text": f"工具附的圖太多，較早的 {moved} 張這次起不再送給模型（檔案都還在，要看可以再開）"})
         specs = await tool_specs_for(ctx)
         final: dict | None = None
         partial: list[dict] = []
@@ -811,6 +879,26 @@ async def run_model_loop(ctx: TurnContext) -> None:
                 await ctx.emit({"type": "message", "session_id": ctx.session_id, "message": m})
             raise
         except Exception as e:
+            name = ctx.model_cfg.get("label", ctx.model_cfg["id"])
+            # 413 請求太大：多半是累積的工具圖。先只留最新一張圖重送；沒圖可收就當上下文太長去壓縮
+            if is_too_large_error(e) and not text_buf["text"] and big_retry < 2:
+                big_retry += 1
+                if _has_tool_images(messages):
+                    too_large = True
+                    await ctx.emit({"type": "notice", "session_id": ctx.session_id,
+                                    "text": f"{name} 回 413（請求太大），先把較早的工具圖收起來再重送這一步…"})
+                    continue
+                await ctx.emit({"type": "notice", "session_id": ctx.session_id, "text": f"{name} 回 413（請求太大），先壓縮再重送這一步…"})
+                if await _compact_now(ctx, True, "請求太大（413）"):
+                    continue
+            # 連線中斷、逾時、伺服器 5xx、限流：還沒輸出正文就等一下重送同一步，次數在「設定 → 一般」
+            if is_transient_error(e) and not text_buf["text"] and api_retry < api_retries():
+                api_retry += 1
+                wait = retry_wait(e, api_retry)
+                await ctx.emit({"type": "notice", "session_id": ctx.session_id, "retry": True,
+                                "text": f"{name} 暫時失敗（{_short_err(e)}），{wait} 秒後自動重試（{api_retry}/{api_retries()}）"})
+                await asyncio.sleep(wait)
+                continue
             # 上下文超出模型上限：壓縮後重送這一步（最多兩次），不讓整個回合中斷
             if is_overflow_error(e) and not text_buf["text"] and overflow_retry < 2:
                 overflow_retry += 1
@@ -833,6 +921,7 @@ async def run_model_loop(ctx: TurnContext) -> None:
 
         store.log_op(ctx.session_id, "model", ctx.model_cfg.get("id"), (time.time() - t_req) * 1000,
                      (t_first - t_req) * 1000 if t_first else None)
+        api_retry = big_retry = 0
         if final is None:
             raise RuntimeError("模型沒有回傳完整訊息")
         content = final["content"]
@@ -1246,10 +1335,112 @@ def new_call_id() -> str:
     return "call_" + uuid.uuid4().hex[:16]
 
 
+IMG_SIDE = 1568            # 送給模型的圖最長邊（各家看圖模型內部也會縮到這附近，再大只是多傳）
+IMG_JPEG_OVER = 700_000    # 縮完還超過這麼大就轉 JPEG（截圖存成 PNG 常常一張 1～2 MB）
+_IMG_CACHE: dict = {}
+
+
 def load_image_b64(block: dict) -> tuple[str, str]:
+    """讀圖轉 base64 給模型：太大的先縮到最長邊 IMG_SIDE、還是太大就轉 JPEG。
+    同一張圖（路徑＋修改時間＋大小）只轉一次，每次請求送出的位元組一樣，快取前綴不會變。"""
     import base64
-    data = Path(block["path"]).read_bytes()
-    return block.get("media_type") or "image/png", base64.b64encode(data).decode()
+
+    p = Path(block["path"])
+    st = p.stat()
+    key = (str(p), st.st_mtime_ns, st.st_size)
+    hit = _IMG_CACHE.get(key)
+    if hit:
+        return hit
+    data, mt = p.read_bytes(), block.get("media_type") or "image/png"
+    try:
+        from io import BytesIO
+
+        from PIL import Image
+
+        im = Image.open(BytesIO(data))
+        if (max(im.size) > IMG_SIDE or len(data) > IMG_JPEG_OVER) and not getattr(im, "is_animated", False):
+            im.thumbnail((IMG_SIDE, IMG_SIDE))
+            buf = BytesIO()
+            if mt == "image/png" and im.mode in ("RGBA", "LA", "P"):
+                im.save(buf, "PNG", optimize=True)
+            if not buf.tell() or buf.tell() > IMG_JPEG_OVER:
+                buf = BytesIO()
+                im.convert("RGB").save(buf, "JPEG", quality=85, optimize=True)
+                mt = "image/jpeg"
+            if buf.tell() < len(data):
+                data = buf.getvalue()
+            else:
+                mt = block.get("media_type") or "image/png"
+    except Exception:
+        pass   # 讀不了（格式不明）就原樣送
+    out = (mt, base64.b64encode(data).decode())
+    if len(_IMG_CACHE) > 300:
+        _IMG_CACHE.clear()
+    _IMG_CACHE[key] = out
+    return out
+
+
+# ---- 每次請求帶多少張工具圖：超過上限才整批收起舊的（不是每張新圖都擠掉一張舊的，那樣每一步快取都斷）
+IMG_MAX = 20                 # 請求裡工具圖最多幾張（Anthropic 超過 20 張會對每張圖套更嚴的尺寸限制）
+IMG_BUDGET = 16_000_000      # 工具圖 base64 合計上限（服務商的請求大小上限多在 20～32 MB，留空間給文字）
+IMG_KEEP, IMG_KEEP_BYTES = 6, 6_000_000   # 收起時留最新幾張
+
+
+def _img_b64_len(block: dict) -> int:
+    try:
+        return len(load_image_b64(block)[1])
+    except Exception:
+        return 0
+
+
+def _strip_tool_images(msg: dict) -> dict:
+    """工具結果的圖從這次請求拿掉，換成一句說明（資料庫裡的原訊息不動）。"""
+    content = []
+    for b in msg["content"]:
+        if b.get("type") == "tool_result" and b.get("images"):
+            paths = "、".join(str(i.get("path")) for i in b["images"])
+            b = {**{k: v for k, v in b.items() if k != "images"},
+                 "output": (b.get("output") or "") + f"\n[這裡附的 {len(b['images'])} 張圖已收起，沒有再送給你（圖太多會超過服務商的請求大小上限）：{paths}。要再看就用 vision_analyze]"}
+        content.append(b)
+    return {**msg, "content": content}
+
+
+def trim_images(session_id: str, messages: list[dict], force: bool = False) -> tuple[list[dict], int]:
+    """依「收起線」拿掉舊工具圖。收起線存在 engine_state.img_before（訊息 id），只往後移，
+    所以同一段前綴每次請求都一樣。超過 IMG_MAX 張或 IMG_BUDGET 位元組才整批往後移一次；
+    force（服務商回 413）時只留最新一張。回傳 (訊息, 這次新收起幾張)。"""
+    st = store.get_session(session_id) or {}
+    es = st.get("engine_state") or {}
+    before = int(es.get("img_before") or 0)
+    carriers = []   # (訊息 id, 張數, 位元組)，新的在前
+    for m in reversed(messages):
+        if m.get("role") != "tool" or int(m.get("id") or 0) <= before:
+            continue
+        imgs = [i for b in m["content"] if b.get("type") == "tool_result" for i in (b.get("images") or [])]
+        if imgs:
+            carriers.append((int(m["id"]), len(imgs), sum(_img_b64_len(i) for i in imgs)))
+    n, size = sum(c[1] for c in carriers), sum(c[2] for c in carriers)
+    moved = 0
+    if carriers and (force or n > IMG_MAX or size > IMG_BUDGET):
+        keep_n, keep_b = (1, 0) if force else (IMG_KEEP, IMG_KEEP_BYTES)
+        kn = kb = 0
+        cut = None
+        for i, (mid, c, b) in enumerate(carriers):
+            if i and (kn + c > keep_n or (keep_b and kb + b > keep_b)):
+                cut = mid
+                break
+            kn, kb = kn + c, kb + b
+        if cut is None and force and len(carriers) == 1:
+            cut = carriers[0][0]   # 只剩一則帶圖還是太大：連它也收
+        if cut:
+            moved = sum(c for mid, c, _ in carriers if mid <= cut)
+            before = cut
+            es["img_before"] = before
+            store.update_session(session_id, engine_state=es)
+    if not before:
+        return messages, moved
+    return [_strip_tool_images(m) if m.get("role") == "tool" and int(m.get("id") or 0) <= before
+            and any(b.get("images") for b in m["content"]) else m for m in messages], moved
 
 
 __all__: list[Any] = ["run_turn", "TurnContext", "ToolContext", "new_call_id", "load_image_b64", "history"]
