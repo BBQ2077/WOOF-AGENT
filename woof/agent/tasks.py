@@ -422,6 +422,9 @@ def _track(session_id: str, coro, emit) -> asyncio.Task:
     流程裡最後一個事件（回覆的 run_end）送出時流程還沒結束，帶的 busy 是 True；
     不補這一下，前端會一直顯示「還在跑」。"""
     task = asyncio.create_task(coro)
+    # 開頭就送一下：拓展、審核在子對話跑的那段，主對話自己沒有事件，前端拿不到「流程進行中」會以為卡住
+    # （這時任務已登記在 GOAL_TASKS，送出時 broadcast 算出的 flow 是 True）
+    asyncio.get_running_loop().create_task(emit({"type": "flow_start", "session_id": session_id}))
 
     def _done(_t):
         try:

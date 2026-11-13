@@ -73,10 +73,42 @@ def _key(woof, m: dict) -> str:
 
 
 
-def _out(ext: str) -> Path:
-    d = MEDIA / datetime.now().strftime("%Y%m%d")
+def _sdir(session_id: str) -> Path:
+    sid = "".join(ch for ch in str(session_id or "") if ch.isalnum() or ch in "-_")
+    return MEDIA / (sid or "_none")
+
+
+def _out(ext: str, session_id: str = "") -> Path:
+    """生成檔放在對話自己的資料夾（data/media/<對話 id>/），刪對話時整個一起刪；要留的成品另外存到 save_to。"""
+    d = _sdir(session_id)
     d.mkdir(parents=True, exist_ok=True)
-    return d / f"{datetime.now().strftime('%H%M%S')}_{uuid.uuid4().hex[:6]}{ext}"
+    return d / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}{ext}"
+
+
+def drop(session_id: str) -> None:
+    """刪對話時呼叫：這個對話生成的圖片、影片一起刪（存到 save_to 的成品不在這裡，不受影響）。"""
+    import shutil
+
+    if session_id:
+        shutil.rmtree(_sdir(session_id), ignore_errors=True)
+
+
+def save_to(path: str, dest: str, cwd: str = "") -> str:
+    """把生成檔複製一份到成品位置：dest 是資料夾（或結尾 / \\）就用原檔名，否則當檔名。回複製後的路徑。"""
+    import shutil
+
+    d = Path(dest).expanduser()
+    if not d.is_absolute():
+        d = Path(cwd or ".") / d
+    if d.is_dir() or str(dest).endswith(("/", "\\")) or not d.suffix:
+        d.mkdir(parents=True, exist_ok=True)
+        d = d / Path(path).name
+    else:
+        d.parent.mkdir(parents=True, exist_ok=True)
+        if d.suffix.lower() != Path(path).suffix.lower():
+            d = d.with_suffix(Path(path).suffix)
+    shutil.copy2(path, d)
+    return str(d)
 
 
 def _data_uri(path: str) -> str:
@@ -265,7 +297,8 @@ async def _gemini(c: httpx.AsyncClient, m: dict, key: str, inputs: list, fmt: di
 _OAI_SIZE = {"1:1": "1024x1024", "3:2": "1536x1024", "2:3": "1024x1536"}
 
 
-async def gen_image(woof, m: dict, prompt: str, *, images: list[str] | None = None, size: str = "", ratio: str = "") -> dict:
+async def gen_image(woof, m: dict, prompt: str, *, images: list[str] | None = None, size: str = "", ratio: str = "",
+                    session_id: str = "") -> dict:
     """回 {"path", "seconds", "bytes", "params", "notes"}。images＝參考圖的本機路徑（圖生圖、多圖合成）。
     比例、解析度：呼叫時給的 → 模型設定的生成參數 → 預設；不支援的換成最接近的（notes）。"""
     base = str(m.get("base_url") or "").rstrip("/")
@@ -315,13 +348,13 @@ async def gen_image(woof, m: dict, prompt: str, *, images: list[str] | None = No
                 ext = {"image/jpeg": ".jpg", "image/webp": ".webp"}.get(g.headers.get("content-type", "").split(";")[0], ".png")
             else:
                 raise RuntimeError(f"{m.get('label', m['id'])} 沒有回傳圖片：{str(r.json())[:300]}")
-    out = _out(ext)
+    out = _out(ext, session_id)
     out.write_bytes(raw)
     return {"path": str(out), "seconds": round(time.time() - t0, 1), "bytes": len(raw), "params": p, "notes": notes}
 
 
 async def gen_video(woof, m: dict, prompt: str, *, seconds: int | None = None, aspect: str = "", resolution: str = "",
-                    progress=None, timeout: int = 900) -> dict:
+                    progress=None, timeout: int = 900, session_id: str = "") -> dict:
     """非同步任務：建立 → 查進度 → 下載 mp4。progress(pct, status) 回報進度。
     秒數、比例、解析度：呼叫時給的 → 模型設定的生成參數 → 預設；超出範圍的換成最接近的（notes）。"""
     base = str(m.get("base_url") or "").rstrip("/")
@@ -340,7 +373,7 @@ async def gen_video(woof, m: dict, prompt: str, *, seconds: int | None = None, a
             fmt["resolution"] = p["resolution"]
         async with httpx.AsyncClient(timeout=timeout) as c:
             raw, _ = await _gemini(c, m, key, [{"type": "text", "text": prompt}], fmt, "video")
-        out = _out(".mp4")
+        out = _out(".mp4", session_id)
         out.write_bytes(raw)
         return {"path": str(out), "seconds": round(time.time() - t0, 1), "bytes": len(raw), "video_seconds": sec,
                 "params": p, "notes": notes}
@@ -399,7 +432,7 @@ async def gen_video(woof, m: dict, prompt: str, *, seconds: int | None = None, a
                 else:
                     g = await c.get(f"{base}/videos/{vid}/content", headers=hdr, follow_redirects=True, timeout=300)
                 g.raise_for_status()
-                out = _out(".mp4")
+                out = _out(".mp4", session_id)
                 out.write_bytes(g.content)
                 return {"path": str(out), "seconds": round(time.time() - t0, 1), "bytes": len(g.content),
                         "video_seconds": v.get("duration") or s.get("seconds") or sec, "id": vid, "params": p, "notes": notes}

@@ -103,10 +103,24 @@ def _busy(sid: str | None) -> bool:
     return False
 
 
+def _flow(sid: str | None) -> bool:
+    """方案／目標流程還在跑、但不在回合裡也不是在等人回答：兩步之間（拓展、審核、準備下一步）。
+    前端靠它在這段空檔繼續顯示「進行中」，不然看起來像卡住。"""
+    if not sid:
+        return False
+    from woof.agent import tasks as _tasks
+
+    try:
+        return _tasks.is_running(sid) and not _tasks.has_ask(sid)
+    except Exception:
+        return False
+
+
 async def broadcast(ev: dict) -> None:
     sid = ev.get("session_id")
     if sid and "busy" not in ev:
         ev["busy"] = _busy(sid)   # 每個事件都順便告訴前端「這個對話還在不在跑」
+        ev["flow"] = _flow(sid)
     dead = []
     for ws in list(CLIENTS):
         try:
@@ -890,6 +904,7 @@ async def sessions():
     rows = store.list_sessions()
     for r in rows:
         r["busy"] = _busy(r.get("id"))
+        r["flow"] = _flow(r.get("id"))
     return rows
 
 
@@ -951,12 +966,13 @@ async def _purge_sessions(ids: list[str]) -> int:
     from . import pty, snapshot
     for x in ids:
         pty.close_session(x)
-    from . import uploads
+    from . import media, uploads
     for x in ids:
         s = store.get_session(x)
         pics = uploads.files_of(x)      # 要在刪訊息之前問，刪完就查不到誰在用
         store.delete_session(x)
         uploads.remove(pics)
+        media.drop(x)              # 這個對話生成的圖片影片（成品另存在 save_to／scope 的不受影響）
         snapshot.drop(x)
         if s:
             await REG.events.emit("on_session", "delete", s)

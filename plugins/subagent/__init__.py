@@ -144,8 +144,8 @@ async def _generate(woof, m: dict, t: dict, parent, progress) -> dict:
         if len(dirs) == 1 and dirs[0].is_dir():
             dst = dirs[0] / Path(path).name
             shutil.copy2(path, dst)
-            return f"（另存一份到 {dst}）"
-        return ""
+            return f"（成品另存一份到 {dst}）"
+        return "（存在這個對話的暫存，刪對話會一起刪；要留就在 scope 指定資料夾）"
     if media.kind_of(m) == "image":
         refs = []
         for raw in re.findall(r"[A-Za-z]:[\\/][^\s\"'<>|*?]+?\.(?:png|jpe?g|webp|gif)|[^\s\"'<>|*?:]+\.(?:png|jpe?g|webp|gif)", extra, re.I):
@@ -153,7 +153,7 @@ async def _generate(woof, m: dict, t: dict, parent, progress) -> dict:
             if fp.is_file():
                 refs.append(str(fp))
         await progress(f"用 {name} 生成圖片中…" + (f"（參考圖 {len(refs)} 張）" if refs else ""))
-        r = await media.gen_image(woof, m, prompt, images=refs, ratio=ratio)
+        r = await media.gen_image(woof, m, prompt, images=refs, ratio=ratio, session_id=parent.session_id)
         adj = f"（{'；'.join(r['notes'])}）" if r.get("notes") else ""
         return {"gen": f"已生成圖片（{name}，{r['seconds']} 秒）{adj}：{r['path']}{keep(r['path'])}\n回覆使用者時寫上 MEDIA:{r['path']} 讓介面顯示。"}
     sec = re.search(r"(\d{1,2})\s*(?:秒|s\b|sec)", text)
@@ -164,7 +164,8 @@ async def _generate(woof, m: dict, t: dict, parent, progress) -> dict:
         await progress(f"進度 {pct}%（{st}）")
 
     await progress(f"用 {name} 生成影片中（{p.get('seconds')} 秒、{p.get('ratio')}，通常 1–3 分鐘）…")
-    r = await media.gen_video(woof, m, prompt, seconds=p.get("seconds"), aspect=p.get("ratio") or "", resolution=res, progress=prog)
+    r = await media.gen_video(woof, m, prompt, seconds=p.get("seconds"), aspect=p.get("ratio") or "", resolution=res, progress=prog,
+                            session_id=parent.session_id)
     adj = f"（{'；'.join(r['notes'])}）" if r.get("notes") else ""
     return {"gen": f"已生成影片（{name}，{r['video_seconds']} 秒長）{adj}：{r['path']}{keep(r['path'])}\n回覆使用者時寫上 MEDIA:{r['path']} 讓介面顯示。"}
 

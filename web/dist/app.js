@@ -605,7 +605,7 @@ function onEvent(ev) {
   noteAct(ev);
   if (typeof ev.busy === 'boolean' && sid) {
     const s = S.sessions.find((x) => x.id === sid);
-    if (s) s.busy = ev.busy;
+    if (s) { s.busy = ev.busy; s.flow = !!ev.flow; }
     if (sid === S.sid) { renderTaskBar(); renderComposer(); }
   }
   switch (ev.type) {
@@ -2464,7 +2464,7 @@ input.addEventListener('input', autosize);
 // 每敲一個字都重設 innerHTML 會讓整顆按鈕重建（含 SVG），打字就會頓。狀態沒變就不碰 DOM。
 let sendSig = '';
 function renderSendState() {
-  const run = S.running.has(S.sid);
+  const run = isBusy(S.sid);
   const b = $('#sendBtn');
   const has = !!(input.value.trim() || S.attach.length || (S.files || []).length);
   const act = run && has ? busyAction() : null;
@@ -2483,9 +2483,19 @@ function renderSendState() {
   if ($('#steerBtn').hidden !== !steerOn) $('#steerBtn').hidden = !steerOn;
   if ($('#queueBtn').hidden !== !queueOn) $('#queueBtn').hidden = !queueOn;
 }
+// 這個對話還有事在跑：回合中，或方案／目標流程（拓展、各步驟、審核；流程裡的步驟不發 run_start，不在 S.running）
+const flowBusy = (sid) => !S.running.has(sid) && !!((S.sessions.find((x) => x.id === sid) || {}).flow);
+const isBusy = (sid) => !!sid && (S.running.has(sid) || flowBusy(sid));
 function renderComposer() {
   renderQueue(); applyLang(); renderScopePill();
-  $('#runHint').classList.toggle('on', S.running.has(S.sid));
+  const hint = $('#runHint');
+  hint.classList.toggle('on', isBusy(S.sid));
+  const gap = flowBusy(S.sid);
+  if (hint.dataset.gap !== String(gap)) {
+    hint.dataset.gap = String(gap);
+    hint.innerHTML = `<span class="spin"></span>${gap ? (uiLang() === 'en' ? 'Plan in progress · expand, steps and review take turns (quiet gaps are normal) · Esc to stop'
+      : '方案進行中 · 拓展、執行、審核輪流跑（步驟之間沒有輸出也不是卡住）· Esc 停止') : busyText(uiLang())}`;
+  }
   renderModePill();
   renderPerm();
   renderSendState();
@@ -2585,7 +2595,7 @@ async function send() {
   if (!wsSend({ type: 'send', session_id: S.sid, text: body, images: S.attach, files: upFiles })) return;
   input.value = ''; S.attach = []; S.files = []; renderAttach(); autosize();
 }
-function stop() { if (S.sid && S.running.has(S.sid)) wsSend({ type: 'stop', session_id: S.sid }); }
+function stop() { if (isBusy(S.sid)) wsSend({ type: 'stop', session_id: S.sid }); }
 // 子代理：只停那一條，不影響主對話
 function stopSub(sid) {
   wsSend({ type: 'stop', session_id: sid });
@@ -2602,7 +2612,7 @@ async function closeSub(sid) {
   if (i >= 0) closeTab(i);
   await deleteSession(sid);
 }
-$('#sendBtn').onclick = () => ((S.running.has(S.sid) && !input.value.trim() && !S.attach.length && !(S.files || []).length) ? stop() : busySubmit(false));
+$('#sendBtn').onclick = () => ((isBusy(S.sid) && !input.value.trim() && !S.attach.length && !(S.files || []).length) ? stop() : busySubmit(false));
 input.addEventListener('keydown', (e) => {
   if ($('#slashMenu').classList.contains('on') && !e.isComposing) {
     const items = $$('#slashMenu .mi');
@@ -2750,7 +2760,7 @@ function applyLang(force) {
   const l = uiLang(), hint = $('#runHint');
   if (!force && input.dataset.lang === l) return;
   input.dataset.lang = l; input.placeholder = I18N[l].ph;
-  if (hint) hint.innerHTML = `<span class="spin"></span>${busyText(l)}`;
+  if (hint) { hint.innerHTML = `<span class="spin"></span>${busyText(l)}`; delete hint.dataset.gap; }
 }
 document.addEventListener('click', (e) => {
   const bu = e.target.closest('[data-busy]');

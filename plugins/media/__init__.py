@@ -27,6 +27,16 @@ def register(woof):
         return {"output": f"沒有可用的{media.KIND_LABEL[kind]}模型：到「設定 → 模型商」加一個，"
                           f"再到「設定 → 模型用途 → 生圖・生影片」選", "is_error": True}
 
+    def keep(path: str, args: dict, tctx) -> str:
+        """save_to：成品另存一份到指定位置（刪對話不會刪）；生成檔本身跟著對話。"""
+        dest = str(args.get("save_to") or "").strip()
+        if not dest:
+            return "（存在這個對話的暫存，刪對話會一起刪；要留就用 save_to 存到專案資料夾）"
+        try:
+            return f"\n成品已存到：{media.save_to(path, dest, tctx.cwd)}"
+        except OSError as e:
+            return f"\n存到 {dest} 失敗：{e}"
+
     async def image_generate(args: dict, tctx) -> dict:
         m = pick("image")
         if not m:
@@ -44,9 +54,9 @@ def register(woof):
             refs.append(str(fp))
         await tctx.output(f"用 {m.get('label', m['id'])} 生成圖片中…\n")
         r = await media.gen_image(woof, m, prompt, images=refs, size=str(args.get("size") or ""),
-                                  ratio=str(args.get("ratio") or ""))
+                                  ratio=str(args.get("ratio") or ""), session_id=tctx.session_id)
         adj = f"（{'；'.join(r['notes'])}）" if r.get("notes") else ""
-        return {"output": f"已生成（{m.get('label', m['id'])}，{r['seconds']} 秒）{adj}：{r['path']}\n"
+        return {"output": f"已生成（{m.get('label', m['id'])}，{r['seconds']} 秒）{adj}：{r['path']}{keep(r['path'], args, tctx)}\n"
                           f"回覆使用者時寫上 MEDIA:{r['path']} 讓介面顯示這張圖。"}
 
     async def video_generate(args: dict, tctx) -> dict:
@@ -62,9 +72,9 @@ def register(woof):
             await tctx.output(f"進度 {pct}%（{st}）\n")
 
         r = await media.gen_video(woof, m, prompt, seconds=args.get("seconds"), aspect=str(args.get("aspect_ratio") or ""),
-                                  resolution=str(args.get("resolution") or ""), progress=prog)
+                                  resolution=str(args.get("resolution") or ""), progress=prog, session_id=tctx.session_id)
         adj = f"（{'；'.join(r['notes'])}）" if r.get("notes") else ""
-        return {"output": f"已生成影片（{m.get('label', m['id'])}，{r['video_seconds']} 秒長）{adj}：{r['path']}\n"
+        return {"output": f"已生成影片（{m.get('label', m['id'])}，{r['video_seconds']} 秒長）{adj}：{r['path']}{keep(r['path'], args, tctx)}\n"
                           f"回覆使用者時寫上 MEDIA:{r['path']} 讓介面顯示這段影片。"}
 
     woof.add_tool(
@@ -76,6 +86,7 @@ def register(woof):
             "ratio": {"type": "string", "description": "長寬比，例如 16:9；不填用設定的預設，不支援的換成最接近的"},
             "size": {"type": "string", "description": "解析度，例如 1K、2K；不填用設定的預設"},
             "images": {"type": "array", "items": {"type": "string"}, "description": "參考圖的本機路徑（選填）"},
+            "save_to": {"type": "string", "description": "要留的成品存到哪（資料夾或檔名，例如專案資料夾）；不填只放對話暫存，刪對話會一起刪"},
         }, "required": ["prompt"]},
         image_generate,
     )
@@ -87,6 +98,7 @@ def register(woof):
             "seconds": {"type": "integer", "description": "長度（秒）；不填用設定的預設，超出模型範圍會自動調整"},
             "aspect_ratio": {"type": "string", "description": "例如 16:9、9:16；不填用設定的預設"},
             "resolution": {"type": "string", "description": "例如 720p；不填用設定的預設"},
+            "save_to": {"type": "string", "description": "要留的成品存到哪（資料夾或檔名，例如專案資料夾）；不填只放對話暫存，刪對話會一起刪"},
         }, "required": ["prompt"]},
         video_generate,
     )

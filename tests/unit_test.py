@@ -1686,7 +1686,7 @@ class VisionModeAndFlow(unittest.TestCase):
             await asyncio.sleep(0.05)
 
         asyncio.run(go())
-        self.assertEqual(got, [{"type": "flow_end", "session_id": "flowtest"}])
+        self.assertEqual(got, [{"type": "flow_start", "session_id": "flowtest"}, {"type": "flow_end", "session_id": "flowtest"}])
 
     def test_subagent_end_event(self):
         from unittest import mock
