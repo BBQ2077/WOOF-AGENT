@@ -350,7 +350,7 @@ async def _run_step(ctx, session_id: str, objective: str, step: str, idx: int, t
 
     plan_txt = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(plan or [step]))
     if notes:
-        plan_txt += "\n【拓展模型的提醒】" + notes + "\n（提醒裡點名要查的，輪到相關的步驟就先用 web_search／web_extract 真的查，不要靠猜或反覆試）"
+        plan_txt += "\n【方案的提醒】" + notes + "\n（提醒裡點名要查的，輪到相關的步驟就先用 web_search／web_extract 真的查，不要靠猜或反覆試）"
     text = _prompt("goal_step", objective=objective, n=idx + 1, total=total, step=step, plan=plan_txt)
     m = store.add_message(session_id, "user", [{"type": "text", "text": text}], meta=internal.meta("goal_step"))
     await emit({"type": "message", "session_id": session_id, "message": m})
@@ -590,9 +590,13 @@ def stop_goal(session_id: str) -> bool:
     return False
 
 
-async def review_plan(parent, objective: str, steps: list[str]) -> tuple[bool, str]:
+async def review_plan(parent, objective: str, steps: list[str], prev: str = "") -> tuple[bool, str]:
+    """prev＝上一版被打回的意見：先看那些改到了沒，不要每版都挑新的小毛病，不然永遠過不了。"""
     plan = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(steps))
     goal = _prompt("plan_review") + _prompt("plan_review_body", objective=objective, plan=plan)
+    if prev:
+        goal += (f"\n\n【上一版被打回的意見】{prev}\n這版是照上面的意見改的。先看這些有沒有改到；"
+                 "改到了就只擋照做一定會失敗的新問題，其他小地方放行，執行時再補。")
     r = await _sub(parent, goal, "方案審核：", "審核模型：方案審核", "review_request")
     if r is None:
         return True, "審核超時，照這版做"
@@ -645,7 +649,7 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
     rounds = flow_settings()["plan_rounds"]
 
     try:
-        approved, base = False, None
+        approved, base, prev = False, None, None
         since = _last_mid(session_id)
         for rnd in range(1, rounds + 1):
             # gate／since 存著：規劃、拓展、審核途中被打斷（程式重開、停止），「繼續」會從規劃重來，不會變成沒有審核的一般接續
@@ -665,9 +669,10 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
                 return
             if gate == "expand":
                 # 思維拓展：這個模型容易「你說 A 就只做 A」，先把它補成完整的一套，再交給審核模型看過才動手
-                exp, notes = await expand_plan(ctx, objective, base, feedback)
+                # 打回時在上一版拓展上修，不從原本的步驟重來（重來會把上一輪改好的又丟掉，永遠修不完）
+                exp, notes = await expand_plan(ctx, objective, prev or base, feedback)
                 if exp:
-                    steps = exp
+                    steps = prev = exp
                 if notes:
                     await emit({"type": "notice", "session_id": session_id,
                                 "text": "拓展模型（子代理）補的：" + notes})
@@ -676,7 +681,7 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
             plan_txt = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(steps))
             if gate in ("model", "expand"):
                 # 對抗、拓展都要審：一步的方案也審（漏步驟、憑空假設的前提，一步一樣會出事）
-                ok, reason = await review_plan(ctx, objective, steps)
+                ok, reason = await review_plan(ctx, objective, steps, feedback)
                 if ok:
                     await emit({"type": "notice", "session_id": session_id,
                                 "text": f"審核模型（子代理）看過第 {rnd} 版方案（{len(steps)} 步）：通過"
@@ -706,9 +711,11 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
                 await emit({"type": "notice", "session_id": session_id, "text": "已取消，沒有動手"})
                 return
             feedback = "使用者要換一個做法"
-        if not approved and auto:
+        if not approved and (auto or gate in ("model", "expand")):
+            # 對抗、拓展是交給模型自己把關的模式：版數用完不停下來問人，照最後這版做，最後的審核意見交給執行的模型一起補
+            notes = (notes + "\n" if notes else "") + f"方案審核最後還沒過的地方（做的時候一起補上）：{feedback}"
             await emit({"type": "notice", "session_id": session_id,
-                        "text": f"提了 {rounds} 版，審核（{gate_name}）都沒過；目標不停下來，照最後這版做"})
+                        "text": f"提了 {rounds} 版，審核（{gate_name}）都沒過；不停下來，照最後這版做，最後的審核意見交給執行的模型一起補"})
         elif not approved:
             ans = await ask(ctx, f"提了 {rounds} 版，審核（{gate_name}）都沒過，最後一次意見：{feedback}。要照最後這版做，還是取消？",
                             ["照做", "取消"])

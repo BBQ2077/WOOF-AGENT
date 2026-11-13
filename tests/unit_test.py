@@ -1584,8 +1584,8 @@ class FlowLimits(unittest.TestCase):
         self.assertEqual((c["plan"], c["review"], c["ask"]), (2, 2, 0))
         self.assertEqual(c["goal"], ["一", "二"])
         c = self._gated(auto=False)
-        self.assertEqual((c["plan"], c["review"], c["ask"]), (2, 2, 1))
-        self.assertIsNone(c["goal"])
+        self.assertEqual((c["plan"], c["review"], c["ask"]), (2, 2, 0))   # 對抗模式版數用完也不問人
+        self.assertEqual(c["goal"], ["一", "二"])
 
     def test_expand_does_not_ask(self):
         from unittest import mock
@@ -2577,7 +2577,7 @@ class ExpandGate(unittest.TestCase):
     def test_wiring(self):
         src = open(str(ROOT / "woof/agent/tasks.py"), encoding="utf-8").read()
         self.assertIn('if gate == "expand":', src)
-        self.assertIn("await expand_plan(ctx, objective, base, feedback)", src)
+        self.assertIn("await expand_plan(ctx, objective, prev or base, feedback)", src)
         self.assertIn('if gate in ("model", "expand"):', src)   # 拓展完也要審核
         sv = open(str(ROOT / "woof/server.py"), encoding="utf-8").read()
         self.assertIn('("off", "human", "model", "expand")', sv)
