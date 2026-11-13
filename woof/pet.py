@@ -346,11 +346,18 @@ def peek(session_id: str, c: dict | None = None) -> str:
         t = est_tokens(body)
         if used + t > budget and picked:
             break
-        picked.append(f"{'使用者' if m['role'] == 'user' else '助理'}：{body}")
+        picked.append(f"{'他' if m['role'] == 'user' else 'AI 助手'}：{body}")
         used += t
         if len(picked) >= 10:
             break
-    return "\n".join(reversed(picked))
+    if not picked:
+        return ""
+    return WHO_NOTE + "\n" + "\n".join(reversed(picked))
+
+
+# 工作區裡兩個角色要分清楚：寵物把助手的話當成他說的，就會叫他替助手認錯（「好啦我眼殘」）
+WHO_NOTE = ("（「他：」是他本人打的字；「AI 助手：」是幫他做事的另一個 AI 說的話、做的事，不是他。"
+            "回報錯、吹牛被抓包、做壞的是 AI 助手，不要算到他頭上。）")
 
 
 def _fingerprint(session_id: str) -> str:
@@ -472,6 +479,9 @@ def build_system(c: dict | None = None, mode: str = "glance", hint: str = "") ->
                   "- 你在旁邊看他做事，他沒有叫你。真的有話才講，一則、一句；沒什麼好說就 say 給空陣列（不吵他）。",
                   "- 同一件事不要重複講；你上次講過什麼，看你自己的對話紀錄。",
                   "- 這時候 react 一律留空（他沒有對你說話）。"]
+    if mode != "nudge" and MODES[c.get("mode") or "mix"]["peek"]:
+        lines.append("- 工作區裡有兩個人：他本人，和幫他做事的 AI 助手。助手出錯、謊報被抓包，要吐槽就吐槽「那個助手」，"
+                     "你跟他站同一邊；不要把助手的話當成他說的，也不要叫他替助手認錯。")
 
     now = [f"- 現在：{_when()}"]
     if last_user:
@@ -488,7 +498,7 @@ def build_system(c: dict | None = None, mode: str = "glance", hint: str = "") ->
               "只輸出一行 JSON，別的字都不要：",
               '{"say":["第一則","（想再講才加第二則）"],"face":"gentle","mood":"心疼","react":"","sug":"他最可能回你的一句"}',
               "- sug：他看到你的話之後，最可能直接點來回你的一句；十二個字內、用他自己的口氣，像隨手打的，"
-              "繁體中文，不要捏造他沒提過的東西。"]
+              "繁體中文，不要捏造他沒提過的東西。你在講 AI 助手的事時，sug 是他對那件事的反應，不是他在認錯。"]
     if memo:
         lines += ["", "## 你記得的事", memo]
     return "\n".join(lines)
@@ -777,6 +787,7 @@ async def _fill_sug(model: dict, say: str, context: str = "") -> list:
     prompt = ("你剛剛對使用者說了：「" + say.replace("\n", " ") + "」\n"
               + (("他最近的狀況：\n" + context[:600] + "\n") if context else "")
               + "使用者看到這句話，最可能直接回哪一句？十二個字內、用他的口氣、像隨手打的。"
+              + "你講的如果是 AI 助手做錯的事，他是跟你一起看熱鬧的人，不是被你吐槽的人。"
                 '只輸出 JSON 陣列，例如 ["好啦我去躺一下"]')
     try:
         raw = await _call(model, "你只輸出 JSON 陣列，不要說明。",
