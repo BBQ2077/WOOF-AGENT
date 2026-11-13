@@ -16,6 +16,10 @@ dependencies = [
     "pillow>=10",
     "tomli-w>=1.0",
     "pywinpty>=3.1; sys_platform == 'win32'",
+    # 給 agent 在終端機跑資料處理用（終端工具的說明會告訴模型已裝這幾個）
+    "numpy>=2",
+    "pandas>=2",
+    "openpyxl>=3.1",
 ]
 
 [tool.uv]

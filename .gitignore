@@ -1,5 +1,7 @@
 # 環境與套件
 .venv/
+# Release 包附的 Python
+/python/
 node_modules/
 __pycache__/
 *.pyc

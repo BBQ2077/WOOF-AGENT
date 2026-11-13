@@ -5,10 +5,15 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 
-// 專案根目錄：開發時是 desktop 的上一層；打包成 exe 後，從 exe 所在位置往上找有 woof\ 與 .venv\ 的資料夾
+// 專案根目錄：開發時是 desktop 的上一層；打包成 exe 後，從 exe 所在位置往上找有 woof\ 與 Python 的資料夾
 // （也可用環境變數 WOOF_ROOT 或 exe 旁的 woof-root.txt 指定）
+// Python：自己 uv sync 建的 .venv\ 優先；沒有就用 Release 包附的 python\
+function pyOf(d) {
+  for (const p of [path.join(d, '.venv', 'Scripts', 'python.exe'), path.join(d, 'python', 'python.exe')]) if (fs.existsSync(p)) return p;
+  return '';
+}
 function findRoot() {
-  const ok = (d) => d && fs.existsSync(path.join(d, 'woof', '__main__.py')) && fs.existsSync(path.join(d, '.venv', 'Scripts', 'python.exe'));
+  const ok = (d) => d && fs.existsSync(path.join(d, 'woof', '__main__.py')) && !!pyOf(d);
   if (!app.isPackaged) return path.resolve(__dirname, '..');
   const exeDir = path.dirname(process.execPath);
   const hint = path.join(exeDir, 'woof-root.txt');
@@ -17,7 +22,7 @@ function findRoot() {
   return cands.find(ok) || null;
 }
 const ROOT = findRoot();
-const PY = ROOT ? path.join(ROOT, '.venv', 'Scripts', 'python.exe') : '';
+const PY = ROOT ? (pyOf(ROOT) || path.join(ROOT, '.venv', 'Scripts', 'python.exe')) : '';
 const BRAND = path.join(__dirname, 'brand');
 const ICON = path.join(BRAND, process.platform === 'win32' ? 'icon.ico' : 'icon.png');
 app.setPath('userData', path.join(app.getPath('appData'), 'woof-desktop'));
@@ -214,16 +219,16 @@ function killBackend() {
   } catch {}
 }
 
-// 只用 WOOF 自己的 .venv：清掉從外部繼承的 Python 環境變數
+// 只用 WOOF 自己的 Python：清掉從外部繼承的 Python 環境變數
 function cleanEnv() {
-  const env = { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' };
+  const env = { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1', PYTHONNOUSERSITE: '1' };
   for (const k of ['PYTHONPATH', 'PYTHONHOME', 'VIRTUAL_ENV', 'PYTHONSTARTUP', 'PYTHONEXECUTABLE', '__PYVENV_LAUNCHER__', 'CONDA_PREFIX']) delete env[k];
   env.WOOF_PROFILE = currentProfile();
   return env;
 }
 function startBackend() {
   return new Promise((resolve, reject) => {
-    if (!ROOT) return reject(new Error(`找不到 WOOF 專案資料夾（需要有 woof\\ 與 .venv\\）。把 WOOF.exe 放在專案資料夾裡，或在 exe 旁放 woof-root.txt 寫上專案路徑。`));
+    if (!ROOT) return reject(new Error(`找不到 WOOF 專案資料夾（需要有 woof\\ 與 .venv\\ 或 python\\）。把 WOOF.exe 放在專案資料夾裡，或在 exe 旁放 woof-root.txt 寫上專案路徑。`));
     if (!fs.existsSync(PY)) return reject(new Error(`找不到 Python 環境：${PY}`));
     bootStatus('正在啟動後端…');
     backend = spawn(PY, ['-m', 'woof', '--token', TOKEN, '--parent-pid', String(process.pid)], {

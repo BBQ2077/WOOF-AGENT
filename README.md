@@ -2,11 +2,26 @@
 
 個人 AI agent 桌面程式。核心很小，模型、工具、記憶都是 `plugins/` 底下的插件。
 
+## 下載（不用裝 Python、Node）
+
+到 **[Releases](https://github.com/BBQ2077/WOOF-AGENT/releases)** 下載兩個 zip，**解壓到同一個資料夾**：
+
+| 檔案 | 內容 | 什麼時候要重新下載 |
+|---|---|---|
+| `WOOF-A-runtime-*.zip` | 執行環境：`python\`（Python 3.14 與所有套件）、`release\WOOF-win32-x64\`（桌面外殼） | 很少；只有 Python、套件或 Electron 升級時 |
+| `WOOF-B-app-*.zip` | 程式本體：`woof\`、`plugins\`、`web\` 等，與本倉庫同一版 | 每次更新 |
+
+更新時通常只要下載新的 B 包覆蓋舊檔；Release 說明會寫要搭配哪一版 A 包。你的對話、設定、金鑰都在 `data\`、`config.toml`、`keys.toml`，B 包裡沒有這些，覆蓋不會動到。
+
+也可以用 `git clone` 代替 B 包，再把 A 包解壓進 clone 下來的資料夾（`python/`、`release/` 已在 `.gitignore`），之後用 `git pull` 更新。
+
+需要 Windows 10／11 64 位元。終端機工具用 Git Bash，請先裝 [Git for Windows](https://git-scm.com/download/win)。
+
 ## 開啟
 
-雙擊 `WOOF.vbs`。關掉視窗會縮到系統匣；要完全結束，在系統匣圖示按右鍵 →「結束 WOOF」，後端和它開的所有程序會一起關掉。
+雙擊 `WOOF.vbs`（或 `release\WOOF-win32-x64\WOOF.exe`，可以釘到工作列）。第一次開啟到「設定 → 服務商」填 API key。關掉視窗會縮到系統匣；要完全結束，在系統匣圖示按右鍵 →「結束 WOOF」，後端和它開的所有程序會一起關掉。
 
-## 第一次安裝
+## 從原始碼安裝
 
 ```bash
 # Python 後端
