@@ -1507,6 +1507,150 @@ class AskSkip(unittest.TestCase):
             loop.close()
 
 
+class FlowLimits(unittest.TestCase):
+    """方案模式：打回／補做有上限、審核有時間上限、/goal 跟著模式走且到上限不停下來等。"""
+
+    def test_settings_clamped(self):
+        from unittest import mock
+
+        from woof.agent import tasks
+
+        with mock.patch("woof.config.load_config", return_value={"flow": {"plan_rounds": 99, "fix_rounds": -3, "review_timeout": "x", "goal_gate": False}}):
+            f = tasks.flow_settings()
+        self.assertEqual((f["plan_rounds"], f["fix_rounds"], f["review_timeout"], f["goal_gate"]), (10, 0, 300, False))
+        with mock.patch("woof.config.load_config", return_value={}):
+            self.assertEqual(tasks.flow_settings(), tasks.FLOW_DEFAULTS)
+
+    def test_review_timeout_gives_up(self):
+        from unittest import mock
+
+        from woof.agent import tasks
+
+        got = []
+
+        class Ctx:
+            session_id = "s"
+
+            async def emit(self, ev):
+                got.append(ev)
+
+        async def slow(*a, **k):
+            await asyncio.sleep(5)
+
+        with mock.patch.object(tasks, "flow_settings", return_value={"review_timeout": 0.2}), \
+                mock.patch("woof.agent.loop.run_subagent", slow):
+            r = asyncio.run(tasks._sub(Ctx(), "g", "審核：", "審核模型：x", "review_request"))
+        self.assertIsNone(r)
+        self.assertIn("不等了", got[0]["text"])
+
+    def _gated(self, auto):
+        from unittest import mock
+
+        from woof.agent import tasks
+        from woof.loader import REG
+
+        s = store.create_session("m", None, "flow")
+        calls = {"plan": 0, "review": 0, "ask": 0, "goal": None}
+
+        async def plan(*a, **k):
+            calls["plan"] += 1
+            return ["一", "二"]
+
+        async def review(*a, **k):
+            calls["review"] += 1
+            return False, "不行"
+
+        async def ask(*a, **k):
+            calls["ask"] += 1
+            return "取消"
+
+        async def goal(sid, obj, emit, steps=None):
+            calls["goal"] = steps
+
+        async def emit(ev):
+            pass
+
+        flow = dict(tasks.FLOW_DEFAULTS, plan_rounds=2)
+        with mock.patch.object(REG, "model_cfg", return_value={"id": "m", "provider": "fakep"}), \
+                mock.patch.dict(REG.providers, {"fakep": object()}), \
+                mock.patch.object(tasks, "flow_settings", return_value=flow), \
+                mock.patch.object(tasks, "plan_steps", plan), mock.patch.object(tasks, "review_plan", review), \
+                mock.patch.object(tasks, "ask", ask), mock.patch.object(tasks, "run_goal", goal):
+            asyncio.run(tasks.run_gated(s["id"], "做事", emit, "model", auto=auto))
+        return calls
+
+    def test_plan_rounds_capped_and_goal_keeps_going(self):
+        c = self._gated(auto=True)
+        self.assertEqual((c["plan"], c["review"], c["ask"]), (2, 2, 0))
+        self.assertEqual(c["goal"], ["一", "二"])
+        c = self._gated(auto=False)
+        self.assertEqual((c["plan"], c["review"], c["ask"]), (2, 2, 1))
+        self.assertIsNone(c["goal"])
+
+    def test_expand_does_not_ask(self):
+        from unittest import mock
+
+        from woof.agent import tasks
+        from woof.loader import REG
+
+        s = store.create_session("m", None, "expand")
+        seen = {"ask": 0, "goal": None}
+
+        async def plan(*a, **k):
+            return ["一", "二"]
+
+        async def expand(*a, **k):
+            return ["一", "二", "三"], "補了三"
+
+        async def ask(*a, **k):
+            seen["ask"] += 1
+            return "取消"
+
+        async def goal(sid, obj, emit, steps=None):
+            seen["goal"] = steps
+
+        async def emit(ev):
+            pass
+
+        with mock.patch.object(REG, "model_cfg", return_value={"id": "m", "provider": "fakep"}), \
+                mock.patch.dict(REG.providers, {"fakep": object()}), \
+                mock.patch.object(tasks, "plan_steps", plan), mock.patch.object(tasks, "expand_plan", expand), \
+                mock.patch.object(tasks, "ask", ask), mock.patch.object(tasks, "run_goal", goal):
+            asyncio.run(tasks.run_gated(s["id"], "做事", emit, "expand"))
+        self.assertEqual(seen, {"ask": 0, "goal": ["一", "二", "三"]})
+
+    def test_goal_follows_gate(self):
+        from unittest import mock
+
+        from woof.agent import tasks
+
+        s = store.create_session("m", None, "goalgate")
+        store.update_session(s["id"], engine_state={"gate": "expand"})
+        seen = {}
+
+        async def gated(sid, obj, emit, gate, auto=False):
+            seen["gated"] = (gate, auto)
+
+        async def plain(sid, obj, emit, steps=None):
+            seen["plain"] = True
+
+        async def emit(ev):
+            pass
+
+        async def go(flag):
+            with mock.patch.object(tasks, "run_gated", gated), mock.patch.object(tasks, "run_goal", plain), \
+                    mock.patch.object(tasks, "flow_settings", return_value=dict(tasks.FLOW_DEFAULTS, goal_gate=flag)):
+                tasks.start_goal(s["id"], "x", emit)
+                await tasks.GOAL_TASKS[s["id"]]
+                await asyncio.sleep(0.01)
+
+        asyncio.run(go(True))
+        self.assertEqual(seen, {"gated": ("expand", True)})
+        seen.clear()
+        asyncio.run(go(False))
+        self.assertEqual(seen, {"plain": True})
+
+
 class VisionModeAndFlow(unittest.TestCase):
     """看圖三種：自動（被拒才記住）／手動能看（蓋過自動偵測）／手動不能看；方案流程結束要補送事件；每步速度。"""
 
@@ -1543,6 +1687,27 @@ class VisionModeAndFlow(unittest.TestCase):
 
         asyncio.run(go())
         self.assertEqual(got, [{"type": "flow_end", "session_id": "flowtest"}])
+
+    def test_subagent_end_event(self):
+        from unittest import mock
+
+        from woof.agent import loop
+
+        got = []
+
+        class Ctx:
+            session_id = "kid"
+
+            async def emit(self, ev):
+                got.append(ev)
+
+        async def fake(ctx):
+            self.assertIn("kid", loop.AGENT_RUNS)
+
+        with mock.patch.object(loop, "run_model_loop", fake):
+            asyncio.run(loop._drive(Ctx()))
+        self.assertNotIn("kid", loop.AGENT_RUNS)
+        self.assertEqual(got, [{"type": "flow_end", "session_id": "kid"}])
 
     def test_speed_meta(self):
         from woof.agent.loop import _speed

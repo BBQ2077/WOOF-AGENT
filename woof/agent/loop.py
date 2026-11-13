@@ -1088,6 +1088,11 @@ async def _drive(ctx: TurnContext) -> None:
         await run_model_loop(ctx)
     finally:
         AGENT_RUNS.discard(ctx.session_id)
+        # 子代理最後一個事件送出時還在 AGENT_RUNS（busy=True），收尾補一個，前端才不會一直顯示「還在跑：審核…」
+        try:
+            await asyncio.shield(ctx.emit({"type": "flow_end", "session_id": ctx.session_id}))
+        except Exception:
+            pass
 
 
 async def run_subagent(parent: TurnContext, goal: str, context: str = "", model_id: str = "",

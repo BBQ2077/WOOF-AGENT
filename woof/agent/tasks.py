@@ -23,7 +23,43 @@ TODO_STATUS = ("pending", "doing", "done", "skipped", "failed")
 PLAN_TOOLS = {"write_file", "patch", "terminal", "process"}
 ASKS: dict[str, dict] = {}
 GOAL_TASKS: dict[str, asyncio.Task] = {}
-PLAN_ROUNDS = 3  # 方案最多提幾版（模型審核打回、或使用者要求重提）
+PLAN_ROUNDS = 3  # 方案最多提幾版（模型審核打回、或使用者要求重提）；設定 [flow] plan_rounds 可改
+FLOW_DEFAULTS = {"plan_rounds": PLAN_ROUNDS, "fix_rounds": 1, "review_timeout": 300, "goal_gate": True}
+FLOW_LIMITS = {"plan_rounds": (1, 10), "fix_rounds": (0, 5), "review_timeout": (0, 3600)}
+
+
+def flow_settings() -> dict:
+    """方案模式的上限（設定 → 方案模式，存在 config.toml [flow]）：
+    plan_rounds 方案最多提幾版；fix_rounds 做完驗收後最多補幾輪；review_timeout 每次審核／拓展最多等幾秒（0＝不限）；
+    goal_gate /goal 是否照對話選的方案模式走。"""
+    from woof.config import load_config
+
+    raw = (load_config().get("flow") or {})
+    out = dict(FLOW_DEFAULTS)
+    for k, (lo, hi) in FLOW_LIMITS.items():
+        try:
+            out[k] = max(lo, min(hi, int(raw.get(k, out[k]))))
+        except (TypeError, ValueError):
+            pass
+    if "goal_gate" in raw:
+        out["goal_gate"] = bool(raw["goal_gate"])
+    return out
+
+
+async def _sub(ctx, goal: str, label: str, title: str, kind: str) -> dict | None:
+    """跑審核／拓展子代理，超過 review_timeout 就放棄（回 None），流程照目前這版往下走，不會卡死。"""
+    from woof.agent.loop import run_subagent
+
+    lim = flow_settings()["review_timeout"]
+    coro = run_subagent(ctx, goal, "", "", None, label, title_hint=title, kind=kind)
+    if not lim:
+        return await coro
+    try:
+        return await asyncio.wait_for(coro, timeout=lim)
+    except asyncio.TimeoutError:
+        await ctx.emit({"type": "notice", "session_id": ctx.session_id,
+                        "text": f"{title.split('：')[0]}（子代理）超過 {lim} 秒沒結論，這次不等了，照目前這版繼續"})
+        return None
 
 
 
@@ -234,13 +270,12 @@ def _parse_check(ans: str) -> tuple[bool, list[str], str]:
 
 
 async def final_check(ctx, session_id: str, objective: str, steps: list[str], emit) -> tuple[bool, list[str]]:
-    """全部跑完只驗一次：目標真的做到了嗎。回（有沒有過, 缺什麼）。"""
-    from woof.agent.loop import run_subagent
-
+    """全部跑完驗一次：目標真的做到了嗎。回（有沒有過, 缺什麼）。"""
     plan = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(steps))
     goal = _prompt("review") + _prompt("review_body", objective=objective, plan=plan, report=_recent_report(session_id))
-    r = await run_subagent(ctx, goal, "", "", None, "對抗檢查：",
-                           title_hint=f"審核模型：{objective.strip()[:20]}", kind="review_request")
+    r = await _sub(ctx, goal, "對抗檢查：", f"審核模型：{objective.strip()[:20]}", "review_request")
+    if r is None:
+        return False, []
     ok, gaps, why = _parse_check(r.get("answer") or "")
     if not ok and not gaps and why:
         gaps = [why[:120]]
@@ -275,6 +310,8 @@ async def run_goal(session_id: str, objective: str, emit, steps: list[str] | Non
         await emit({"type": "notice", "session_id": session_id, "text": "目標需要 API 型模型，請換一個模型"})
         return
     _save(session_id, goal={"objective": objective, "status": "planning", "at": time.time()})
+    ctx = TurnContext(store.get_session(session_id), model_cfg,
+                      (session or {}).get("effort") or model_cfg.get("default_effort"), emit)
     try:
         if steps is None:
             steps = await plan_steps(model_cfg, objective)
@@ -289,8 +326,6 @@ async def run_goal(session_id: str, objective: str, emit, steps: list[str] | Non
         items = set_todos(session_id, [{"text": s, "status": "pending"} for s in steps])
         _save(session_id, goal={"objective": objective, "status": "running", "at": time.time()})
         await _push_todos(emit, session_id, items)
-        ctx = TurnContext(store.get_session(session_id), model_cfg,
-                          (session or {}).get("effort") or model_cfg.get("default_effort"), emit)
         failed = 0
         for i, step in enumerate(steps):
             items[i]["status"] = "doing"
@@ -303,24 +338,28 @@ async def run_goal(session_id: str, objective: str, emit, steps: list[str] | Non
             _save(session_id, todos=items)
             await _push_todos(emit, session_id, items)
 
-        # 最後只驗一次：真的做到了嗎；有缺口就補一輪，不再無限重試。
-        # 走到這裡代表使用者按了方案／對抗、而且真的拆了步驟，就一定要驗一次；
+        # 做完驗一次：真的做到了嗎；有缺口就補，最多補 fix_rounds 輪（設定 → 方案模式），不會無限打回。
         # 純問答在前面 steps 為空時就 return 了，不會走到這。
+        fix_max = flow_settings()["fix_rounds"]
         ok, gaps = await final_check(ctx, session_id, objective, steps, emit)
-        if not ok and gaps:
+        for rnd in range(1, fix_max + 1):
+            if ok or not gaps:
+                break
             await emit({"type": "notice", "session_id": session_id,
-                        "text": "審核模型（子代理）看過，認為還缺：" + "；".join(gaps)})
+                        "text": f"審核模型（子代理）看過，認為還缺（補第 {rnd}/{fix_max} 輪）：" + "；".join(gaps)})
             fixed = await _run_step(ctx, session_id, objective, "只補這些缺口：" + "；".join(gaps),
                                     len(steps), len(steps), emit)
-            if fixed:
-                ok, gaps = await final_check(ctx, session_id, objective, steps, emit)
+            if not fixed:
+                break
+            ok, gaps = await final_check(ctx, session_id, objective, steps, emit)
 
         status = "done" if ok else ("partial" if failed < len(steps) else "error")
         _save(session_id, goal={"objective": objective, "status": status, "at": time.time()})
         if ok:
             msg = "做完了。審核模型（子代理）看過，沒找到沒做到的地方。"
         elif gaps:
-            msg = "做完了，但審核模型（子代理）認為還有沒過的：" + "；".join(gaps)
+            msg = (f"做完了，補了 {fix_max} 輪已到上限，審核模型（子代理）認為還有沒過的：" if fix_max
+                   else "做完了（設定不補做），審核模型（子代理）認為還有沒過的：") + "；".join(gaps)
         else:
             msg = "做完了。審核模型（子代理）沒回出可用的判斷，建議你自己看一眼結果。"
         await emit({"type": "notice", "session_id": session_id, "text": msg})
@@ -354,10 +393,17 @@ def _track(session_id: str, coro, emit) -> asyncio.Task:
 
 
 def start_goal(session_id: str, objective: str, emit) -> None:
+    """/goal：對話選了方案模式（人工／對抗／拓展）且設定 goal_gate 開著，就先走那個模式再照做；
+    目標是放著讓它自己跑的，審核打回到上限或你沒回應時照最後一版做，不會停在那邊等。"""
     t = GOAL_TASKS.get(session_id)
     if t and not t.done():
         raise RuntimeError("這個對話已經有目標在執行，先用 /goal stop 停止")
-    GOAL_TASKS[session_id] = _track(session_id, run_goal(session_id, objective, emit), emit)
+    gate = ((store.get_session(session_id) or {}).get("engine_state") or {}).get("gate") or "off"
+    if gate in ("human", "model", "expand") and flow_settings()["goal_gate"]:
+        coro = run_gated(session_id, objective, emit, gate, auto=True)
+    else:
+        coro = run_goal(session_id, objective, emit)
+    GOAL_TASKS[session_id] = _track(session_id, coro, emit)
 
 
 def stop_goal(session_id: str) -> bool:
@@ -369,12 +415,11 @@ def stop_goal(session_id: str) -> bool:
 
 
 async def review_plan(parent, objective: str, steps: list[str]) -> tuple[bool, str]:
-    from woof.agent.loop import run_subagent
-
     plan = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(steps))
     goal = _prompt("plan_review") + _prompt("plan_review_body", objective=objective, plan=plan)
-    r = await run_subagent(parent, goal, "", "", None, "方案審核：",
-                           title_hint=f"審核模型：方案審核", kind="review_request")
+    r = await _sub(parent, goal, "方案審核：", "審核模型：方案審核", "review_request")
+    if r is None:
+        return True, "審核超時，照這版做"
     found = re.findall(r"\{[^{}]*\"pass\"[^{}]*\}", r.get("answer") or "")
     if not found:
         return False, "方案審核回覆格式不對"
@@ -387,12 +432,11 @@ async def review_plan(parent, objective: str, steps: list[str]) -> tuple[bool, s
 
 async def expand_plan(parent, objective: str, steps: list[str]) -> tuple[list[str], str]:
     """「方案・拓展」：把 A 補成 A/B/C/D 一整套，並點名哪些該先查。回（步驟, 一句話說明）。"""
-    from woof.agent.loop import run_subagent
-
     plan = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(steps))
     goal = _prompt("expand") + _prompt("expand_body", objective=objective, plan=plan)
-    r = await run_subagent(parent, goal, "", "", None, "思維拓展：",
-                           title_hint="拓展模型", kind="expand_request")
+    r = await _sub(parent, goal, "思維拓展：", "拓展模型：思維拓展", "expand_request")
+    if r is None:
+        return [], ""
     ans = r.get("answer") or ""
     found = re.findall(r"\{[\s\S]*?\}", ans)
     for raw in reversed(found):
@@ -406,10 +450,12 @@ async def expand_plan(parent, objective: str, steps: list[str]) -> tuple[list[st
     return [], ""
 
 
-async def run_gated(session_id: str, objective: str, emit, gate: str) -> None:
-    """先提方案：規劃（1～5 步）→ 人工核准／模型審核／思維拓展 → 照步驟做 → 最後對抗檢查一次。
+async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool = False) -> None:
+    """先提方案：規劃（1～5 步）→ 人工核准／模型審核／思維拓展 → 照步驟做 → 最後對抗檢查。
 
     gate：human（人工核准）、model（模型審核只擋漏步驟與不可逆損害）、expand（先補成完整的一套再做）。
+    方案最多提 plan_rounds 版、做完最多補 fix_rounds 輪（設定 → 方案模式）。
+    auto（/goal）：打回到上限、或你沒回應時照最後一版做，不停下來等。
     """
     from woof.agent.loop import TurnContext
     from woof.loader import REG
@@ -422,10 +468,11 @@ async def run_gated(session_id: str, objective: str, emit, gate: str) -> None:
     ctx = TurnContext(session, model_cfg, (session or {}).get("effort") or model_cfg.get("default_effort"), emit)
     gate_name = "人工審核" if gate == "human" else "模型審核"
     feedback, steps = "", None
+    rounds = flow_settings()["plan_rounds"]
 
     try:
         approved = False
-        for rnd in range(1, PLAN_ROUNDS + 1):
+        for rnd in range(1, rounds + 1):
             _save(session_id, goal={"objective": objective, "status": "planning", "at": time.time()})
             steps = await plan_steps(model_cfg, objective, feedback)
             steps = [s for s in steps if str(s).strip()][:5]
@@ -451,13 +498,18 @@ async def run_gated(session_id: str, objective: str, emit, gate: str) -> None:
                 # 只有一步就沒有方案好審：直接做，不要多一層確認
                 approved = True
                 break
+            if gate == "expand":
+                # 思維拓展＝拓展完直接照做、做完驗收；不是人工核准，不跳確認卡
+                approved = True
+                break
             if gate == "model":
                 ok, reason = await review_plan(ctx, objective, steps)
                 if ok:
                     approved = True
                     break
                 await emit({"type": "notice", "session_id": session_id,
-                            "text": f"審核模型（子代理）打回這版方案：{reason or '不完整'}；換一版重提"})
+                            "text": f"審核模型（子代理）打回第 {rnd}/{rounds} 版方案：{reason or '不完整'}"
+                                    + ("；換一版重提" if rnd < rounds else "")})
                 feedback = reason or "方案不完整"
                 continue
             ans = await ask(ctx, f"規劃模型提的方案（{len(steps)} 步），你核可才動手：\n{plan_txt}", ["照做", "換個做法", "取消"])
@@ -465,13 +517,20 @@ async def run_gated(session_id: str, objective: str, emit, gate: str) -> None:
                 # 略過＝使用者不想審這題，讓流程照這版走
                 approved = True
                 break
+            if auto and timed_out(ans):
+                await emit({"type": "notice", "session_id": session_id, "text": "你沒回應，目標照這版方案做"})
+                approved = True
+                break
             if "取消" in ans or timed_out(ans):
                 _save(session_id, goal={"objective": objective, "status": "stopped", "at": time.time()})
                 await emit({"type": "notice", "session_id": session_id, "text": "已取消，沒有動手"})
                 return
             feedback = "使用者要換一個做法"
-        if not approved:
-            ans = await ask(ctx, f"提了 {PLAN_ROUNDS} 版，審核（{gate_name}）都沒過，最後一次意見：{feedback}。要照最後這版做，還是取消？",
+        if not approved and auto:
+            await emit({"type": "notice", "session_id": session_id,
+                        "text": f"提了 {rounds} 版，審核（{gate_name}）都沒過；目標不停下來，照最後這版做"})
+        elif not approved:
+            ans = await ask(ctx, f"提了 {rounds} 版，審核（{gate_name}）都沒過，最後一次意見：{feedback}。要照最後這版做，還是取消？",
                             ["照做", "取消"])
             if "取消" in ans or timed_out(ans):
                 _save(session_id, goal={"objective": objective, "status": "stopped", "at": time.time()})

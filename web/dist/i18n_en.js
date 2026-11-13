@@ -1,5 +1,13 @@
 // 介面英文對照：key 是介面上的中文原文（{0} {1} 是會變動的部分），value 是英文
 window.WOOF_EN = {
+  '方案模式': 'Plan mode',
+  '方案最多提幾版': 'Max plan revisions',
+  '做完驗收後最多補幾輪': 'Max fix rounds after review',
+  '每次審核／拓展最多等多久': 'Review / expand time limit',
+  '/goal 也照對話選的模式走': '/goal follows the chat\'s plan mode',
+  '審核與拓展的提示詞': 'Review & expand prompts',
+  '版': 'rev.',
+  '輪': 'rounds',
   '能看': 'Yes',
   '不能看': 'No',
   '自動·不能': 'Auto · no',

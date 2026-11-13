@@ -1069,6 +1069,12 @@ async def set_tools(body: dict):
     return await list_tools()
 
 
+def _flow_now() -> dict:
+    from woof.agent.tasks import flow_settings
+
+    return flow_settings()
+
+
 @app.get("/api/settings")
 async def get_settings():
     from . import config as _cfgmod, dpapi
@@ -1090,6 +1096,7 @@ async def get_settings():
         "vendors": cfg.get("vendors") or [],
         "discovery": await vendor_discovery(),
         "prompts": {"mode": ((cfg.get("prompts") or {}).get("mode") or "normal")},
+        "flow": _flow_now(),
         "models": cfg.get("models") or [],
         "keys": keys,
         "backends": sorted(set(REG.providers) | set(REG.engines)),
@@ -1148,6 +1155,17 @@ async def put_settings(body: dict):
         if bad:
             raise HTTPException(400, f"模型的模型商不存在：{', '.join(bad)}（請先在模型商加入，或刪掉這些模型）")
         cfg["models"] = models
+    if isinstance(body.get("flow"), dict):
+        from woof.agent.tasks import FLOW_DEFAULTS, FLOW_LIMITS
+
+        fl = {}
+        for k, (lo, hi) in FLOW_LIMITS.items():
+            try:
+                fl[k] = max(lo, min(hi, int(body["flow"].get(k, FLOW_DEFAULTS[k]))))
+            except (TypeError, ValueError):
+                fl[k] = FLOW_DEFAULTS[k]
+        fl["goal_gate"] = bool(body["flow"].get("goal_gate", True))
+        cfg["flow"] = fl
     if "prompts" in body:
         from woof.prompts import MODES
         mode = str((body.get("prompts") or {}).get("mode") or "normal")

@@ -1883,14 +1883,17 @@ const ASK_SKIP = '（略過這題，你自己判斷決定）';
 // 生成速度：每一步的 out_tok／gen_s（woof/agent/loop.py _speed）。一次整段吐出來的（gen_s 太短）不算速度
 function stepRate(s) { return s.gen_s >= 0.3 ? s.out_tok / s.gen_s : null; }
 function spdText(steps) {
-  const ok = (steps || []).filter((s) => stepRate(s) != null); if (!ok.length) return '';
+  steps = steps || []; if (!steps.length) return '';
+  const ok = steps.filter((s) => stepRate(s) != null);
   const tok = ok.reduce((a, s) => a + s.out_tok, 0), sec = ok.reduce((a, s) => a + s.gen_s, 0);
-  return `${Math.round(tok / sec)} tok/s`;
+  // 填充：送出到第一個字（模型讀完上下文、開始吐字前）；多步加總
+  const fill = steps.reduce((a, s) => a + (s.ttft_s || 0), 0);
+  return [ok.length ? `${Math.round(tok / sec)} tok/s` : '', `填充 ${fill < 10 ? fill.toFixed(1) : Math.round(fill)}s`].filter(Boolean).join(' · ');
 }
 function spdTitle(steps) {
   if (!(steps || []).length) return '';
   const rows = steps.map((s, i) => `第 ${i + 1} 步：${stepRate(s) != null ? Math.round(stepRate(s)) + ' tok/s' : '一次回完'}，${s.tok_est ? '約 ' : ''}${s.out_tok} tokens，生成 ${s.gen_s} 秒，第一個字等了 ${s.ttft_s} 秒`);
-  return ` title="${esc((steps.length > 1 ? '整則平均（只算生成時間）\n' : '') + rows.join('\n'))}"`;
+  return ` title="${esc((steps.length > 1 ? 'tok/s 是整則平均（只算生成時間），填充是每步等第一個字的時間加總\n' : '填充＝送出到第一個字的時間（模型讀上下文）\n') + rows.join('\n'))}"`;
 }
 function askSpan(sec) { const s = Math.max(0, Math.round(sec)); return s >= 60 ? `${Math.floor(s / 60)} 分${s % 60 ? ` ${s % 60} 秒` : '鐘'}` : `${s} 秒`; }
 function askLeft(a) {
@@ -1940,7 +1943,7 @@ const GATE_LABEL = { off: '一般', human: '方案・人工核准', model: '方�
 const GATE_HINT = {
   off: '照常對話，工具直接執行。',
   human: '先給你一份短方案（1～5 步），你按「照做」才動手；做完由審核模型（子代理）驗一次，它的意見會貼在對話裡。',
-  model: '先提短方案，審核模型（子代理）只擋「漏步驟、順序錯、不可逆損害」；做完再由它驗一次，有缺口補一輪。',
+  model: '先提短方案，審核模型（子代理）只擋「漏步驟、順序錯、不可逆損害」；做完再由它驗一次，有缺口就補。打回和補做都有次數上限（設定 → 方案模式）。',
   expand: '先由拓展模型（子代理）把你的一句話補成完整的一套（A→A/B/C/D，並點名哪些該先查、不要瞎試），再照做；做完一樣驗收。',
 };
 function gateNow() { return S.sid ? (S.gate[S.sid] || 'off') : (localStorage.getItem('woof.gate') || 'off'); }
@@ -2599,7 +2602,7 @@ input.addEventListener('keydown', (e) => {
 // ---- 斜線指令
 const SLASH = [
   ['/help', '指令與快捷鍵說明', () => showHelp()],
-  ['/goal', '設定目標：拆步驟，每步子代理審核（stop 停止）', () => goalPrompt()],
+  ['/goal', '設定目標：拆步驟照做，做完審核驗收；對話選了方案模式就照那個模式走（stop 停止）', () => goalPrompt()],
   ['/plan', '預案模式開關：先出預案、不動手', () => togglePlan()],
   ['/plan-off', '先提方案模式：關閉', () => setGate('off')],
   ['/plan-human', '先提方案：模型提方案，你核准後才執行', () => setGate('human')],
@@ -2670,7 +2673,7 @@ function runSlash(cmd) {
 }
 // ---- 語言（目前涵蓋指令說明與輸入區提示）
 const SLASH_EN = {
-  '/help': 'Commands and shortcuts', '/goal': 'Set a goal: split into steps, each step reviewed by a subagent (stop to end)',
+  '/help': 'Commands and shortcuts', '/goal': 'Set a goal: split into steps, then a reviewer checks the result; follows the chat\'s plan mode if one is set (stop to end)',
   '/plan': 'Plan mode: propose a plan, do not act', '/plan-off': 'Plan-first mode: off',
   '/plan-human': 'Plan first: model proposes, you approve before it runs', '/plan-model': 'Plan first: model proposes, a subagent reviews before it runs',
   '/scope': 'Plugins for this conversation (templates)', '/prompt': 'View and edit this conversation\'s system prompt', '/review': 'Review the last reply with a subagent', '/new': 'New conversation',
@@ -4616,6 +4619,7 @@ const SECTIONS = [
   ['aux', '模型用途', '主要模型是新對話的預設；其餘每項可以各自指定服務商與模型，留空就跟隨主模型。'],
   ['keys', 'API 金鑰', '同一個金鑰池可以放多把 key，一把用完自動換下一把。'],
   ['prompts', '提示詞與記憶', 'WOOF 寫給模型的內部提示詞，以及設定檔、人物檔、使用者檔、記憶檔。'],
+  ['flow', '方案模式', '對話框左下「方案・人工／對抗／拓展」的次數上限、審核等多久，以及審核、拓展模型收到的提示詞。'],
   ['styles', '輸出風格', '每個對話可以選一種風格，內容會放進系統提示。'],
   ['pet', '寵物', '陪你聊天的小角色。牠有自己的對話、記憶和角色檔，跟主對話分開；對你的對話只看不改——不會插話、不會用工具、不會動任何檔案。'],
   ['compress', '上下文壓縮', '對話變長時把較早的內容摘要起來，全文仍留在資料庫。'],
@@ -4633,7 +4637,7 @@ const SECTIONS = [
 // 側欄分組：同一類放一個框，項目長短不一也整齊
 const SET_GROUPS = [
   ['模型', ['vendors', 'aux', 'keys']],
-  ['對話', ['prompts', 'styles', 'compress']],
+  ['對話', ['prompts', 'flow', 'styles', 'compress']],
   ['寵物', ['pet']],
   ['能力', ['perms', 'presets', 'tools', 'skills']],
   ['環境', ['general', 'appearance', 'remote']],
@@ -5008,6 +5012,7 @@ async function loadCfg() {
     default_model: c.default_model || '',
     discovery: c.discovery || {},
     prompts: { ...(c.prompts || { mode: 'normal' }) },
+    flow: { ...(c.flow || {}) },
     redact_secrets: c.redact_secrets !== false, keys_encrypted: !!c.keys_encrypted,
     cost_on: !!c.cost_on,
   };
@@ -5045,7 +5050,7 @@ function renderSettings() {
   const box = $('#setList');
   box.onclick = null;
   box.className = 'sec-' + sec[0];
-  ({ mcp: renderMcpSec, aux: renderAux, compress: renderCompressSec, prompts: renderPromptsSec, vendors: renderVendors, keys: renderKeyEditor, appearance: renderAppearance, general: renderGeneral, perms: renderPermsSec, presets: renderPresetsSec, remote: renderRemoteSec, about: renderAbout, styles: renderStylesSec, pet: renderPetSec, snapshots: renderSnapshotsSec, tools: renderToolsSet, skills: renderSkillsSet })[sec[0]](box);}
+  ({ mcp: renderMcpSec, aux: renderAux, compress: renderCompressSec, prompts: renderPromptsSec, flow: renderFlowSec, vendors: renderVendors, keys: renderKeyEditor, appearance: renderAppearance, general: renderGeneral, perms: renderPermsSec, presets: renderPresetsSec, remote: renderRemoteSec, about: renderAbout, styles: renderStylesSec, pet: renderPetSec, snapshots: renderSnapshotsSec, tools: renderToolsSet, skills: renderSkillsSet })[sec[0]](box);}
 $('#setNav').onclick = (e) => { const d = e.target.closest('[data-sec]'); if (!d) return; setFindClear(); S.setSec = d.dataset.sec; localStorage.setItem('woof.setSec', S.setSec); renderSettings(); };
 $('#setQ').oninput = (e) => { S.setQ = e.target.value; renderSettings(); };
 $('#setQ').onkeydown = (e) => {
@@ -5120,6 +5125,7 @@ function memOn(key) {
   return v === undefined || v === null ? true : !!v;
 }
 function renderPromptsSec(box) {
+  IP.only = null;
   const mode = (S.cfg.prompts && S.cfg.prompts.mode) || 'normal';
   const seg = (v, n) => `<b data-pmode="${v}" class="${mode === v ? 'on' : ''}">${n}</b>`;
   const PM = { lean: ['精簡', '只留必要指令，不寫語氣與舉例。', '審核只看有沒有證據，明顯沒做才不通過。'],
@@ -5189,6 +5195,41 @@ function renderPromptsSec(box) {
   pfLoad().then(pfRender).catch((e) => { const x = $('#pfBox'); if (x) x.innerHTML = `<div class="errbox">${esc(e.message)}</div>`; });
   ipLoad();
 }
+// ---- 方案模式：次數上限、審核時間上限、/goal 要不要跟著模式走，以及審核／拓展的提示詞（跟「內部提示詞」同一份覆寫）
+const FLOW_PROMPTS = ['plan_review', 'review', 'expand', 'plan_goal', 'plan_redo', 'review_fail'];
+function renderFlowSec(box) {
+  IP.only = FLOW_PROMPTS;
+  const f = S.cfg.flow = Object.assign({ plan_rounds: 3, fix_rounds: 1, review_timeout: 300, goal_gate: true }, S.cfg.flow || {});
+  const num = (k, min, max, step, unit) => `<label class="cin"><input type="number" data-fl="${k}" min="${min}" max="${max}" step="${step}" value="${f[k]}"><span>${unit}</span></label>`;
+  const row = (id, title, hint, ctl) => `<div class="frow" data-f="${id}"><div><b>${title}</b><small>${hint}</small></div><div class="fctl">${ctl}</div></div>`;
+  const worst = f.plan_rounds + 1 + f.fix_rounds;
+  box.innerHTML = `<div class="card">
+    ${row('flRounds', '方案最多提幾版', '對抗審核打回、或你按「換個做法」時重提。到上限還沒過：一般對話問你要不要照最後一版做；/goal 不停下來，直接照最後一版做。', num('plan_rounds', 1, 10, 1, '版'))}
+    ${row('flFix', '做完驗收後最多補幾輪', '審核模型驗收發現缺口時補做幾輪，每補一輪再驗一次。0＝不補，只把缺口告訴你。', num('fix_rounds', 0, 5, 1, '輪'))}
+    ${row('flWait', '每次審核／拓展最多等多久', '審核或拓展的子代理超過這個時間還沒結論，就不等了，照目前這版繼續。0＝一直等。', num('review_timeout', 0, 3600, 30, '秒'))}
+    ${row('flGoal', '/goal 也照對話選的模式走', '開著：對話選了方案模式時，/goal 先審核或拓展再做；放著讓它自己跑，打回到上限或你沒回應都照最後一版做。關掉：/goal 直接拆步驟做，做完一樣驗收。', `<span class="sw${f.goal_gate ? ' on' : ''}" data-flgoal></span>`)}
+    <div class="pm-ex"><span>依目前設定，一個方案最多審核 ${f.plan_rounds} 次、驗收 ${worst - f.plan_rounds} 次；加上等待上限，不會無限來回。</span></div>
+  </div>
+  <div class="card ip-card">
+    <div class="card-hd"><b>審核與拓展的提示詞</b><small>點開可以直接改（自動儲存），改壞了按「還原預設」。跟「提示詞與記憶 → 內部提示詞」是同一份。</small></div>
+    <div id="ipBox"><div class="blank">讀取中…</div></div>
+  </div>`;
+  box.oninput = (e) => { const ipt = e.target.closest('[data-ipedit]'); if (ipt) ipQueue(ipt.dataset.ipedit, ipt.value); };
+  box.onchange = (e) => {
+    const el = e.target.closest('[data-fl]'); if (!el) return;
+    const [lo, hi] = [+el.min, +el.max]; const v = Math.max(lo, Math.min(hi, Math.round(Number(el.value) || 0)));
+    el.value = v; f[el.dataset.fl] = v; setDirty(true); renderFlowSec(box);
+  };
+  box.onclick = (e) => {
+    const g = e.target.closest('[data-flgoal]');
+    if (g) { f.goal_gate = !f.goal_gate; g.classList.toggle('on', f.goal_gate); setDirty(true); return; }
+    const ipr = e.target.closest('[data-iprow]');
+    if (ipr && !e.target.closest('.ip-body')) { const k = ipr.dataset.iprow; IP.open.has(k) ? IP.open.delete(k) : IP.open.add(k); ipRender(); return; }
+    const rs = e.target.closest('[data-ipreset]');
+    if (rs) ipReset(rs.dataset.ipreset);
+  };
+  if (IP.data) ipRender(); else ipLoad();
+}
 // ---- 內部提示詞：woof/prompts.py 的全部段落，逐段檢視、覆寫（data/prompt_overrides.json）
 const IP = { data: null, open: new Set(), timers: {} };
 async function ipLoad() {
@@ -5197,16 +5238,16 @@ async function ipLoad() {
 }
 function ipRender() {
   const box = $('#ipBox'); if (!box || !IP.data) return;
-  const { items, groups } = IP.data;
+  const { groups } = IP.data, items = IP.only ? IP.only.map((k) => IP.data.items.find((x) => x.key === k)).filter(Boolean) : IP.data.items;
   const mode = IP.data.mode = (S.cfg.prompts && S.cfg.prompts.mode) || 'normal';
   for (const it of items) it.active = it.override || it[mode];
   const total = items.reduce((n, it) => n + it.active.length, 0);
   const nov = items.filter((it) => it.override).length;
   box.innerHTML = `<div class="ip-sum">${items.length} 段・目前用「${mode === 'lean' ? '精簡' : '常規'}」寫法・合計 ${total} 字${nov ? `・<b>${nov} 段已覆寫</b>` : ''}</div>`
-    + groups.map((g) => {
-      const rows = items.filter((it) => it.group === g);
+    + (IP.only ? [''] : groups).map((g) => {
+      const rows = IP.only ? items : items.filter((it) => it.group === g);
       if (!rows.length) return '';
-      return `<div class="ip-g">${esc(g)}</div>` + rows.map((it) => {
+      return (g ? `<div class="ip-g">${esc(g)}</div>` : '') + rows.map((it) => {
         const open = IP.open.has(it.key);
         return `<div class="ip-row${open ? ' open' : ''}${it.override ? ' ov' : ''}" data-iprow="${it.key}">
           <div class="ip-hd"><b>${esc(it.title)}</b><span class="ip-when">${esc(it.when)}</span>
@@ -6503,7 +6544,7 @@ async function saveSettings(opt = {}) {
   const run = (async () => {
     const r = await api('POST', '/api/settings', {
       workdir: S.cfg.workdir, allowed_dirs: S.cfg.allowed_dirs, terminal_shell: S.cfg.terminal_shell || 'auto', default_model: S.cfg.default_model || '',
-      vendors: S.cfg.vendors.map(clean), models: ready, aux: S.cfg.aux, prompts: S.cfg.prompts, redact_secrets: S.cfg.redact_secrets !== false,
+      vendors: S.cfg.vendors.map(clean), models: ready, aux: S.cfg.aux, prompts: S.cfg.prompts, flow: S.cfg.flow, redact_secrets: S.cfg.redact_secrets !== false,
       keys: S.cfg.keys.map((k) => ({ pool: k.pool, label: k.label, orig_label: k.orig || '', key: k.key || '' })),
     });
     for (const k of S.cfg.keys) k.orig = k.label;   // 標籤改名已寫入，下次以新名稱對應

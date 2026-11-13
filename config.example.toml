@@ -94,3 +94,10 @@ bind = "local"
 # https_key = "C:/certs/privkey.pem"
 # 前面有 nginx、Caddy 之類的反向代理在處理 HTTPS 時設 true
 # trust_proxy = false
+
+# 方案模式（對話框左下「方案・人工／對抗／拓展」）的上限，設定 → 方案模式可改
+[flow]
+plan_rounds = 3       # 方案最多提幾版（審核打回、或按「換個做法」）
+fix_rounds = 1        # 做完驗收後最多補幾輪，0＝不補
+review_timeout = 300  # 每次審核／拓展子代理最多等幾秒，0＝一直等
+goal_gate = true      # /goal 也照對話選的方案模式走
