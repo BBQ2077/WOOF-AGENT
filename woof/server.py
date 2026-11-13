@@ -2317,7 +2317,8 @@ async def set_gate(sid: str, body: dict):
 
 @app.post("/api/sessions/{sid}/tools")
 async def set_session_tool(sid: str, body: dict):
-    """這個對話手動開／關一個全域停用的工具。body: {"name", "on"}。開的工具排在工具清單最後面。"""
+    """這個對話手動開／關一個全域停用的工具。body: {"name", "on", "when"}。開的工具排在工具清單最後面。
+    關：when="compress" 等下次壓縮一起拿掉（不多花）；when="now" 立刻拿掉（下一則整段重算）；on=true 會取消待關。"""
     s = store.get_session(sid)
     if not s:
         raise HTTPException(404)
@@ -2325,12 +2326,19 @@ async def set_session_tool(sid: str, body: dict):
     if name not in REG.tools:
         raise HTTPException(400, f"沒有工具 {name}")
     st = dict(s.get("engine_state") or {})
-    on = [x for x in (st.get("tools_on") or []) if x != name]
+    on = list(st.get("tools_on") or [])
+    drop = [x for x in (st.get("tools_drop") or []) if x != name]
     if body.get("on"):
-        on.append(name)
-    st["tools_on"] = on
+        if name not in on:
+            on.append(name)
+    elif body.get("when") == "compress":
+        if name in on:
+            drop.append(name)
+    else:
+        on = [x for x in on if x != name]
+    st["tools_on"], st["tools_drop"] = on, drop
     store.update_session(sid, engine_state=st)
-    return {"ok": True, "tools_on": on}
+    return {"ok": True, "tools_on": on, "tools_drop": drop}
 
 
 @app.get("/api/media/spec")

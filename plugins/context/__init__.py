@@ -266,6 +266,11 @@ def register(woof):
             raise RuntimeError("壓縮摘要是空的，已中止這次回合")
         cur = dict((store.get_session(ctx.session_id) or {}).get("engine_state") or {})
         cur["compress_count"] = int(cur.get("compress_count") or 0) + 1
+        # 「壓縮時一起關」的工具在這裡拿掉：壓縮後本來就整段重算，工具清單一起換不多花
+        drop = set(cur.get("tools_drop") or [])
+        if drop:
+            cur["tools_on"] = [x for x in (cur.get("tools_on") or []) if x not in drop]
+            cur["tools_drop"] = []
         cur["summary"] = {"through": older[-1]["id"], "text": text, "at": time.time(),
                           "kept": sorted(recent_ids), "mode": mode, "method": method, "parts": parts,
                           "inflight": inflight}

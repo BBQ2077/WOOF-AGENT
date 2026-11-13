@@ -171,6 +171,9 @@ def tool_cost(name: str, description: str, schema) -> tuple[int, int]:
 
 async def tool_specs_for(ctx: TurnContext) -> list[dict]:
     """這一步實際送給模型的工具：先排除停用的，再交給 tool_specs 掛鉤（例如工具延遲載入）。"""
+    live = store.get_session(ctx.session_id) if getattr(ctx, "session_id", None) else None
+    if live is not None:  # 回合中途壓縮時拿掉的工具，這一步就不送（不等下一回合，免得再重算一次）
+        ctx.tool_include = set((live.get("engine_state") or {}).get("tools_on") or [])
     return await REG.events.pipe("tool_specs", active_tool_specs(ctx.tool_exclude, getattr(ctx, "tool_include", None)), ctx)
 
 
@@ -210,7 +213,8 @@ async def tool_overview(ctx: TurnContext) -> list[dict]:
         out.append({"name": n, "plugin": getattr(tool, "plugin", ""), "description": t["description"],
                     "enabled": n not in reasons, "reason": reasons.get(n, "") or ("延遲載入：用到時才載入說明" if deferred else ""),
                     "deferred": deferred, "chars": chars, "tokens_est": 0 if deferred else tok,
-                    "session_on": n in inc and n not in reasons})
+                    "session_on": n in inc and n not in reasons,
+                    "drop_pending": n in set(es.get("tools_drop") or ())})
     for n, t in sent.items():
         if n not in REG.tools or n in reasons:
             chars, tok = tool_cost(n, t["description"], t.get("schema"))
