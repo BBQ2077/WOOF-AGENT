@@ -256,14 +256,41 @@ def resume_digest(session_id: str, tools: int = 8) -> str:
             + "\n直接從沒做完的地方接著做；真的需要內容再讀那一個檔，不要從頭把資料夾逛一遍。")
 
 
+def _jobj(text: str, key: str) -> dict | None:
+    """從子代理回覆抓出含 key 的 JSON 物件。先照正規 JSON 解析（前後夾雜文字、字串裡有大括號都可以）；
+    模型常在字串裡放沒跳脫的引號（例：start "" "C:/x.html"），整段解析失敗時逐欄位寬鬆抓。"""
+    s = text or ""
+    dec = json.JSONDecoder()
+    for i in reversed([m.start() for m in re.finditer(r"\{", s)]):
+        try:
+            j, _ = dec.raw_decode(s, i)
+        except ValueError:
+            continue
+        if isinstance(j, dict) and key in j:
+            return j
+    if f'"{key}"' not in s:
+        return None
+    out: dict = {}
+    m = re.search(r'"pass"\s*:\s*(true|false)', s)
+    if m:
+        out["pass"] = m.group(1) == "true"
+    for k in ("steps", "gaps"):
+        m = re.search(rf'"{k}"\s*:\s*\[\s*(.*?)\s*\]\s*(?:,\s*"|\}})', s, re.S)
+        if m:
+            body = m.group(1).strip()
+            out[k] = ([x.replace('\\"', '"') for x in re.split(r'"\s*,\s*"', body[1:-1])]
+                      if len(body) >= 2 and body[0] == '"' and body[-1] == '"' else [])
+    for k in ("notes", "reason"):
+        m = re.search(rf'"{k}"\s*:\s*"(.*?)"\s*(?:,\s*"[a-z_]+"\s*:|\}})', s, re.S)
+        if m:
+            out[k] = m.group(1).replace('\\"', '"')
+    return out if key in out else None
+
+
 def _parse_check(ans: str) -> tuple[bool, list[str], str]:
-    found = re.findall(r"\{[\s\S]*?\}", ans or "")
-    if not found:
+    j = _jobj(ans, "pass")
+    if j is None:
         return False, [], "對抗檢查回覆格式不對：" + (ans or "")[-120:]
-    try:
-        j = json.loads(found[-1])
-    except Exception:
-        return False, [], "對抗檢查回覆解析失敗"
     raw = j.get("gaps") or []
     if isinstance(raw, str):
         raw = [raw]
@@ -434,13 +461,9 @@ async def review_plan(parent, objective: str, steps: list[str]) -> tuple[bool, s
     r = await _sub(parent, goal, "方案審核：", "審核模型：方案審核", "review_request")
     if r is None:
         return True, "審核超時，照這版做"
-    found = re.findall(r"\{[^{}]*\"pass\"[^{}]*\}", r.get("answer") or "")
-    if not found:
+    j = _jobj(r.get("answer") or "", "pass")
+    if j is None:
         return False, "方案審核回覆格式不對"
-    try:
-        j = json.loads(found[-1])
-    except Exception:
-        return False, "方案審核回覆解析失敗"
     return bool(j.get("pass")), str(j.get("reason") or "")
 
 
@@ -451,16 +474,13 @@ async def expand_plan(parent, objective: str, steps: list[str]) -> tuple[list[st
     r = await _sub(parent, goal, "思維拓展：", "拓展模型：思維拓展", "expand_request")
     if r is None:
         return [], ""
-    ans = r.get("answer") or ""
-    found = re.findall(r"\{[\s\S]*?\}", ans)
-    for raw in reversed(found):
-        try:
-            j = json.loads(raw)
-        except Exception:
-            continue
-        new = [str(x).strip() for x in (j.get("steps") or []) if str(x).strip()]
-        if new:
-            return new[:5], str(j.get("notes") or "")[:200]
+    j = _jobj(r.get("answer") or "", "steps")
+    new = [str(x).strip() for x in ((j or {}).get("steps") or []) if str(x).strip()]
+    if new:
+        return new[:5], str((j or {}).get("notes") or "")[:200]
+    if parent is not None:
+        await parent.emit({"type": "notice", "session_id": parent.session_id,
+                           "text": "拓展模型（子代理）的回覆讀不出步驟，照原本的方案做"})
     return [], ""
 
 
@@ -480,7 +500,7 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
         await emit({"type": "notice", "session_id": session_id, "text": "方案模式需要 API 型模型，請換一個模型"})
         return
     ctx = TurnContext(session, model_cfg, (session or {}).get("effort") or model_cfg.get("default_effort"), emit)
-    gate_name = "人工審核" if gate == "human" else "模型審核"
+    gate_name = {"human": "人工審核", "expand": "思維拓展"}.get(gate, "模型審核")
     feedback, steps = "", None
     rounds = flow_settings()["plan_rounds"]
 

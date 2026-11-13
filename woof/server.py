@@ -2474,7 +2474,7 @@ async def ws_endpoint(ws: WebSocket):
                     else:
                         steered = False
                         gate = ((store.get_session(sid) or {}).get("engine_state") or {}).get("gate") or "off"
-                        if gate in ("human", "model") and (msg.get("text") or "").strip():
+                        if gate in ("human", "model", "expand") and (msg.get("text") or "").strip():
                             from woof.agent import tasks as _tasks
 
                             if _tasks.is_running(sid):

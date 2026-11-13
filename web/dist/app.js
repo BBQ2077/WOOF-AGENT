@@ -7053,12 +7053,29 @@ function petPaint() {
   if (h) { h.scrollTop = h.scrollHeight; requestAnimationFrame(() => { h.scrollTop = h.scrollHeight; }); }
 }
 
-// 紀錄區被泡泡擠小（逐句冒出來時）也要黏在底部；使用者自己往上捲就不黏
+// 紀錄區黏在底部：只有使用者自己捲（滾輪、拖捲軸、按鍵）才算離開底部；
+// 程式捲動、面板隱藏（display:none 會把捲動歸零）、圖片晚載入都不算。面板或視窗重新顯示時回到底部
 (function petHistStick() {
   const h = $('#petHist'); if (!h || !window.ResizeObserver) return;
-  let stick = true;
-  h.addEventListener('scroll', () => { stick = h.scrollHeight - h.scrollTop - h.clientHeight < 24; }, { passive: true });
-  new ResizeObserver(() => { if (stick) h.scrollTop = h.scrollHeight; }).observe(h);
+  let stick = true, userAt = 0, lastH = h.clientHeight;
+  const toEnd = () => { h.scrollTop = h.scrollHeight; };
+  const mark = () => { userAt = Date.now(); };
+  ['wheel', 'touchmove', 'pointerdown', 'keydown'].forEach((t) => h.addEventListener(t, mark, { passive: true }));
+  h.addEventListener('scroll', () => {
+    if (!h.clientHeight || Date.now() - userAt > 800) return;
+    stick = h.scrollHeight - h.scrollTop - h.clientHeight < 24;
+  }, { passive: true });
+  new ResizeObserver(() => {
+    const shown = !lastH && h.clientHeight;
+    lastH = h.clientHeight;
+    if (!h.clientHeight) return;
+    if (shown) stick = true;
+    if (stick) { toEnd(); requestAnimationFrame(toEnd); }
+  }).observe(h);
+  // 紀錄裡的圖片、字型晚載入會把內容撐高，但紀錄區本身大小沒變，ResizeObserver 不會觸發
+  h.addEventListener('load', () => { if (stick) toEnd(); }, true);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && stick) requestAnimationFrame(toEnd); });
+  window.addEventListener('focus', () => { if (stick) requestAnimationFrame(toEnd); });
 })();
 async function petLoad() {
   try {
