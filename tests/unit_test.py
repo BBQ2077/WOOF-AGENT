@@ -21,6 +21,7 @@ TMP = tempfile.mkdtemp(prefix="woof_test_")
 os.environ["WOOF_DATA"] = TMP
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "tests"))
 
 from woof import cost, cron, effort, perms, remote as rconn, snapshot, store, tokens  # noqa: E402
 from woof.loader import REG  # noqa: E402
@@ -2222,8 +2223,8 @@ class PythonHint(unittest.TestCase):
             "woof_term_plugin", str(ROOT / "plugins/terminal/__init__.py"))
         m = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(m)
-        self.assertIn("venv", m._python_hint("ModuleNotFoundError: No module named 'openpyxl'"))
-        self.assertIn("venv", m._python_hint("bash: python: command not found"))
+        self.assertIn('"' + sys.executable.replace("\\", "/") + '"', m._python_hint("ModuleNotFoundError: No module named 'openpyxl'"))
+        self.assertIn(sys.executable.replace("\\", "/"), m._python_hint("bash: python: command not found"))
         self.assertEqual(m._python_hint("hello world"), "")
         # 沒有改 PATH 這種事：檔案裡不該有影響環境的寫法
         src = Path(str(ROOT / "plugins/terminal/__init__.py")).read_text(encoding="utf-8")

@@ -11,13 +11,20 @@ from woof import procs
 _PY_HINT_RE = re.compile(r"ModuleNotFoundError|No module named|command not found|不是內部或外部命令", re.I)
 
 
+def _py_cmd() -> str:
+    """給 bash 用的 Python 路徑：正斜線、加引號（資料夾名稱有空白也能直接貼）。"""
+    import sys as _sys
+
+    return '"' + _sys.executable.replace("\\", "/") + '"'
+
+
 def _python_hint(out: str) -> str:
     """缺套件／缺指令時直接給正確的做法（用提示，不去改 PATH）。"""
     if not _PY_HINT_RE.search(out or ""):
         return ""
     import sys as _sys
 
-    return (f"\n（提示：要用 Python 請直接呼叫 {_sys.executable} —— 已裝 pandas、openpyxl、numpy；"
+    return (f"\n（提示：要用 Python 請直接呼叫 {_py_cmd()}（整串連引號照貼）—— 已裝 pandas、openpyxl、numpy；"
             "系統 PATH 上的 python 沒有這些，改叫這一顆就好，不要重裝重試同一支指令。）")
 
 
@@ -196,13 +203,13 @@ def register(woof):
 
     import sys as _sys
 
-    _py = _sys.executable
+    _py = _py_cmd()
     woof.add_tool(
         "terminal",
         "在 Git Bash 執行指令（POSIX 語法）。長時間任務設 background=true，或超過 timeout 會自動轉背景；"
         "背景指令結束時會自動通知，不必反覆查。"
         "停止時會結束整棵程序樹。"
-        f"要用 Python 時直接呼叫這一顆（已裝 pandas、openpyxl、numpy）：{_py}；"
+        f"要用 Python 時直接呼叫這一顆（已裝 pandas、openpyxl、numpy，整串連引號照貼）：{_py}；"
         "系統 PATH 上的 python 不一定有這些套件，不要為此重複安裝。",
         {
             "type": "object",
