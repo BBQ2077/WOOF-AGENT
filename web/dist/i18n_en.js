@@ -1,5 +1,8 @@
 // 介面英文對照：key 是介面上的中文原文（{0} {1} 是會變動的部分），value 是英文
 window.WOOF_EN = {
+  '能看': 'Yes',
+  '不能看': 'No',
+  '自動·不能': 'Auto · no',
   '問你問題時等多久': 'How long to wait for your answer',
   '秒': 's',
   '已停止': 'Stopped',

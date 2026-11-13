@@ -3,7 +3,7 @@
 原則（照常見做法：先假設有，撞到再退）：
   - 思考：OpenAI 相容的模型沒寫 efforts 時，一律當成支援思考，預設「高」。
     effort_style 沒寫時依位址判斷送法（OpenRouter／DeepSeek／NVIDIA NIM／其他一律 OpenAI 的 reasoning_effort）。
-  - 看圖：沒寫 vision 時當成會看圖。
+  - 看圖：沒寫 vision 時當成會看圖（自動）；手動寫 true／false 時照寫的，自動偵測不會蓋掉。
   - 撞到「不支援這個參數」或「不能看圖」的錯誤：記到 data/model_caps.json，下次就不送；
     看圖改走「設定 → 輔助模型 → 看圖」先把圖轉成文字。設定頁可以清掉重新偵測。
   - 被限流（429）沒設等待秒數時，預設最多等 30 秒。
@@ -116,9 +116,10 @@ def apply(m: dict) -> dict:
                 m["default_effort"] = m["default_effort"].strip().lower()
         if m.get("rate_limit_wait") is None:
             m["rate_limit_wait"] = DEFAULT_WAIT
-    if "vision" not in m:
-        m["vision"] = True
-    if got.get("no_vision"):
+    # 看圖三種：沒寫 vision＝自動（先直接送，被拒才記住改走看圖模型）；寫 true／false＝手動指定，蓋過自動偵測
+    m["vision_mode"] = "auto" if m.get("vision") is None else ("on" if m["vision"] else "off")
+    m["vision"] = m["vision_mode"] != "off"
+    if got.get("no_vision") and m["vision_mode"] == "auto":
         m["vision"] = False
     m["learned"] = {k: v for k, v in got.items() if k != "at"}
     return m

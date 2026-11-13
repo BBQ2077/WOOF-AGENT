@@ -348,7 +348,7 @@ def aux_model(task: str, fallback: dict | None) -> dict | None:
 
 def vision_chain(turn_model: dict | None) -> list[dict]:
     """看圖用的模型，依序試：輔助模型的看圖 → 這個對話的模型 → 主要模型。
-    跳過明確不能看圖的、服務商暫停中的（caps.down）、不是 API 連線的。不會自己挑別的付費模型。"""
+    跳過不能看圖的（手動關掉或自動偵測到）、服務商暫停中的（caps.down）、不是 API 連線的。不會自己挑別的付費模型。"""
     from woof import caps
 
     out: list[dict] = []
@@ -357,7 +357,7 @@ def vision_chain(turn_model: dict | None) -> list[dict]:
         if not m or any(x["id"] == m["id"] for x in out):
             continue
         cfg = REG.model_cfg(m["id"]) or m
-        if cfg.get("vision") is False or caps.learned(m["id"]).get("no_vision") or caps.down(m["id"]):
+        if cfg.get("vision") is False or caps.down(m["id"]):   # vision 已含自動偵測，手動指定能看的不跳過
             continue
         if cfg.get("provider") not in REG.providers:
             continue
@@ -692,6 +692,23 @@ def pending_off(session: dict | None) -> list[str]:
     return [str(x) for x in ((session or {}).get("engine_state") or {}).get("pending_off") or []]
 
 
+def _speed(t_req: float, t_first: float | None, out_tok, text_buf: dict) -> dict:
+    """這一步的生成速度，存在助理訊息的 meta：out_tok（輸出 token，含思考）、gen_s（第一個字到最後一個字）、
+    ttft_s（送出到第一個字）。服務商沒回用量時用字數估，標 tok_est。"""
+    end = time.time()
+    if t_first is None:
+        return {}
+    d = {"gen_s": round(max(end - t_first, 0.0), 2), "ttft_s": round(t_first - t_req, 2)}
+    if out_tok:
+        d["out_tok"] = int(out_tok)
+    else:
+        from woof.tokens import estimate_text
+
+        d["out_tok"] = estimate_text(text_buf.get("text", "") + text_buf.get("thinking", ""))
+        d["tok_est"] = True
+    return d
+
+
 async def run_model_loop(ctx: TurnContext) -> None:
     provider = REG.providers[ctx.model_cfg["provider"]]
     nudged = False  # 工具結果後模型給空內容，只請它文字總結一次
@@ -718,7 +735,7 @@ async def run_model_loop(ctx: TurnContext) -> None:
         final: dict | None = None
         partial: list[dict] = []
         text_buf = {"text": "", "thinking": ""}
-        t_req, t_first = time.time(), None
+        t_req, t_first, out_tok = time.time(), None, None
         try:
             async for ev in provider.stream(
                 model=ctx.model_cfg, system=system, messages=messages,
@@ -733,6 +750,7 @@ async def run_model_loop(ctx: TurnContext) -> None:
                     await ctx.emit({"type": "delta", "session_id": ctx.session_id, "kind": kind, "text": ev["text"]})
                 elif t == "usage":
                     usage = {k: ev.get(k) for k in ("input_tokens", "output_tokens", "cache_read", "cache_write")}
+                    out_tok = ev.get("output_tokens") or out_tok
                     from woof.tokens import window_of
                     usage["context_window"] = window_of(ctx.model_cfg) or None
                     # input_tokens 已含快取讀寫；上下文用量＝輸入＋輸出。through＝這次請求包含到哪一則（用量錨點）
@@ -811,7 +829,7 @@ async def run_model_loop(ctx: TurnContext) -> None:
             m = store.add_message(ctx.session_id, "assistant", content, {"model": ctx.model_cfg["id"], "empty": True})
             await ctx.emit({"type": "message", "session_id": ctx.session_id, "message": m})
             return
-        meta = {"model": ctx.model_cfg["id"], **fmeta}
+        meta = {"model": ctx.model_cfg["id"], **fmeta, **_speed(t_req, t_first, out_tok, text_buf)}
         m = store.add_message(ctx.session_id, "assistant", content, meta)
         await ctx.emit({"type": "message", "session_id": ctx.session_id, "message": m})
         await REG.events.emit("on_message", m, ctx)

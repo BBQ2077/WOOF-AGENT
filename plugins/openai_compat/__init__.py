@@ -378,9 +378,13 @@ class OpenAICompat:
                         tried = 0
                         continue
                     if model.get("vision") and _has_image(messages) and caps.is_image_reject(body):
-                        caps.learn(model["id"], no_vision=True)
+                        if model.get("vision_mode") == "on":
+                            # 使用者手動指定能看圖：照他的，不記住；只有這一次先轉成文字
+                            yield {"type": "notice", "text": f"{name} 這次拒收圖片（你手動設成能看圖，所以不記住）；這次先轉成文字再送"}
+                        else:
+                            caps.learn(model["id"], no_vision=True)
+                            yield {"type": "notice", "text": f"{name} 不能直接看圖，已記住；圖片改給看圖模型轉成文字再送。判斷錯了可以到「設定 → 模型商」把看圖改成「能看」"}
                         model["vision"] = False
-                        yield {"type": "notice", "text": f"{name} 不能直接看圖，已記住；圖片改給看圖模型轉成文字再送"}
                         messages = await _describe_images(self.woof, messages)
                         tried = 0
                         continue

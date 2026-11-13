@@ -337,11 +337,27 @@ async def run_goal(session_id: str, objective: str, emit, steps: list[str] | Non
         await emit({"type": "notice", "session_id": session_id, "text": f"目標執行失敗：{e}"})
 
 
+def _track(session_id: str, coro, emit) -> asyncio.Task:
+    """跑目標／方案流程。結束（做完、出錯、被停）時補送一個事件：
+    流程裡最後一個事件（回覆的 run_end）送出時流程還沒結束，帶的 busy 是 True；
+    不補這一下，前端會一直顯示「還在跑」。"""
+    task = asyncio.create_task(coro)
+
+    def _done(_t):
+        try:
+            asyncio.get_running_loop().create_task(emit({"type": "flow_end", "session_id": session_id}))
+        except RuntimeError:
+            pass
+
+    task.add_done_callback(_done)
+    return task
+
+
 def start_goal(session_id: str, objective: str, emit) -> None:
     t = GOAL_TASKS.get(session_id)
     if t and not t.done():
         raise RuntimeError("這個對話已經有目標在執行，先用 /goal stop 停止")
-    GOAL_TASKS[session_id] = asyncio.create_task(run_goal(session_id, objective, emit))
+    GOAL_TASKS[session_id] = _track(session_id, run_goal(session_id, objective, emit), emit)
 
 
 def stop_goal(session_id: str) -> bool:
@@ -480,7 +496,7 @@ def start_gated(session_id: str, objective: str, emit, gate: str) -> None:
     t = GOAL_TASKS.get(session_id)
     if t and not t.done():
         raise RuntimeError("這個對話已經有目標或方案在執行，先按停止")
-    GOAL_TASKS[session_id] = asyncio.create_task(run_gated(session_id, objective, emit, gate))
+    GOAL_TASKS[session_id] = _track(session_id, run_gated(session_id, objective, emit, gate), emit)
 
 
 _WRITE_OK = ("已寫入 ", "已修改 ")

@@ -1880,6 +1880,18 @@ $('#taskBar').addEventListener('click', (e) => {
 });
 const ASK_SKIP = '（略過這題，你自己判斷決定）';
 // 問題卡片的倒數：時間到後端會自動略過；在卡片上打字會重新計時
+// 生成速度：每一步的 out_tok／gen_s（woof/agent/loop.py _speed）。一次整段吐出來的（gen_s 太短）不算速度
+function stepRate(s) { return s.gen_s >= 0.3 ? s.out_tok / s.gen_s : null; }
+function spdText(steps) {
+  const ok = (steps || []).filter((s) => stepRate(s) != null); if (!ok.length) return '';
+  const tok = ok.reduce((a, s) => a + s.out_tok, 0), sec = ok.reduce((a, s) => a + s.gen_s, 0);
+  return `${Math.round(tok / sec)} tok/s`;
+}
+function spdTitle(steps) {
+  if (!(steps || []).length) return '';
+  const rows = steps.map((s, i) => `第 ${i + 1} 步：${stepRate(s) != null ? Math.round(stepRate(s)) + ' tok/s' : '一次回完'}，${s.tok_est ? '約 ' : ''}${s.out_tok} tokens，生成 ${s.gen_s} 秒，第一個字等了 ${s.ttft_s} 秒`);
+  return ` title="${esc((steps.length > 1 ? '整則平均（只算生成時間）\n' : '') + rows.join('\n'))}"`;
+}
 function askSpan(sec) { const s = Math.max(0, Math.round(sec)); return s >= 60 ? `${Math.floor(s / 60)} 分${s % 60 ? ` ${s % 60} 秒` : '鐘'}` : `${s} 秒`; }
 function askLeft(a) {
   const s = Math.max(0, Math.ceil(a.deadline - Date.now() / 1000));
@@ -2068,6 +2080,7 @@ function renderChat(scrollBottom) {
       if (typeof m.id === 'number') gi.lastId = m.id;
       gi.created = m.created || gi.created;
       if (m.meta && m.meta.model) gi.model = m.meta.model;
+      if (m.meta && m.meta.out_tok && m.meta.gen_s != null) (gi.steps = gi.steps || []).push(m.meta);
       for (const b of m.content) if (b.type === 'text' && b.text) gi.texts.push(b.text);
       if (m.meta && m.meta.hidden_reasoning) group.insertAdjacentHTML('beforeend', `<div class="think hidden" title="服務商有算思考 token，但沒有把思考內容傳回來，所以看不到過程">思考了 ${m.meta.hidden_reasoning.toLocaleString()} tokens <small>服務商沒回傳內容</small></div>`);
       for (let bi = 0; bi < m.content.length; bi++) {
@@ -2164,7 +2177,7 @@ function renderChat(scrollBottom) {
       + `<span class="ib" data-act="copy" title="複製回覆">${ico('copy')}</span>`
       + (gi.userId ? `<span class="ib" data-act="retry" title="重新生成">${ico('refresh')}</span>` : '')
       + `<span class="ib" data-act="fork" title="從這裡分支成新對話">${ico('branch')}</span>`
-      + `<span class="meta">${esc([m ? m.label : gi.model, fmtTime(gi.created)].filter(Boolean).join(' · '))}</span></div>`);
+      + `<span class="meta"${spdTitle(gi.steps)}>${esc([m ? m.label : gi.model, spdText(gi.steps), fmtTime(gi.created)].filter(Boolean).join(' · '))}</span></div>`);
     if (i === groups.length - 1 && !running) g.classList.add('last');
   });
   for (const g of chat.querySelectorAll('.msg.bot')) foldTools(g);
@@ -2531,7 +2544,7 @@ async function send() {
     notify('warn', '還沒有模型', '先到「設定 → 模型商」新增一個。'); return;
   }
   if (!m.available) { notify('error', `「${m.label}」不能用`, '它需要的插件沒有載入，到插件頁看看是不是停用或載入失敗。'); return; }
-  if (S.attach.length && !m.vision) notify('warn', `${m.label} 不能直接看圖`, '圖片會先交給「輔助模型 → 看圖」轉成文字再送。');
+  if (S.attach.length && !m.vision) notify('warn', `${m.label} 不能直接看圖`, '圖片會先交給「輔助模型 → 看圖」轉成文字再送。判斷錯了可以到「設定 → 模型商」把這個模型的看圖改成「能看」。');
   if (!S.sid) {
     const s = await api('POST', '/api/sessions', { model: m.id, effort: effortWant(), perm: currentPerm() });
     if (!S.sessions.some((x) => x.id === s.id)) S.sessions.unshift(s);
@@ -5801,7 +5814,9 @@ function renderVendors(box) {
       const effs = m.efforts || [];
       const st = S.models.find((x) => x.id === m.id) || {};
       const autoEff = st.efforts || [];
-      const visOn = m.vision === false ? false : (st.learned && st.learned.no_vision) ? false : true;
+      // 看圖：沒寫＝自動（先直接送，被拒才記住）；寫 true／false＝手動，蓋過自動偵測
+      const visMode = m.vision === true ? 'on' : m.vision === false ? 'off' : 'auto';
+      const visLearn = !!(st.learned && st.learned.no_vision);
       return `<div class="mtr" data-mi="${mi}">
         <input data-mf="label" value="${esc(m.label || '')}" placeholder="顯示名稱">
         <input data-mf="model" value="${esc(m.model || '')}" placeholder="API 模型名稱" class="mono">
@@ -5809,7 +5824,7 @@ function renderVendors(box) {
         ${S.cfg.cost_on ? `<input data-mf="price" value="${esc((m.price || []).join(' / '))}" placeholder="—" class="mono" title="美元／每百萬 token：輸入 / 輸出 / 快取讀取，例如 3 / 15 / 0.3。快取沒填就照輸入價；留空＝不算錢">` : ''}
         <input data-mf="efforts" value="${esc(effs.join(', '))}" placeholder="${autoEff.length ? '自動 ' + autoEff.map((e) => EFFORT_LABEL[e] || e).join('/') : '沒有思考'}" title="${autoEff.length ? '留空＝自動偵測，目前偵測到：' + esc(autoEff.join(', ')) + '。要固定就填，例如 low, medium, high' : '沒偵測到思考強度；這個模型支援的話照 API 填，例如 low, medium, high'}" class="mono">
         <select data-mf="default_effort"><option value="">${effs.length ? '—' : '自動'}</option>${opt(effs, m.default_effort, EFFORT_LABEL)}</select>
-        <span class="cell"><span class="sw sm${visOn ? ' on' : ''}" data-mvision title="${(st.learned && st.learned.no_vision) ? '自動偵測到不能直接看圖（下方可清掉重新偵測）' : m.vision === undefined ? '看圖：沒設定＝預設會看，撞到不支援會自動改走看圖模型' : '看圖'}"></span></span>
+        <select data-mvis class="${visMode === 'auto' && visLearn ? 'vis-learned' : ''}" title="${visMode === 'auto' ? (visLearn ? '自動：之前被服務商拒收過圖片，現在改走看圖模型。判斷錯了就改成「能看」' : '自動：先直接把圖送給模型，被拒才記住、改走看圖模型') : visMode === 'on' ? '手動：一律直接送圖給這個模型，自動偵測不會蓋掉' : '手動：圖片一律先交給看圖模型轉成文字'}">${[['auto', visLearn ? '自動·不能' : '自動'], ['on', '能看'], ['off', '不能看']].map(([v, t]) => `<option value="${v}"${v === visMode ? ' selected' : ''}>${t}</option>`).join('')}</select>
         <span class="ib" data-mdel title="刪除模型">${ico('trash')}</span></div>`;
     }).join('');
     return `<div class="vrow${open ? ' open' : ''}" data-vi="${vi}">
@@ -6053,8 +6068,6 @@ $('#setList').addEventListener('click', (e) => {
     const tr = e.target.closest('.mtr');
     if (tr) {
       const m = S.cfg.models[+tr.dataset.mi];
-      const vis = e.target.closest('[data-mvision]');
-      if (vis) { m.vision = m.vision === false; vis.classList.toggle('on', m.vision); setDirty(true); }
       if (e.target.closest('[data-mdel]')) { S.cfg.models.splice(+tr.dataset.mi, 1); setDirty(true); renderSettings(); }
     }
   }
@@ -6156,6 +6169,7 @@ $('#setList').addEventListener('change', (e) => {
   }
   const tr = el.closest('.mtr');
   if (tr && el.dataset.mf === 'default_effort') { S.cfg.models[+tr.dataset.mi].default_effort = el.value || undefined; setDirty(true); return; }
+  if (tr && el.matches('[data-mvis]')) { const m = S.cfg.models[+tr.dataset.mi]; if (el.value === 'auto') delete m.vision; else m.vision = el.value === 'on'; setDirty(true); return; }
   if (tr && el.dataset.mf === 'efforts') renderSettings();
 });
 

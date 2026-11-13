@@ -1507,6 +1507,57 @@ class AskSkip(unittest.TestCase):
             loop.close()
 
 
+class VisionModeAndFlow(unittest.TestCase):
+    """看圖三種：自動（被拒才記住）／手動能看（蓋過自動偵測）／手動不能看；方案流程結束要補送事件；每步速度。"""
+
+    def test_vision_mode(self):
+        from unittest import mock
+
+        from woof import caps
+
+        with mock.patch.object(caps, "learned", return_value={"no_vision": True}):
+            a = caps.apply({"id": "x"})
+            on = caps.apply({"id": "x", "vision": True})
+            off = caps.apply({"id": "y", "vision": False})
+        self.assertEqual((a["vision_mode"], a["vision"]), ("auto", False))
+        self.assertEqual((on["vision_mode"], on["vision"]), ("on", True))
+        self.assertEqual((off["vision_mode"], off["vision"]), ("off", False))
+        with mock.patch.object(caps, "learned", return_value={}):
+            self.assertTrue(caps.apply({"id": "z"})["vision"])
+
+    def test_flow_end_event(self):
+        from woof.agent import tasks
+
+        got = []
+
+        async def emit(ev):
+            got.append(ev)
+
+        async def flow():
+            await asyncio.sleep(0.05)
+
+        async def go():
+            t = tasks._track("flowtest", flow(), emit)
+            await t
+            await asyncio.sleep(0.05)
+
+        asyncio.run(go())
+        self.assertEqual(got, [{"type": "flow_end", "session_id": "flowtest"}])
+
+    def test_speed_meta(self):
+        from woof.agent.loop import _speed
+
+        now = time.time()
+        d = _speed(now - 3, now - 2, 100, {"text": "", "thinking": ""})
+        self.assertEqual(d["out_tok"], 100)
+        self.assertAlmostEqual(d["gen_s"], 2, delta=0.2)
+        self.assertAlmostEqual(d["ttft_s"], 1, delta=0.05)
+        e = _speed(now - 3, now - 2, None, {"text": "hello world " * 20, "thinking": ""})
+        self.assertTrue(e["tok_est"])
+        self.assertGreater(e["out_tok"], 0)
+        self.assertEqual(_speed(now, None, 5, {}), {})
+
+
 class CatalogVisionHint(unittest.TestCase):
     """模型商目錄寫只收文字不寫進 vision：目錄可能寫錯，先直接送圖、被拒才改走看圖模型。"""
 

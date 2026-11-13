@@ -198,7 +198,8 @@ class Registry:
             out.append({
                 "id": m["id"], "label": m.get("label", m["id"]), "provider": backend,
                 "efforts": m.get("efforts", []), "default_effort": m.get("default_effort"),
-                "vision": bool(m.get("vision")), "context_window": m.get("context_window"),
+                "vision": bool(m.get("vision")), "vision_mode": m.get("vision_mode") or "auto",
+                "context_window": m.get("context_window"),
                 "effort_style": m.get("effort_style"), "learned": m.get("learned") or {},
                 "auth": m.get("auth"), "available": ok, "enabled": m.get("enabled") is not False, "is_default": m["id"] == self.default_model_id(),
                 "vendor": m.get("vendor") or "", "vendor_label": m.get("vendor_label") or "其他",

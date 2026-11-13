@@ -402,10 +402,11 @@ input[readonly]{background:var(--panel);color:var(--dim)}
 .fgrid{display:grid;grid-template-columns:90px minmax(0,1fr) 90px minmax(0,1fr);gap:10px 14px;align-items:center;padding:14px 0}
 .fgrid label{font-size:12px;color:var(--dim);text-align:right}
 .mtable{border:1px solid var(--line);border-radius:var(--r);background:var(--panel2);overflow:hidden}
-.mth,.mtr{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1.5fr) 88px minmax(0,1.2fr) 74px 42px 30px;gap:8px;align-items:center;padding:6px 10px}
-.priced .mth,.priced .mtr{grid-template-columns:minmax(0,1.4fr) minmax(0,1.6fr) 72px 70px 64px 70px 42px 30px}
+.mth,.mtr{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1.5fr) 88px minmax(0,1.2fr) 74px 84px 30px;gap:8px;align-items:center;padding:6px 10px}
+.priced .mth,.priced .mtr{grid-template-columns:minmax(0,1.4fr) minmax(0,1.6fr) 72px 70px 64px 70px 84px 30px}
 .mth{font-size:11px;color:var(--faint);font-weight:600;background:var(--panel);border-bottom:1px solid var(--line);padding:7px 10px}
 .mtr+.mtr{border-top:1px solid var(--line)}
+.mtr select.vis-learned{color:var(--warn,#d9a441)}
 .mtr input,.mtr select{height:30px;font-size:12px}
 .cell{display:flex;align-items:center;justify-content:center}
 .mtempty{padding:14px;text-align:center;color:var(--faint);font-size:12px}
