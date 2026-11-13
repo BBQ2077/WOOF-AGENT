@@ -1792,6 +1792,73 @@ async def workspace_info(session_id: str = ""):
             "own_missing": bool(own) and not Path(own).is_dir()}
 
 
+_ABS_RE = re.compile(r"(?:[A-Za-z]:[\\/]|/[a-z]/)[^\s`\"'<>|*?()（），。、；：「」]+")
+_SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".cache", "dist-electron"}
+
+
+def _resolve_rel(workdir: str, rel: str, known: list[str]) -> str | None:
+    """回覆裡只寫了檔名（`pelican-plane.svg`）：找出它實際在哪。
+    依序看工作目錄、這個對話工具用過的路徑（寫過的檔、cd 過的資料夾）、工作目錄往下 3 層。"""
+    rel = rel.strip().replace("\\", "/").lstrip("./")
+    if not rel or ".." in rel.split("/"):
+        return None
+    base = Path(workdir) if workdir else None
+    if base and (base / rel).is_file():
+        return str(base / rel).replace("\\", "/")
+    low = "/" + rel.lower()
+    for p in reversed(known):   # 越後面越新
+        q = p.replace("\\", "/").rstrip("/")
+        if q.lower().endswith(low) and Path(q).is_file():
+            return q
+        for d in (q, q.rsplit("/", 1)[0]):
+            # 只用夠深的資料夾（C:/、C:/Users 這種太廣，會撿到不相干的同名檔）
+            if len(Path(d).parts) >= 4 and (Path(d) / rel).is_file():
+                return (d + "/" + rel)
+    if base and base.is_dir():
+        # 往下找只認唯一一個：README.md、index.html 這種每個專案都有的，猜一個反而開錯檔
+        hits, seen = [], 0
+        for root, dirs, files in os.walk(base):
+            depth = len(Path(root).relative_to(base).parts)
+            dirs[:] = [] if depth >= 3 else [d for d in dirs if d not in _SKIP_DIRS and not d.startswith(".")]
+            seen += len(files)
+            if seen > 20000:
+                break
+            cand = Path(root) / rel
+            if cand.is_file():
+                hits.append(str(cand).replace("\\", "/"))
+                if len(hits) > 1:
+                    return None
+        if hits:
+            return hits[0]
+    return None
+
+
+@app.post("/api/sessions/{sid}/resolve")
+async def resolve_paths(sid: str, body: dict):
+    """回覆裡的相對檔名換成實際路徑（點連結、開資料夾、用預設程式開都要真的路徑）。找不到回 null。"""
+    import json
+
+    from . import workspace
+
+    s = store.get_session(sid)
+    if s is None:
+        raise HTTPException(404)
+    rels = [str(r) for r in (body.get("rels") or []) if str(r).strip()][:60]
+    known: list[str] = []
+    for m in store.get_messages(sid):
+        if m["role"] not in ("assistant", "tool"):
+            continue
+        for b in m.get("content") or []:
+            t = b.get("type")
+            src = json.dumps(b.get("args") or {}, ensure_ascii=False) if t == "tool_call" else \
+                str(b.get("output") or "") if t == "tool_result" else ""
+            if src:
+                known += [x.rstrip(".,;:!?)]}\\") for x in _ABS_RE.findall(src.replace("\\\\", "/"))]
+    known = [("%s:/%s" % (k[1].upper(), k[3:]) if re.match(r"/[a-z]/", k) else k) for k in known][-3000:]
+    wd = workspace.of_session(s)
+    return {"paths": {r: await asyncio.to_thread(_resolve_rel, wd, r, known) for r in rels}}
+
+
 @app.put("/api/sessions/{sid}/workdir")
 async def set_session_workdir(sid: str, body: dict):
     s = store.get_session(sid)

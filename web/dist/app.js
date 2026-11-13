@@ -448,6 +448,29 @@ function flinkPath(a) {
   const rel = (a.dataset.rel || '').replace(/^\.[\\/]/, '');
   return base ? `${base}${base.includes('/') ? '/' : '\\'}${rel}` : rel;
 }
+// 相對檔名畫出來就跟後端問實際位置（工作目錄、這個對話用過的資料夾、往下 3 層），
+// 點連結、用預設程式開、開資料夾才會是真的路徑；找到的記著，找不到的 30 秒後再問（檔案可能剛寫出來）
+const REL_CACHE = new Map();
+async function resolveRels(box) {
+  const sid = S.sid;
+  const as = $$('a.flink[data-rel]', box).filter((a) => !a.dataset.path);
+  if (!sid || !as.length) return;
+  const key = (r) => sid + '|' + r;
+  const fresh = (r) => { const c = REL_CACHE.get(key(r)); return c && (c.p || Date.now() - c.t < 30000); };
+  const need = [...new Set(as.map((a) => a.dataset.rel))].filter((r) => !fresh(r));
+  if (need.length) {
+    try {
+      const d = await api('POST', `/api/sessions/${sid}/resolve`, { rels: need });
+      for (const r of need) REL_CACHE.set(key(r), { p: (d.paths || {})[r] || '', t: Date.now() });
+    } catch { return; }
+  }
+  for (const a of as) {
+    const c = REL_CACHE.get(key(a.dataset.rel));
+    if (!c) continue;
+    if (c.p) { a.dataset.path = c.p; a.title = c.p + '\n點一下預覽；右鍵有更多'; a.classList.remove('missing'); }
+    else { a.classList.add('missing'); a.title = '找不到這個檔案（工作目錄和這個對話用過的資料夾裡都沒有）'; }
+  }
+}
 function cleanPath(p) {
   p = p.replace(/[.,;:!?。，、；：！？)\]}」』]+$/, '');
   const m = /^\/([a-z])\//.exec(p);
@@ -488,6 +511,7 @@ function linkPaths(box) {
     frag.append(s.slice(last));
     n.replaceWith(frag);
   }
+  resolveRels(box);
 }
 // 重畫整段對話時，同一段文字會一而再地被 marked 解析、消毒、上色；長對話這樣很吃主執行緒（打字、按鈕都跟著卡）。
 // 用「原文 → 處理好的 HTML」快取，第二次以後直接貼回去；上色結果也另外記一份。
@@ -1731,7 +1755,7 @@ $('#chat').addEventListener('click', (e) => {
   if (img) { e.preventDefault(); e.stopPropagation(); openViewer(img); return; }
   // 回覆裡指向圖片的連結（本機檔或網路圖片）也在 WOOF 裡看，不開瀏覽器
   const fl = e.target.closest('a.flink');
-  if (fl) { e.preventDefault(); e.stopPropagation(); openFileLink(flinkPath(fl)); return; }
+  if (fl) { e.preventDefault(); e.stopPropagation(); openFlink(fl); return; }
   const lk = e.target.closest('.md a[href]');
   if (lk && IMG_EXT.test((lk.getAttribute('href') || '').split(/[?#]/)[0])) { e.preventDefault(); openViewer({ src: lk.href }); return; }
   const sug = e.target.closest('[data-suggest]');
@@ -4168,8 +4192,12 @@ function imgMenuItems(p, src) {
 document.addEventListener('click', (e) => {
   const fl = e.target.closest('a.flink');
   if (!fl || fl.closest('#chat')) return;
-  e.preventDefault(); e.stopPropagation(); openFileLink(flinkPath(fl));
+  e.preventDefault(); e.stopPropagation(); openFlink(fl);
 }, true);
+async function openFlink(fl) {
+  if (!fl.dataset.path && fl.dataset.rel) await resolveRels(fl.parentElement || document.body);
+  openFileLink(flinkPath(fl));
+}
 // 點本機檔案連結：圖片在看圖器開，其他在右側預覽開；預覽不了的（例如 exe）交給系統
 function openFileLink(p) {
   if (IMG_EXT.test(p)) { openViewer({ src: fileUrl(p) }); return; }
