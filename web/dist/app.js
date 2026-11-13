@@ -5563,6 +5563,8 @@ function auxFits(task, m) {
   const provider = m.provider || v.provider;
   if (task !== 'fallback' && provider === 'claude_cli') return false;
   if (task === 'vision' && !m.vision) return false;
+  // 生圖／影片模型不會跑工具，不能當子代理、看圖、壓縮、審核；要生圖由主模型 delegate_task 填 model=image／video
+  if (task !== 'fallback' && (m.kind === 'image' || m.kind === 'video')) return false;
   return true;
 }
 function subagentRowHtml(n, tag) {

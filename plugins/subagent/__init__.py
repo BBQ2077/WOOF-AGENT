@@ -9,6 +9,7 @@ delegate_task 會為每個子任務開一個子對話（側欄看得到，標記
 from __future__ import annotations
 
 import asyncio
+import re
 
 # 寫入子代理同一時間只跑一個，避免互相覆蓋檔案
 _WRITE_LOCK = asyncio.Lock()
@@ -66,6 +67,105 @@ def _pick_model(woof, t: dict) -> tuple[str, str]:
     return hit["id"], ""
 
 
+_GEN_WORDS = {"image": "image", "生圖": "image", "圖片": "image", "video": "video", "影片": "video", "生影片": "video"}
+
+
+_GEN_GOAL = re.compile(
+    r"^\s*(?:please\s+)?(?:generate|create|make|draw|render|produce|paint)\s+"
+    r"(?:(?!(?:sure|conclusions?|from|of|for|to|with|that|which|code|scripts?|a\s+list|folders?|files?)\b)[\w:.-]+\s+){0,4}?"
+    r"(?P<en>image|picture|illustration|photo|drawing|painting|video|clip|animation)s?\b"
+    r"(?!\s+(?:folders?|files?|director(?:y|ies)|paths?|urls?|links?|list)\b)"
+    r"|^\s*(?:請|幫我)?(?:生成|生|畫|做|產生)(?:一|兩|三|\d+)?(?:張|幅|段|支|部|個)?(?P<zh>圖片|圖|插畫|照片|影片|動畫|視頻)"
+    r"|^\s*(?:請|幫我)?畫(?:一|兩|三|\d+)?(?P<zh2>張|幅)", re.I)
+
+
+def _gen_by_goal(goal: str) -> str:
+    mt = _GEN_GOAL.search(goal)
+    if not mt:
+        return ""
+    w = (mt.group("en") or mt.group("zh") or mt.group("zh2") or "").lower()
+    return "video" if w in ("video", "clip", "animation", "影片", "動畫", "視頻") else "image"
+
+
+def _gen_target(woof, t: dict) -> dict | None:
+    """model 填 image／video（或直接填生圖、影片模型的名字）→ 不開子對話，直接交給生成模型。
+    模型順序：使用者勾的「可指派的模型」裡同類的 → media 插件指定的 → 第一個有 key 的同類模型。"""
+    from woof import media
+    from woof.loader import REG
+
+    want = str(t.get("model") or "").strip()
+    if not want:
+        # 小模型常漏填 model：goal 一開頭就是「生成一張圖／Generate an image…」也算
+        want = _gen_by_goal(str(t.get("goal") or ""))
+        if not want:
+            return None
+    models = [m for m in woof.config.get("models", []) if m.get("enabled") is not False]
+    named = next((m for m in models if want in (m["id"], m.get("model"), m.get("label"))), None)
+    kind = _GEN_WORDS.get(want.lower()) or (media.kind_of(named) if named else "")
+    if kind not in ("image", "video"):
+        return None
+    if named and media.kind_of(named) == kind:
+        return named
+    ok = _allowed(woof)
+    hit = next((m for m in models if m["id"] in ok and media.kind_of(m) == kind), None)
+    if hit:
+        return hit
+    mp = REG.plugins.get("media")
+    pref = str(((mp.settings if mp else None) or {}).get(f"{kind}_model") or "")
+    if pref:
+        hit = next((m for m in models if m["id"] == pref), None)
+        if hit:
+            return hit
+    for m in models:
+        if media.kind_of(m) == kind and woof.keys(m.get("key_pool") or m.get("provider")).entries:
+            return m
+    return {"missing": kind}
+
+
+async def _generate(woof, m: dict, t: dict, parent, progress) -> dict:
+    """goal＝提示詞；context 不送進提示詞，只從 goal／context 找比例（16:9）、秒數（8 秒）、參考圖路徑；
+    scope 指定資料夾就再複製一份過去。"""
+    import re
+    from pathlib import Path
+
+    from woof import media
+
+    prompt = str(t.get("goal") or "").strip()
+    extra = str(t.get("context") or "").strip()
+    text = prompt + "\n" + extra
+    ratio = (re.search(r"\b(21:9|16:9|9:16|4:3|3:4|3:2|2:3|1:1)\b", text) or [None, ""])[1]
+    name = m.get("label", m["id"])
+
+    def keep(path: str) -> str:
+        import shutil
+
+        dirs = _scope_dirs(t.get("scope"), parent.cwd)
+        if len(dirs) == 1 and dirs[0].is_dir():
+            dst = dirs[0] / Path(path).name
+            shutil.copy2(path, dst)
+            return f"（另存一份到 {dst}）"
+        return ""
+    if media.kind_of(m) == "image":
+        refs = []
+        for raw in re.findall(r"[A-Za-z]:[\\/][^\s\"'<>|*?]+?\.(?:png|jpe?g|webp|gif)|[^\s\"'<>|*?:]+\.(?:png|jpe?g|webp|gif)", extra, re.I):
+            fp = Path(raw) if Path(raw).is_absolute() else Path(parent.cwd) / raw
+            if fp.is_file():
+                refs.append(str(fp))
+        await progress(f"用 {name} 生成圖片中…" + (f"（參考圖 {len(refs)} 張）" if refs else ""))
+        r = await media.gen_image(woof, m, prompt, images=refs, ratio=ratio)
+        return {"gen": f"已生成圖片（{name}，{r['seconds']} 秒）：{r['path']}{keep(r['path'])}\n回覆使用者時寫上 MEDIA:{r['path']} 讓介面顯示。"}
+    sec = re.search(r"(\d{1,2})\s*(?:秒|s\b|sec)", text)
+    secs = max(4, min(12, int(sec.group(1)))) if sec else 5
+    aspect = ratio if ratio in ("16:9", "9:16", "1:1") else "16:9"
+
+    async def prog(pct, st):
+        await progress(f"進度 {pct}%（{st}）")
+
+    await progress(f"用 {name} 生成影片中（{secs} 秒、{aspect}，通常 1–3 分鐘）…")
+    r = await media.gen_video(woof, m, prompt, seconds=secs, aspect=aspect, progress=prog)
+    return {"gen": f"已生成影片（{name}，{r['video_seconds']} 秒長）：{r['path']}{keep(r['path'])}\n回覆使用者時寫上 MEDIA:{r['path']} 讓介面顯示。"}
+
+
 def register(woof):
     used: dict[str, int] = {}  # 每個使用者回合已派出的子代理數（擋住模型反覆派工燒錢）
 
@@ -87,6 +187,13 @@ def register(woof):
         if len(tasks) > limit:
             return {"output": f"一次最多 {limit} 個子任務，這次給了 {len(tasks)} 個", "is_error": True}
         for t in tasks:
+            g = _gen_target(woof, t)
+            if g and g.get("missing"):
+                from woof import media
+                return {"output": f"沒有可用的{media.KIND_LABEL[g['missing']]}模型：請使用者到「設定 → 模型商」加一個", "is_error": True}
+            if g:
+                t["gen"] = g
+                continue
             t["model"], err = _pick_model(woof, t)
             if err:
                 return {"output": err, "is_error": True}
@@ -106,6 +213,8 @@ def register(woof):
         async def one(i: int, t: dict):
             label = f"[{i + 1}] " if len(tasks) > 1 else ""
             try:
+                if t.get("gen"):
+                    return await _generate(woof, t["gen"], t, parent, lambda s: progress(label + s))
                 ctx_text = (_rules(t) + "\n" + str(t.get("context") or "")).strip()
                 kw = _kw(t, parent)
                 sid = follow if (follow and i == 0) else ""
@@ -154,13 +263,16 @@ def register(woof):
                              f"你可以先用一句話跟使用者說「派出去了，我在這裡陪你等」，或繼續別的動作；"
                              f"不要停下來等它，也不要反覆呼叫 delegate_task 去催。"
                              f"使用者也可以直接在那條子對話裡打字跟它講話。")
+            elif r.get("gen"):
+                parts.append(f"{head}\n{r['gen']}")
             else:
                 parts.append(f"{head}\n{r}")
         return {"output": "\n\n".join(parts), "is_error": bad == len(results)}
 
     woof.add_tool(
         "delegate_task",
-        "把獨立、可以分開做的子任務交給子代理。子代理有自己乾淨的上下文和全部工具，做完只回傳報告，"
+        "把獨立、可以分開做的子任務交給子代理；也用來生圖、生影片（model 填 image／video，goal 寫畫面描述，直接回傳檔案）。"
+        "子代理有自己乾淨的上下文和全部工具，做完只回傳報告，"
         "適合：大量搜尋或讀檔、互不相關的平行工作、會塞爆上下文的調查。"
         "子代理看不到目前的對話，goal 和 context 要寫清楚完整需求、路徑和限制。"
         "派出後不會等你：主對話可以繼續跟使用者說話，它跑完會自己把報告送回來。"
@@ -174,7 +286,8 @@ def register(woof):
                      "description": "read＝唯讀，可以多個並行；write＝會改檔案，同一時間只跑一個。預設 read"},
             "scope": {"type": "string", "description": "write 模式才需要：允許修改的路徑（例如 data/report/）。範圍外不准動"},
             "model": {"type": "string", "description": "選填。換別的模型做：只能用使用者在設定裡開放的模型（填錯會告訴你可用的）；"
-                                                          "簡單、量大的工作挑便宜的。不填＝預設子代理模型"},
+                                                          "簡單、量大的工作挑便宜的。不填＝預設子代理模型。"
+                                                          "image／video＝生圖／影片：goal 只寫畫面（可含比例、秒數），context 放參考圖路徑，scope 填另存資料夾"},
             "session_id": {"type": "string",
                            "description": "接續既有的子代理對話（之前 delegate_task 回傳的 id）：同一個對話、同一份上下文繼續講，不要重開"},
             "tasks": {"type": "array", "description": "多個子任務，每個可以是 {goal, context, mode, scope}",
