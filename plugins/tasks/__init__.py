@@ -26,6 +26,8 @@ def register(woof):
         if turn is None or not q:
             return {"output": "需要 question，且只能在對話中使用", "is_error": True}
         answer = await tasks.ask(turn, q, args.get("options") or [])
+        if tasks.timed_out(answer):
+            return {"output": answer}
         return {"output": f"使用者回答：{answer}"}
 
     todo_schema = {
@@ -52,7 +54,8 @@ def register(woof):
     woof.add_tool(
         "ask_user",
         "向使用者提問並等待回答。遇到需要使用者決定的事（方向、偏好、有風險的操作）就用這個，不要自己猜。"
-        "可以給 options 讓使用者點選；使用者也可以自己輸入。",
+        "可以給 options 讓使用者點選；使用者也可以自己輸入。"
+        "使用者一段時間（預設 3 分鐘）沒回應會自動略過，回傳會寫明人不在；這時自己判斷繼續，收不回來的事留到最後再問。",
         {"type": "object", "properties": {
             "question": {"type": "string", "description": "要問的問題，說清楚為什麼要問"},
             "options": {"type": "array", "items": {"type": "string"}, "description": "可選的答案，最多 6 個"}},

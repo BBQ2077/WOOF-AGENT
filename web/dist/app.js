@@ -709,6 +709,7 @@ function onEvent(ev) {
         question: (a && a.question) || ev.question || '',
         answer: ev.answer || '',
         skipped: !!ev.skipped || /略過/.test(ev.answer || ''),
+        timedOut: !!ev.timed_out, waited: ev.waited || 0,
         at: Date.now(),
       });
       if (S.askDone[sid].length > 20) S.askDone[sid].shift();
@@ -1878,6 +1879,26 @@ $('#taskBar').addEventListener('click', (e) => {
   else if (e.target.closest('[data-resume-x]')) { const r = resumeInfo(); if (r) S.resumeHide[S.sid] = r.key; renderTaskBar(); }
 });
 const ASK_SKIP = '（略過這題，你自己判斷決定）';
+// 問題卡片的倒數：時間到後端會自動略過；在卡片上打字會重新計時
+function askSpan(sec) { const s = Math.max(0, Math.round(sec)); return s >= 60 ? `${Math.floor(s / 60)} 分${s % 60 ? ` ${s % 60} 秒` : '鐘'}` : `${s} 秒`; }
+function askLeft(a) {
+  const s = Math.max(0, Math.ceil(a.deadline - Date.now() / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')} 內沒回就自動略過，讓模型自己判斷（在這裡打字會重新計時）`;
+}
+setInterval(() => {
+  for (const el of document.querySelectorAll('[data-askcd]')) {
+    const a = S.asks[el.dataset.askcd]; if (!a || !a.deadline) continue;
+    el.textContent = askLeft(a);
+    el.classList.toggle('soon', a.deadline - Date.now() / 1000 < 30);
+  }
+}, 1000);
+const ASK_TOUCHED = {};
+function askTouch(id) {
+  const a = S.asks[id]; if (!a || !a.deadline || Date.now() - (ASK_TOUCHED[id] || 0) < 5000) return;
+  ASK_TOUCHED[id] = Date.now();
+  a.deadline = Date.now() / 1000 + (a.timeout || 0);   // 先在畫面上重設，後端回來再對齊
+  api('POST', `/api/asks/${id}/touch`).then((r) => { if (r && r.deadline && S.asks[id]) S.asks[id].deadline = r.deadline; }).catch(() => {});
+}
 async function answerAsk(id, text) {
   try { await api('POST', `/api/asks/${id}`, { answer: text }); } catch (e) { notify('error', '回答送出失敗', e.message); return; }
   // 先標記已送出、讓卡片收起來，但不要刪掉那個 ask：後端回的 ask_done 要靠它才知道題目是什麼
@@ -2111,7 +2132,8 @@ function renderChat(scrollBottom) {
       + `<div class="opts">${(a.options || []).map((o) => `<button class="btn" data-ask="${esc(a.id)}" data-val="${esc(o)}">${esc(o)}</button>`).join('')}</div>`
       + `<div class="ansrow"><input data-askin="${esc(a.id)}" placeholder="或自己輸入…">`
       + `<button class="btn primary" data-asksend="${esc(a.id)}">送出</button>`
-      + `<button class="btn ghost ask-skip" data-askskip="${esc(a.id)}" title="不回答這題，讓模型自己判斷">略過</button></div></div>`;
+      + `<button class="btn ghost ask-skip" data-askskip="${esc(a.id)}" title="不回答這題，讓模型自己判斷">略過</button></div>`
+      + (a.deadline ? `<div class="ask-cd" data-askcd="${esc(a.id)}">${esc(askLeft(a))}</div>` : '') + `</div>`;
     chat.appendChild(div);
     const inp = $('[data-askin]', div);
     if (inp && S.askDraft[a.id]) inp.value = S.askDraft[a.id];
@@ -2127,7 +2149,7 @@ function renderChat(scrollBottom) {
     div.className = 'msg bot askmsg';
     div.innerHTML = `<div class="who">${esc(whoLine({ model: (cur() || {}).model }))}</div>`
       + `<div class="askcard askdone"><div class="q">${esc(d.question)}</div>`
-      + `<div class="a">${d.skipped ? '已略過' : d.answer ? '已回答：' + esc(d.answer) : '已回答'}</div></div>`;
+      + `<div class="a">${d.timedOut ? `你 ${esc(askSpan(d.waited))}沒回應，已自動略過，讓模型自己判斷繼續` : d.skipped ? '已略過' : d.answer ? '已回答：' + esc(d.answer) : '已停止'}</div></div>`;
     chat.appendChild(div);
   }
   for (const id of Object.keys(S.askDraft)) if (!S.asks[id]) delete S.askDraft[id];
@@ -5043,6 +5065,7 @@ async function renderPermsSec(box) {
     <div class="card">
       <div class="frow" data-f="pmAllow"><div><b>指令白名單</b><small>開頭符合就直接執行，不問（例如 <code>git status</code>、<code>ls</code>）。指令裡有 &amp;&amp;、;、| 串接時不適用。一行一個。</small></div><textarea class="mono" rows="4" data-pl="allow_cmds" placeholder="git status&#10;git diff&#10;ls">${esc(st.allow_cmds.join(NL))}</textarea></div>
       <div class="frow" data-f="pmDeny"><div><b>指令黑名單</b><small>指令裡出現這些字就擋下，任何模式都一樣。一行一個。</small></div><textarea class="mono" rows="3" data-pl="deny_cmds" placeholder="git push&#10;npm publish">${esc(st.deny_cmds.join(NL))}</textarea></div>
+      <div class="frow" data-f="pmAskWait"><div><b>問你問題時等多久</b><small>模型用提問卡片問你時，這段時間沒回就自動略過，並告訴模型你可能不在，讓它自己判斷繼續（收不回來的事會留到最後再問）。在卡片上打字會重新計時。0＝一直等。</small></div><div class="fctl"><label class="cin"><input type="number" data-pat min="0" max="86400" step="30" value="${st.ask_timeout}"><span>秒</span></label></div></div>
       <div class="frow" data-f="pmHeadless"><div><b>沒人在旁邊時</b><small>排程跑的對話碰到要先問的工具，沒有人能按允許。</small></div><div class="fctl"><div class="seg"><b data-ph="deny" class="${st.headless === 'deny' ? 'on' : ''}">擋下</b><b data-ph="approve" class="${st.headless === 'approve' ? 'on' : ''}">直接放行</b></div></div></div>
     </div>
     <div class="card" data-f="pmTry"><div class="card-hd"><b>試試看</b><small>輸入一個指令，看在各模式下會怎樣。</small></div>
@@ -5069,6 +5092,8 @@ async function renderPermsSec(box) {
     const pdm = e.target.closest('[data-pdm]');
     if (pdm) { $$('[data-pdm]', box).forEach((x) => x.classList.toggle('on', x === pdm)); await save({ default_mode: pdm.dataset.pdm }); S.defaultPerm = pdm.dataset.pdm; renderPerm(); }
   };
+  const pat = $('[data-pat]', box);
+  if (pat) pat.onchange = async () => { const v = Math.max(0, Math.min(86400, Math.round(+pat.value || 0))); pat.value = v; await save({ ask_timeout: v }, v ? `提問等 ${askSpan(v)}沒回就略過` : '提問會一直等你回答'); };
   $$('[data-pl]', box).forEach((ta) => { ta.onchange = async () => { await save({ [ta.dataset.pl]: ta.value.split(/\r?\n/).map((s) => s.trim()).filter(Boolean) }); tryIt(); }; });
 }
 
@@ -6541,6 +6566,7 @@ $('#chat').addEventListener('keydown', (e) => {
   const v = el.value.trim();
   if (v) answerAsk(el.dataset.askin, v);
 });
+$('#chat').addEventListener('input', (e) => { const el = e.target.closest && e.target.closest('[data-askin]'); if (el) askTouch(el.dataset.askin); });
 
 i18nApply();   // 介面語言：開啟時套用一次，之後新出現的畫面由 MutationObserver 接手
 

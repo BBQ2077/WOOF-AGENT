@@ -75,6 +75,8 @@ default_mode = "ask"
 danger_ask = true
 # 排程等沒人在旁邊的對話，碰到要先問的工具：deny（擋下）/ approve（直接放行）
 headless = "deny"
+# 模型用提問卡片問你時，等幾秒沒回就自動略過並告訴它你可能不在（0＝一直等）
+ask_timeout = 180
 
 
 # ── 對外連線 ──

@@ -45,24 +45,73 @@ def last_text(session_id: str, role: str) -> str:
     return "".join(b.get("text", "") for b in last.get("content", []) if b.get("type") == "text").strip()
 
 
-async def ask(turn, question: str, options: list[str] | None = None, timeout: float = 1800) -> str:
+NO_REPLY = "（使用者沒有回應"
+
+
+def ask_timeout() -> int:
+    """問使用者時等幾秒，0＝一直等。設定在 config.toml 的 [permissions] ask_timeout，預設 180。"""
+    from woof import perms
+
+    return perms.settings()["ask_timeout"]
+
+
+def no_reply_text(waited: float) -> str:
+    """等不到回答時交給模型的話：講清楚是人不在，不是使用者說「隨便」。"""
+    w = int(waited)
+    span = f"{w // 60} 分 {w % 60} 秒" if w >= 60 and w % 60 else f"{w // 60} 分鐘" if w >= 60 else f"{w} 秒"
+    return (f"{NO_REPLY}：等了 {span}都沒回，人可能不在電腦前。這題已自動略過，不要再問同一題。"
+            "請自己判斷最合理的做法繼續（例如選你推薦的那個選項）；刪檔、覆蓋、對外發送這類收不回來的事先不要做，"
+            "留到最後跟使用者說明，等他回來再決定。）")
+
+
+def timed_out(answer: str) -> bool:
+    return str(answer).startswith(NO_REPLY)
+
+
+async def ask(turn, question: str, options: list[str] | None = None, timeout: float | None = None) -> str:
     aid = uuid.uuid4().hex[:12]
     opts = [str(o) for o in (options or []) if str(o).strip()][:6]
-    ASKS[aid] = {"future": asyncio.get_running_loop().create_future(), "session_id": turn.session_id}
-    await turn.emit({"type": "ask", "session_id": turn.session_id, "id": aid, "question": question, "options": opts})
-    answer = "（使用者沒有回答）"
+    limit = ask_timeout() if timeout is None else max(0, int(timeout))
+    t0 = time.time()
+    fut = asyncio.get_running_loop().create_future()
+    ASKS[aid] = {"future": fut, "session_id": turn.session_id, "limit": limit,
+                 "deadline": t0 + limit if limit else 0}
+    await turn.emit({"type": "ask", "session_id": turn.session_id, "id": aid, "question": question, "options": opts,
+                     "timeout": limit, "deadline": ASKS[aid]["deadline"]})
+    answer = ""
     try:
-        answer = await asyncio.wait_for(ASKS[aid]["future"], timeout)
-        return answer
-    except asyncio.TimeoutError:
-        answer = "（使用者沒有回答）"
-        return answer
+        while True:
+            dl = ASKS[aid]["deadline"]
+            left = (dl - time.time()) if dl else None
+            if left is not None and left <= 0:
+                answer = no_reply_text(time.time() - t0)
+                ASKS[aid]["timed_out"] = True
+                return answer
+            try:
+                # 使用者在卡片上打字會把期限往後延（touch_ask），所以分段等、每段重看一次期限
+                answer = await asyncio.wait_for(asyncio.shield(fut), min(left, 30) if left is not None else None)
+                return answer
+            except asyncio.TimeoutError:
+                continue
     finally:
         # 卡片要顯示「已回答：使用者打的字」——答案跟「是不是略過」都要一起送回去，
         # 不然前端只知道這題結束了，會留一張空白的已回答卡在那裡
         a = ASKS.pop(aid, None) or {}
+        if not fut.done():
+            fut.cancel()
         await turn.emit({"type": "ask_done", "session_id": turn.session_id, "id": aid,
-                         "answer": str(answer), "skipped": bool(a.get("skipped"))})
+                         "answer": str(answer), "skipped": bool(a.get("skipped")),
+                         "timed_out": bool(a.get("timed_out")), "waited": int(time.time() - t0)})
+
+
+def touch_ask(aid: str) -> float:
+    """使用者正在卡片上打字：期限從現在重新算，免得打到一半被略過。回傳新的期限（0＝不限）。"""
+    a = ASKS.get(aid)
+    if not a or a["future"].done():
+        return -1
+    if a.get("limit"):
+        a["deadline"] = time.time() + a["limit"]
+    return a["deadline"]
 
 
 def skip_ask(session_id: str, answer: str = "（使用者直接回話，跳過這個問題）", skipped: bool = False) -> int:
@@ -400,7 +449,7 @@ async def run_gated(session_id: str, objective: str, emit, gate: str) -> None:
                 # 略過＝使用者不想審這題，讓流程照這版走
                 approved = True
                 break
-            if "取消" in ans or "沒有回答" in ans:
+            if "取消" in ans or timed_out(ans):
                 _save(session_id, goal={"objective": objective, "status": "stopped", "at": time.time()})
                 await emit({"type": "notice", "session_id": session_id, "text": "已取消，沒有動手"})
                 return
@@ -408,7 +457,7 @@ async def run_gated(session_id: str, objective: str, emit, gate: str) -> None:
         if not approved:
             ans = await ask(ctx, f"提了 {PLAN_ROUNDS} 版，審核（{gate_name}）都沒過，最後一次意見：{feedback}。要照最後這版做，還是取消？",
                             ["照做", "取消"])
-            if "取消" in ans or "沒有回答" in ans:
+            if "取消" in ans or timed_out(ans):
                 _save(session_id, goal={"objective": objective, "status": "stopped", "at": time.time()})
                 await emit({"type": "notice", "session_id": session_id, "text": "已取消，沒有動手"})
                 return

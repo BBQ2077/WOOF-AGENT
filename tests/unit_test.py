@@ -1507,6 +1507,68 @@ class AskSkip(unittest.TestCase):
             loop.close()
 
 
+class AskTimeout(unittest.TestCase):
+    """提問等太久沒回：自動略過，交給模型的話要寫明人不在；在卡片上打字會重新計時。"""
+
+    def _turn(self, events):
+        from types import SimpleNamespace
+
+        async def emit(ev):
+            events.append(ev)
+
+        return SimpleNamespace(session_id="asktimeout", emit=emit)
+
+    def test_times_out_with_reason(self):
+        from woof.agent import tasks
+
+        events = []
+        got = asyncio.run(tasks.ask(self._turn(events), "要用哪個資料夾？", ["A", "B"], timeout=1))
+        self.assertTrue(tasks.timed_out(got))
+        self.assertIn("人可能不在", got)
+        self.assertIn("收不回來", got)
+        ask = [e for e in events if e["type"] == "ask"][0]
+        self.assertEqual(ask["timeout"], 1)
+        self.assertGreater(ask["deadline"], 0)
+        done = [e for e in events if e["type"] == "ask_done"][-1]
+        self.assertTrue(done["timed_out"])
+        self.assertFalse(tasks.ASKS)
+
+    def test_touch_extends(self):
+        from woof.agent import tasks
+
+        events = []
+
+        async def go():
+            t = asyncio.create_task(tasks.ask(self._turn(events), "q", [], timeout=1))
+            await asyncio.sleep(0.6)
+            aid = next(iter(tasks.ASKS))
+            first = tasks.ASKS[aid]["deadline"]
+            self.assertGreater(tasks.touch_ask(aid), first)   # 打字：期限往後延
+            await asyncio.sleep(0.7)                            # 原本的期限已過，但延長後還沒到
+            self.assertFalse(t.done())
+            tasks.resolve_ask(aid, "B")
+            return await t
+
+        self.assertEqual(asyncio.run(go()), "B")
+        self.assertEqual(tasks.touch_ask("nope"), -1)
+
+    def test_tool_output_and_setting(self):
+        from woof import perms
+        from woof.agent import tasks
+
+        self.assertEqual(perms._ask_timeout(None), 180)
+        self.assertEqual(perms._ask_timeout("abc"), 180)
+        self.assertEqual(perms._ask_timeout(-5), 0)
+        self.assertEqual(perms._ask_timeout(999999), 86400)
+        self.assertEqual(perms.settings()["ask_timeout"], perms._ask_timeout(
+            (REG.config.get("permissions") or {}).get("ask_timeout")))
+        self.assertIn("3 分鐘", tasks.no_reply_text(180))
+        self.assertIn("1 分 30 秒", tasks.no_reply_text(90))
+        self.assertIn("45 秒", tasks.no_reply_text(45))
+        src = open(ROOT / "plugins" / "tasks" / "__init__.py", encoding="utf-8").read()
+        self.assertIn("if tasks.timed_out(answer):", src)
+
+
 class MemoryPerms(unittest.TestCase):
     """memory 的讀與寫分開：讀＝記憶與使用者偏好放進系統提示，寫＝模型自己改記憶檔。"""
 

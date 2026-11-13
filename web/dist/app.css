@@ -1747,6 +1747,8 @@ body.pane2 #paneA{padding:0}
 .askcard.askdone{background:transparent;border-color:transparent;padding:2px 2px 4px}
 .askcard.askdone .q{color:var(--dim)}
 .askcard.askdone .a{color:var(--dim);font-size:12.5px;margin-top:6px}
+.askcard .ask-cd{margin-top:8px;font-size:12px;color:var(--dim);font-variant-numeric:tabular-nums}
+.askcard .ask-cd.soon{color:var(--warn,#d9a441)}
 
 /* 用量分頁：時間範圍四格撐滿卡片（原本 width:max-content 會撐破卡片出現橫向捲軸） */
 .useg{width:100%;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:2px}

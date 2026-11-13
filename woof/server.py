@@ -1839,6 +1839,8 @@ async def perm_save(body: dict):
         cur["danger_ask"] = bool(body["danger_ask"])
     if "headless" in body:
         cur["headless"] = "approve" if body["headless"] == "approve" else "deny"
+    if "ask_timeout" in body:
+        cur["ask_timeout"] = perms._ask_timeout(body["ask_timeout"])
     for k in ("allow_cmds", "deny_cmds"):
         if k in body:
             cur[k] = [str(x).strip() for x in body[k] or [] if str(x).strip()][:200]
@@ -2247,6 +2249,15 @@ async def answer_ask(aid: str, body: dict):
     from woof.agent import tasks
 
     return {"ok": tasks.resolve_ask(aid, str(body.get("answer") or "").strip() or "（空白）")}
+
+
+@app.post("/api/asks/{aid}/touch")
+async def touch_ask(aid: str):
+    """使用者在問題卡片上打字：期限重新算。"""
+    from woof.agent import tasks
+
+    dl = tasks.touch_ask(aid)
+    return {"ok": dl >= 0, "deadline": max(dl, 0)}
 
 
 @app.get("/api/sessions/{sid}/tasks")

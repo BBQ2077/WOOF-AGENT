@@ -88,6 +88,14 @@ HARDLINE = [
 ]
 
 
+def _ask_timeout(v) -> int:
+    """問使用者時等幾秒才略過；0＝一直等，上限一天。"""
+    try:
+        return max(0, min(86400, int(v)))
+    except (TypeError, ValueError):
+        return 180
+
+
 def settings() -> dict:
     from .loader import REG
     p = dict(REG.config.get("permissions") or {})
@@ -98,6 +106,7 @@ def settings() -> dict:
         "custom": custom,
         "danger_ask": p.get("danger_ask", True) is not False,
         "headless": p.get("headless") if p.get("headless") in ("deny", "approve") else "deny",
+        "ask_timeout": _ask_timeout(p.get("ask_timeout")),
         "allow_cmds": [str(x).strip() for x in p.get("allow_cmds") or [] if str(x).strip()],
         "deny_cmds": [str(x).strip() for x in p.get("deny_cmds") or [] if str(x).strip()],
     }
