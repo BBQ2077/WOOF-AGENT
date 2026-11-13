@@ -16,6 +16,7 @@ import asyncio
 import hashlib
 import itertools
 import json
+import logging
 import threading
 import time
 import uuid
@@ -28,6 +29,8 @@ from ..config import DATA
 from ..loader import REG
 from ..prompts import get as _P
 from .. import redact as _redact
+
+log = logging.getLogger("woof.agent")
 
 Emit = Callable[[dict], Awaitable[None]]
 

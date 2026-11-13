@@ -264,9 +264,23 @@ def _parse_check(ans: str) -> tuple[bool, list[str], str]:
         j = json.loads(found[-1])
     except Exception:
         return False, [], "對抗檢查回覆解析失敗"
-    gaps = [str(x).strip() for x in (j.get("gaps") or j.get("reason") or []) if str(x).strip()][:3]
+    raw = j.get("gaps") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    gaps = [str(x).strip() for x in raw if str(x).strip()][:3]
     ok = bool(j.get("pass")) and not gaps
     return ok, ([] if ok else gaps), str(j.get("reason") or "")
+
+
+async def review(ctx, request: str, report: str) -> tuple[bool, str]:
+    """手動審核（審核上一則回覆、審核改動）：交給審核模型看證據，回（有沒有過, 理由）。"""
+    goal = _prompt("review") + _prompt("review_body", objective=request, plan="（手動審核，沒有分步驟）",
+                                       report=report or "（沒有文字回覆）")
+    r = await _sub(ctx, goal, "審核：", f"審核模型：{request.strip()[:20]}", "review_request")
+    if r is None:
+        return False, "審核模型逾時，沒有結論"
+    ok, gaps, why = _parse_check(r.get("answer") or "")
+    return ok, "；".join(gaps) or why
 
 
 async def final_check(ctx, session_id: str, objective: str, steps: list[str], emit) -> tuple[bool, list[str]]:

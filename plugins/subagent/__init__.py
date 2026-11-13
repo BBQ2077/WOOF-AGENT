@@ -99,7 +99,7 @@ def _gen_target(woof, t: dict) -> dict | None:
         want = _gen_by_goal(str(t.get("goal") or ""))
         if not want:
             return None
-    models = [m for m in woof.config.get("models", []) if m.get("enabled") is not False]
+    models = [m for m in woof.config.get("models", []) if m.get("enabled") is not False or media.kind_of(m) in ("image", "video")]
     named = next((m for m in models if want in (m["id"], m.get("model"), m.get("label"))), None)
     kind = _GEN_WORDS.get(want.lower()) or (media.kind_of(named) if named else "")
     if kind not in ("image", "video"):

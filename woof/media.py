@@ -62,6 +62,39 @@ def _agnes(m: dict) -> bool:
     return "agnes-ai.com" in str(m.get("base_url") or "")
 
 
+def _key(woof, m: dict) -> str:
+    pool = woof.keys(m.get("key_pool") or m.get("provider"))
+    e = pool.get()
+    if e is None:
+        raise RuntimeError(f"「{m.get('label', m['id'])}」沒有可用的 API key（金鑰池「{pool.name}」），請到「設定 → API 金鑰」貼上")
+    return e.key
+
+
+
+
+
+def _out(ext: str) -> Path:
+    d = MEDIA / datetime.now().strftime("%Y%m%d")
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"{datetime.now().strftime('%H%M%S')}_{uuid.uuid4().hex[:6]}{ext}"
+
+
+def _data_uri(path: str) -> str:
+    p = Path(path)
+    mt = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif"}.get(p.suffix.lower(), "image/png")
+    return f"data:{mt};base64,{base64.b64encode(p.read_bytes()).decode()}"
+
+
+def _err(r: httpx.Response) -> str:
+    try:
+        j = r.json()
+        e = j.get("error") if isinstance(j, dict) else None
+        msg = (e.get("message") if isinstance(e, dict) else e) or j.get("message") or j
+    except Exception:
+        msg = r.text
+    return f"HTTP {r.status_code}：{str(msg)[:300]}"
+
+
 def family(m: dict) -> str:
     """用哪一種 API 格式送：agnes／xai／gemini／openai（其他都當 OpenAI 相容）。看連線網址，不看模型名稱。"""
     base = str(m.get("base_url") or "").lower()

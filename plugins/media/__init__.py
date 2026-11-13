@@ -16,7 +16,7 @@ def register(woof):
         if want:
             return next((m for m in models if m["id"] == want), None)
         for m in models:
-            if media.kind_of(m) != kind or m.get("enabled") is False:
+            if media.kind_of(m) != kind:   # enabled=false 只是不放進聊天選單，生成型模型本來就不列在那裡
                 continue
             pool = woof.keys(m.get("key_pool") or m.get("provider"))
             if pool.entries:

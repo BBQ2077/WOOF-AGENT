@@ -1284,7 +1284,9 @@ function modelMeta(m, withVendor) {
 }
 const STAR_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M12 3.6l2.6 5.5 6 .8-4.4 4.1 1.1 5.9L12 17.1l-5.3 2.8 1.1-5.9-4.4-4.1 6-.8z"/></svg>';
 const STAR_ON = STAR_SVG.replace('fill="none"', 'fill="currentColor"');
-function visibleModels() { return S.models.filter((m) => m.enabled !== false); }
+// 生成型模型（生圖、影片）不放進聊天的模型選單：在「設定 → 模型用途 → 生圖・生影片」選，給工具與子代理用
+function isGenModel(m) { return m.kind === 'image' || m.kind === 'video'; }
+function visibleModels() { return S.models.filter((m) => m.enabled !== false && !isGenModel(m)); }
 function vendorName(id) { const v = S.vendors.find((x) => x.id === id); return v ? v.label || v.id : (id || '其他'); }
 function mgrpOpenSet() {
   try { const v = JSON.parse(localStorage.getItem('woof.mgrpOpen') || 'null'); if (Array.isArray(v)) return new Set(v); } catch (e) { /* 壞值當沒設 */ }
@@ -1370,7 +1372,7 @@ function renderModelEdit() {
   const match = (m) => !q || `${m.label} ${m.vendor_label} ${m.id}`.toLowerCase().includes(q);
   const groups = new Map();
   for (const m of S.models) {
-    if (!match(m)) continue;
+    if (!match(m) || isGenModel(m)) continue;
     const k = m.vendor || '';
     if (!groups.has(k)) groups.set(k, []);
     groups.get(k).push(m);
@@ -1413,7 +1415,7 @@ async function onModelEditClick(e) {
   const vt = e.target.closest('[data-vtog]');
   if (vt) {
     const turnOn = vt.dataset.st !== 'all', k = vt.dataset.vtog;
-    await saveModelsEnabled(Object.fromEntries(S.models.filter((m) => (m.vendor || '') === k).map((m) => [m.id, turnOn])));
+    await saveModelsEnabled(Object.fromEntries(S.models.filter((m) => (m.vendor || '') === k && !isGenModel(m)).map((m) => [m.id, turnOn])));
     return;
   }
   const mt = e.target.closest('[data-mtog]');
@@ -5876,7 +5878,7 @@ async function openDiscovered(v) {
   if (!d.items.length) { notify('warn', '檢索到 0 個模型', d.error || ''); return; }
   await modal({
     title: `從 ${v.label || v.id} 挑模型`, wide: true,
-    desc: `共 ${d.items.length} 個。勾選的才會加進設定；已加入的不會重複加。`,
+    desc: `共 ${d.items.length} 個。勾選的才會加進設定；已加入的不會重複加。生圖、影片模型加進來也不會出現在聊天的模型選單，在「設定 → 模型用途 → 生圖・生影片」選。`,
     body: pickerHtml(d.items.map((x) => ({ id: x.model, name: x.label || x.model, context: x.context_window, vision: x.vision, free: x.free, reasoning: x.reasoning })),
       new Set(d.items.filter((x) => x.added).map((x) => x.model))),
     ok: '加入勾選',
