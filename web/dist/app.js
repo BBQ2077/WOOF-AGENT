@@ -1741,7 +1741,9 @@ $('#chat').addEventListener('click', (e) => {
 const V = { list: [], i: 0, s: 1, x: 0, y: 0, rot: 0, fit: 1, moved: false };
 const vImg = $('#viewerImg'), vStage = $('#vStage');
 function openViewer(img) {
-  const all = [...$('#chat').querySelectorAll('.thumbs img, .md img, .bubble img')].filter((x) => x.src);
+  // 寵物欄的圖：左右切換只在寵物送過的圖之間，不混進主對話的圖
+  const pet = img && img.closest && img.closest('#panePet');
+  const all = (pet ? [...$('#petHist').querySelectorAll('.patt img')] : [...$('#chat').querySelectorAll('.thumbs img, .md img, .bubble img')]).filter((x) => x.src);
   V.list = [...new Set(all.map((x) => x.src))];
   V.i = Math.max(0, V.list.indexOf(img.src));
   if (!V.list.length) V.list = [img.src];
@@ -7154,8 +7156,8 @@ function petAttHtml(m) {
   const at = m.att || [];
   if (!at.length) return '';
   return `<div class="patt">${at.map((a) => a.kind === 'image' || a.preview
-    ? `<img src="${a.preview || fileUrl(a.path)}" alt="" data-pet="attopen" data-path="${esc(a.path || '')}" title="${esc(a.name || '')}">`
-    : `<span class="pdoc" data-pet="attopen" data-path="${esc(a.path || '')}" title="${esc(a.read === false ? '這種格式牠讀不到內容' : '')}">📄 ${esc(a.name || '檔案')}</span>`).join('')}</div>`;
+    ? `<img src="${a.preview || fileUrl(a.path)}" alt="" data-pet="attimg" title="${esc(a.name || '')}（點一下看大圖）">`
+    : `<span class="pdoc" data-pet="attdoc" data-path="${esc(a.path || '')}" title="${esc((a.read === false ? '這種格式牠讀不到內容 · ' : '') + '點一下打開')}">📄 ${esc(a.name || '檔案')}</span>`).join('')}</div>`;
 }
 $('#petAttIn').onchange = (e) => { petAddFiles(e.target.files); e.target.value = ''; };
 $('#petIn').addEventListener('paste', (e) => {
@@ -7372,7 +7374,9 @@ $('#panePet').addEventListener('click', (e) => {
   if (k === 'boop') petBoop();
   if (k === 'att') $('#petAttIn').click();
   if (k === 'attx') { PET.att.splice(+b.dataset.i, 1); petPaintAtt(); }
-  if (k === 'attopen' && b.dataset.path) openPreview(b.dataset.path);
+  // 點附件：圖片開看圖器（跟對話裡的圖一樣），文件照副檔名在預覽開或交給系統預設程式
+  if (k === 'attimg') openViewer(b);
+  if (k === 'attdoc') { if (b.dataset.path) openFileLink(b.dataset.path); else toast('還在送，等牠回完再點'); }
   if (k === 'rxpick') petRxPick(b, b.dataset.mid || '');
   if (k === 'unrx') { const m = PET.hist.find((x) => x.id === b.dataset.mid); if (m) petReact(m.id, m.ureact); }
 });
