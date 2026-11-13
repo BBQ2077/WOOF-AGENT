@@ -761,12 +761,13 @@ async def pet_say(body: dict):
     from . import pet
 
     text = str((body or {}).get("text") or "").strip()
-    if not text:
+    att = pet.save_att((body or {}).get("att") or [])
+    if not text and not att:
         raise HTTPException(400, "要說點什麼")
     sid = str((body or {}).get("session_id") or "") or None
     if sid:
         pet.watching(sid)
-    r = await pet.talk(text, sid, broadcast)
+    r = await pet.talk(text, sid, broadcast, att=att)
     if r.get("error"):
         raise HTTPException(400, r["error"])
     r["history"] = pet.history()[-40:]
@@ -2521,6 +2522,11 @@ async def ws_endpoint(ws: WebSocket):
                     es = ((store.get_session(sid) or {}).get("engine_state") or {})
                     reason = str(msg.get("reason") or (es.get("interrupted") or {}).get("reason") or "程式關閉或連線中斷")
                     AUTO_RESUMED.pop(sid, None)
+                    from woof.agent import tasks as _tasks
+
+                    if _tasks.resume_goal(sid, broadcast, reason):
+                        # 方案做到一半被打斷：接回整個流程（做完中斷那步再往下），不是只續一回合就斷掉
+                        continue
                     RUNS[sid] = asyncio.create_task(_continue_turn(sid, reason))
             elif t == "rerun" and sid:
                 mid = int(msg.get("from_id") or 0)

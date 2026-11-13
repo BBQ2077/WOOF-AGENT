@@ -1852,3 +1852,22 @@ body.pane2 #paneA{padding:0}
 .cp-tool .cp-sw.dis{opacity:.35;cursor:not-allowed}
 .tool .timgs{display:flex;gap:6px;padding:6px 10px 8px;flex-wrap:wrap}
 .tool .timgs img{max-height:120px;max-width:220px;border-radius:6px;border:1px solid var(--line);cursor:zoom-in;object-fit:contain;background:var(--panel)}
+
+/* 丟給寵物的附件：輸入框上方待送的、紀錄裡已送的 */
+.petclip{flex:0 0 auto;width:26px;height:26px;margin-bottom:3px;border-radius:50%;border:1px solid var(--line2);background:var(--panel2);
+  color:var(--dim);display:grid;place-items:center;cursor:pointer;padding:0}
+.petclip:hover{color:var(--text);border-color:var(--acc)}
+.petclip svg{width:14px;height:14px}
+.petatts{display:none;flex:0 0 auto;flex-wrap:wrap;gap:6px;padding:0 2px 6px}
+.petatts.on{display:flex}
+.petatts .pa{position:relative;border:1px solid var(--line2);border-radius:8px;background:var(--panel2);font-size:11.5px}
+.petatts .pa.img img{display:block;width:52px;height:52px;object-fit:cover;border-radius:7px}
+.petatts .pa.doc{display:flex;flex-direction:column;max-width:150px;padding:5px 18px 5px 8px}
+.petatts .pa.doc b{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.petatts .pa.doc small{color:var(--faint)}
+.petatts .pa span{position:absolute;top:-6px;right:-6px;width:16px;height:16px;border-radius:50%;background:var(--text);color:var(--bg);
+  font-size:11px;line-height:16px;text-align:center;cursor:pointer}
+.pmsg.u .patt{display:flex;flex-wrap:wrap;gap:4px;justify-content:flex-end;margin-bottom:3px}
+.pmsg.u .patt img{max-width:120px;max-height:120px;border-radius:8px;cursor:zoom-in;display:block}
+.pmsg.u .patt .pdoc{font-size:11.5px;padding:3px 8px;border-radius:8px;background:var(--panel2);border:1px solid var(--line2);cursor:pointer}
+#panePet.drop .petwrap{outline:2px dashed var(--acc);outline-offset:-6px;border-radius:10px}

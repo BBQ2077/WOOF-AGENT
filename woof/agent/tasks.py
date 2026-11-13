@@ -241,9 +241,12 @@ def resume_digest(session_id: str, tools: int = 8) -> str:
     goal = ((s.get("engine_state") or {}).get("goal") or {})
     if goal.get("objective"):
         out.append("目標：" + str(goal["objective"])[:300])
-    ask = last_text(session_id, "user")
-    if ask and not ask.startswith("（接續"):
-        out.append("這次要做的事：" + ask.strip()[:300])
+    # 「這次要做的事」取最後一則不是接續訊息的使用者訊息；拿接續訊息當任務會一層套一層
+    last = next((m for m in reversed(store.get_messages(session_id))
+                 if m["role"] == "user" and (m.get("meta") or {}).get("internal") != "resume"), None)
+    ask = "".join(b.get("text", "") for b in (last or {}).get("content", []) if b.get("type") == "text").strip()
+    if ask:
+        out.append("這次要做的事：" + ask[:300])
     recent = _recent_report(session_id, tools)
     if recent and recent != "（沒有紀錄）":
         out.append("最近做過（最舊→最新）：\n" + recent[-2500:])
@@ -323,11 +326,13 @@ async def final_check(ctx, session_id: str, objective: str, steps: list[str], em
     return ok, gaps
 
 
-async def _run_step(ctx, session_id: str, objective: str, step: str, idx: int, total: int, emit) -> bool:
+async def _run_step(ctx, session_id: str, objective: str, step: str, idx: int, total: int, emit,
+                    plan: list[str] | None = None) -> bool:
     """做一步：不再每步派子代理審核（那是八股與卡住的來源），做完就往下。"""
     from woof.agent.loop import run_model_loop
 
-    text = _prompt("goal_step", objective=objective, n=idx + 1, total=total, step=step)
+    text = _prompt("goal_step", objective=objective, n=idx + 1, total=total, step=step,
+                   plan="\n".join(f"{i + 1}. {s}" for i, s in enumerate(plan or [step])))
     m = store.add_message(session_id, "user", [{"type": "text", "text": text}], meta=internal.meta("goal_step"))
     await emit({"type": "message", "session_id": session_id, "message": m})
     try:
@@ -340,8 +345,78 @@ async def _run_step(ctx, session_id: str, objective: str, step: str, idx: int, t
         return False
 
 
-async def run_goal(session_id: str, objective: str, emit, steps: list[str] | None = None) -> None:
-    """目標：拆步驟（能一步就一步）→ 照做 → 全部做完只做一次對抗檢查 → 有缺口補一輪。"""
+STEPS_MAX = 8   # 拓展補成的一整套最多幾步（規劃本身只拆 1～5 步）
+
+
+def _goal_save(session_id: str, objective: str, status: str, steps: list[str] | None = None, idx: int = 0,
+               new: bool = False) -> None:
+    """方案的步驟與做到第幾步存在 goal 裡（不放 todos：模型自己呼叫 todo 會蓋掉），程式重開後「繼續」才接得回來。
+    since＝流程開始時最後一則訊息；之後你自己下了新指令，就不再接回這個方案。"""
+    g = {"objective": objective, "status": status, "at": time.time()}
+    if steps:
+        old = _state(session_id).get("goal") or {}
+        g.update(steps=steps, idx=idx, since=(None if new else old.get("since")) or _last_mid(session_id))
+    _save(session_id, goal=g)
+
+
+def _last_mid(session_id: str) -> int:
+    msgs = store.get_messages(session_id)
+    return int(msgs[-1]["id"]) if msgs else 0
+
+
+def resumable_goal(session_id: str) -> dict | None:
+    """有沒有做到一半的方案可以接：有步驟、狀態是執行中／被停，而且之後你沒有另外下新的指令。"""
+    g = _state(session_id).get("goal") or {}
+    if not g.get("steps") or g.get("status") not in ("running", "stopped"):
+        return None
+    since = int(g.get("since") or 0)
+    for m in store.get_messages(session_id, after=since):
+        if m["role"] == "user" and not (m.get("meta") or {}).get("internal"):
+            return None
+    return g
+
+
+def resume_goal(session_id: str, emit, reason: str) -> bool:
+    """「繼續」：方案做到一半被打斷（程式重開、停止、出錯）就接回流程——先把中斷的那步做完，再一步步往下，最後照樣驗收。"""
+    g = resumable_goal(session_id)
+    t = GOAL_TASKS.get(session_id)
+    if not g or (t and not t.done()):
+        return False
+    from woof.agent.loop import clear_interrupted
+
+    s2 = clear_interrupted(session_id)
+    if s2:
+        asyncio.get_running_loop().create_task(emit({"type": "session_updated", "session": s2}))
+    GOAL_TASKS[session_id] = _track(session_id, run_goal(session_id, g["objective"], emit, steps=list(g["steps"]),
+                                                         start=int(g.get("idx") or 0), resume_reason=reason), emit)
+    return True
+
+
+async def _resume_step(ctx, session_id: str, reason: str, emit) -> bool:
+    """接續被打斷的那一步：用一般的「中斷後接續」訊息（含已做過的摘要），不重送步驟。"""
+    from woof.agent.loop import run_model_loop
+    from woof.prompts import get as _p
+
+    text = _p("resume", reason=reason)
+    digest = resume_digest(session_id)
+    if digest:
+        text = text.rstrip() + "\n\n" + digest
+    m = store.add_message(session_id, "user", [{"type": "text", "text": text}], meta=internal.meta("resume"))
+    await emit({"type": "message", "session_id": session_id, "message": m})
+    try:
+        await run_model_loop(ctx)
+        return True
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        await emit({"type": "notice", "session_id": session_id, "text": f"接續出錯：{e}"})
+        return False
+
+
+async def run_goal(session_id: str, objective: str, emit, steps: list[str] | None = None,
+                   start: int = 0, resume_reason: str = "") -> None:
+    """目標：拆步驟（能一步就一步）→ 照做 → 全部做完只做一次對抗檢查 → 有缺口補一輪。
+    start／resume_reason：程式重開或停止後「繼續」，從第 start 步接回（那一步先用接續訊息做完）。"""
     from woof.agent.loop import TurnContext
     from woof.loader import REG
 
@@ -350,13 +425,14 @@ async def run_goal(session_id: str, objective: str, emit, steps: list[str] | Non
     if model_cfg is None or model_cfg.get("provider") not in REG.providers:
         await emit({"type": "notice", "session_id": session_id, "text": "目標需要 API 型模型，請換一個模型"})
         return
-    _save(session_id, goal={"objective": objective, "status": "planning", "at": time.time()})
+    if not resume_reason:
+        _save(session_id, goal={"objective": objective, "status": "planning", "at": time.time()})
     ctx = TurnContext(store.get_session(session_id), model_cfg,
                       (session or {}).get("effort") or model_cfg.get("default_effort"), emit)
     try:
         if steps is None:
             steps = await plan_steps(model_cfg, objective)
-        steps = [s for s in steps if str(s).strip()][:5]
+        steps = [s for s in steps if str(s).strip()][:STEPS_MAX]
         if not steps:
             from woof.agent.loop import run_model_loop
 
@@ -364,19 +440,30 @@ async def run_goal(session_id: str, objective: str, emit, steps: list[str] | Non
             await run_model_loop(ctx)
             _save(session_id, goal={"objective": objective, "status": "chat", "at": time.time()})
             return
-        items = set_todos(session_id, [{"text": s, "status": "pending"} for s in steps])
-        _save(session_id, goal={"objective": objective, "status": "running", "at": time.time()})
+        start = max(0, min(start, len(steps)))
+        items = set_todos(session_id, [{"text": s, "status": "done" if i < start else "pending"} for i, s in enumerate(steps)])
+        _goal_save(session_id, objective, "running", steps, start, new=not resume_reason)
         await _push_todos(emit, session_id, items)
+        if start:
+            await emit({"type": "notice", "session_id": session_id,
+                        "text": f"接回方案：從第 {start + 1}/{len(steps)} 步繼續" if start < len(steps) else "接回方案：步驟都做完了，接著驗收"})
         failed = 0
         for i, step in enumerate(steps):
+            if i < start:
+                continue
             items[i]["status"] = "doing"
             _save(session_id, todos=items)
+            _goal_save(session_id, objective, "running", steps, i)
             await _push_todos(emit, session_id, items)
-            ok = await _run_step(ctx, session_id, objective, step, i, len(steps), emit)
+            if i == start and resume_reason:
+                ok = await _resume_step(ctx, session_id, resume_reason, emit)
+            else:
+                ok = await _run_step(ctx, session_id, objective, step, i, len(steps), emit, plan=steps)
             items[i]["status"] = "done" if ok else "failed"
             if not ok:
                 failed += 1
             _save(session_id, todos=items)
+            _goal_save(session_id, objective, "running", steps, i + 1)
             await _push_todos(emit, session_id, items)
 
         # 做完驗一次：真的做到了嗎；有缺口就補，最多補 fix_rounds 輪（設定 → 方案模式），不會無限打回。
@@ -410,7 +497,9 @@ async def run_goal(session_id: str, objective: str, emit, steps: list[str] | Non
             for t in cur["todos"]:
                 if t.get("status") == "doing":
                     t["status"] = "pending"
-        _save(session_id, todos=cur.get("todos") or [], goal={"objective": objective, "status": "stopped"})
+        g = dict(cur.get("goal") or {})
+        g.update(objective=objective, status="stopped")   # 步驟與進度留著：按「繼續」從停下的那步接回
+        _save(session_id, todos=cur.get("todos") or [], goal=g)
         raise
     except Exception as e:
         _save(session_id, goal={"objective": objective, "status": "error", "error": str(e)[:300]})
@@ -480,7 +569,7 @@ async def expand_plan(parent, objective: str, steps: list[str]) -> tuple[list[st
     j = _jobj(r.get("answer") or "", "steps")
     new = [str(x).strip() for x in ((j or {}).get("steps") or []) if str(x).strip()]
     if new:
-        return new[:5], str((j or {}).get("notes") or "")[:200]
+        return new[:STEPS_MAX], str((j or {}).get("notes") or "")[:200]
     if parent is not None:
         await parent.emit({"type": "notice", "session_id": parent.session_id,
                            "text": "拓展模型（子代理）的回覆讀不出步驟，照原本的方案做"})
@@ -575,7 +664,9 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
                 return
         await run_goal(session_id, objective, emit, steps=steps)
     except asyncio.CancelledError:
-        _save(session_id, goal={"objective": objective, "status": "stopped", "at": time.time()})
+        g = dict(_state(session_id).get("goal") or {})   # run_goal 已存的步驟與進度留著，「繼續」才接得回來
+        g.update(objective=objective, status="stopped", at=time.time())
+        _save(session_id, goal=g)
         raise
     except Exception as e:
         _save(session_id, goal={"objective": objective, "status": "error", "error": str(e)[:300]})

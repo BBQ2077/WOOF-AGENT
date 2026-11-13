@@ -294,6 +294,7 @@ def reset_chat() -> None:
     d = _load()
     d.update(msgs=[], summary="", say="", mood="", sug=[], react="", at=0, last_main="")
     _save(d)
+    gc_att()
 
 
 def persona(c: str | None = None) -> str:
@@ -480,19 +481,156 @@ def build_system(c: dict | None = None, mode: str = "glance", hint: str = "") ->
     return "\n".join(lines)
 
 
-def _own_messages(c: dict) -> list:
-    """自己的對話紀錄轉成模型訊息；使用者按的表情寫進他的下一句前面，讓牠知道。"""
+# ---------------------------------------------------------------- 附件（丟給牠的圖片、文件）
+ATT = DIR / "att"
+ATT_DOC_MAX = 6000      # 文件抽出的文字最多給牠幾個字
+ATT_FILE_MAX = 25 * 1024 * 1024
+ATT_IMG_TURNS = 2       # 只有最近幾則帶圖的訊息附圖本身，再早的只留「丟過一張圖」
+
+
+def _doc_text(path) -> str:
+    """文件轉文字：純文字檔、docx／pptx（解 zip 裡的 XML）、xlsx（openpyxl）。PDF 等讀不了的回空字串。"""
+    import zipfile
+    from pathlib import Path
+
+    p = Path(path)
+    ext = p.suffix.lower()
+    try:
+        if ext in (".docx", ".pptx"):
+            with zipfile.ZipFile(p) as z:
+                names = (["word/document.xml"] if ext == ".docx"
+                         else sorted((n for n in z.namelist() if re.fullmatch(r"ppt/slides/slide\d+\.xml", n)),
+                                     key=lambda n: int(re.findall(r"\d+", n)[-1])))
+                parts = []
+                for n in names:
+                    xml = z.read(n).decode("utf-8", "replace")
+                    xml = re.sub(r"</w:p>|</a:p>", "\n", xml)
+                    parts.append(re.sub(r"<[^>]+>", "", xml))
+                return "\n".join(parts).strip()
+        if ext in (".xlsx", ".xlsm"):
+            import openpyxl
+
+            wb = openpyxl.load_workbook(p, read_only=True, data_only=True)
+            rows = []
+            for ws in wb.worksheets:
+                rows.append(f"[{ws.title}]")
+                for r in ws.iter_rows(values_only=True):
+                    if any(v is not None for v in r):
+                        rows.append("\t".join("" if v is None else str(v) for v in r))
+                    if len(rows) > 400:
+                        break
+            return "\n".join(rows)
+        raw = p.read_bytes()
+        if b"\x00" in raw[:4096]:
+            return ""
+        for enc in ("utf-8", "utf-16", "big5", "gb18030"):
+            try:
+                return raw.decode(enc)
+            except UnicodeDecodeError:
+                continue
+        return raw.decode("utf-8", "replace")
+    except Exception:
+        return ""
+
+
+def save_att(items: list) -> list[dict]:
+    """前端送來的附件（base64）存進 data/pet/att；文件順便抽好文字存成同名 .txt。回存進訊息的描述。"""
+    import base64
+    import mimetypes
+    from pathlib import Path
+
+    ATT.mkdir(parents=True, exist_ok=True)
+    out = []
+    for it in (items or [])[:6]:
+        try:
+            data = base64.b64decode(str(it.get("data") or ""))
+        except Exception:
+            continue
+        if not data or len(data) > ATT_FILE_MAX:
+            continue
+        name = str(it.get("name") or "附件")[:120]
+        mt = str(it.get("media_type") or mimetypes.guess_type(name)[0] or "application/octet-stream")
+        ext = Path(name).suffix.lower()[:10] or mimetypes.guess_extension(mt) or ".bin"
+        if not re.fullmatch(r"\.[a-z0-9]{1,9}", ext):
+            ext = ".bin"
+        path = ATT / f"{uuid.uuid4().hex[:12]}{ext}"
+        path.write_bytes(data)
+        if mt.startswith("image/"):
+            out.append({"kind": "image", "path": str(path), "name": name, "media_type": mt})
+        else:
+            txt = _doc_text(path)
+            if txt.strip():
+                path.with_suffix(path.suffix + ".txt").write_text(txt[:ATT_DOC_MAX * 2], encoding="utf-8")
+            out.append({"kind": "file", "path": str(path), "name": name, "bytes": len(data), "read": bool(txt.strip())})
+    return out
+
+
+def _att_note(m: dict) -> str:
+    """附件寫成給牠看的文字：文件附抽出的內容，讀不了的照實講。"""
+    from pathlib import Path
+
+    lines = []
+    for a in m.get("att") or []:
+        if a.get("kind") == "image":
+            lines.append(f"（他丟了一張圖：{a.get('name')}）")
+            continue
+        t = ""
+        side = Path(str(a.get("path"))).with_suffix(Path(str(a.get("path"))).suffix + ".txt")
+        if side.is_file():
+            t = side.read_text(encoding="utf-8", errors="replace")
+        if t.strip():
+            cut = len(t) > ATT_DOC_MAX
+            lines.append(f"（他丟了一個檔案：{a.get('name')}，內容{'（只給你前面一段）' if cut else ''}：）\n"
+                         f"<file name=\"{a.get('name')}\">\n{t[:ATT_DOC_MAX]}\n</file>")
+        else:
+            lines.append(f"（他丟了一個檔案：{a.get('name')}，但這種格式你讀不到內容，照實跟他說）")
+    return "\n".join(lines)
+
+
+def gc_att() -> int:
+    """刪掉沒有任何寵物紀錄引用的附件（壓縮、清空對話後留下的）。一小時內的新檔不動。"""
+    if not ATT.is_dir():
+        return 0
+    used = set()
+    for f in DIR.glob("chat-*.json"):
+        try:
+            for m in json.loads(f.read_text(encoding="utf-8")).get("msgs") or []:
+                for a in m.get("att") or []:
+                    used.add(str(a.get("path")))
+        except Exception:
+            continue
+    n = 0
+    fresh = time.time() - 3600
+    for p in ATT.iterdir():
+        base = str(p)[:-4] if p.name.endswith(".txt") else str(p)
+        if base in used or p.stat().st_mtime > fresh:
+            continue
+        try:
+            p.unlink()
+            n += 1
+        except OSError:
+            pass
+    return n
+
+
+def _own_messages(c: dict, vision: bool = False) -> list:
+    """自己的對話紀錄轉成模型訊息；使用者按的表情寫進他的下一句前面，讓牠知道。
+    vision：牠的模型能看圖時，最近 ATT_IMG_TURNS 則帶圖的訊息附上圖本身。"""
     d = _load()
     msgs = d.get("msgs") or []
     budget = int(c["ctx"])
     out, used = [], 0
     for m in reversed(msgs):
-        t = est_tokens(m.get("text") or "")
+        t = est_tokens((m.get("text") or "") + (_att_note(m) if m.get("att") else ""))
         if used + t > budget * 0.8 and out:
             break
         out.append(m)
         used += t
     out.reverse()
+    from pathlib import Path
+
+    pics = [m for m in out if m.get("role") != "pet" and any(a.get("kind") == "image" for a in m.get("att") or [])]
+    pics = pics[-ATT_IMG_TURNS:]
     conv: list = []
     note = ""
     for m in out:
@@ -505,7 +643,16 @@ def _own_messages(c: dict) -> list:
             if m.get("ureact"):
                 note = f"（他對你上一則按了 {m['ureact']}）\n"
         else:
-            conv.append({"role": "user", "content": [{"type": "text", "text": note + (m.get("text") or "")}]})
+            body = note + (m.get("text") or "")
+            blocks = []
+            if m.get("att"):
+                body = (body + "\n" + _att_note(m)).strip()
+                if vision and m in pics:
+                    blocks = [{"type": "image", "path": a["path"], "media_type": a.get("media_type") or "image/png"}
+                              for a in m["att"] if a.get("kind") == "image" and Path(str(a.get("path"))).is_file()]
+                elif any(a.get("kind") == "image" for a in m["att"]):
+                    body += "\n（圖你看不到" + ("：太早的圖已經收起來了" if vision else "：你現在用的模型不能看圖") + "，照實說）"
+            conv.append({"role": "user", "content": [{"type": "text", "text": body}] + blocks})
             note = ""
     if note:
         conv.append({"role": "user", "content": [{"type": "text", "text": note.strip()}]})
@@ -516,6 +663,7 @@ def _own_messages(c: dict) -> list:
     for x in conv:
         if merged and merged[-1]["role"] == x["role"]:
             merged[-1]["content"][0]["text"] += "\n" + x["content"][0]["text"]
+            merged[-1]["content"].extend(x["content"][1:])   # 附的圖跟著併過去
         else:
             merged.append(x)
     return merged
@@ -683,7 +831,13 @@ def poke_text(n: int) -> str:
     return "（摸了摸你的頭）" if n == 1 else f"（連摸了你 {n} 下）"
 
 
-async def talk(text: str, session_id=None, emit=None, kind: str = "text") -> dict:
+def _can_see(model: dict) -> bool:
+    from . import caps
+
+    return bool(model.get("vision")) and not caps.down(model["id"]) and model.get("provider") in ("openai_compat", "anthropic")
+
+
+async def talk(text: str, session_id=None, emit=None, kind: str = "text", att: list | None = None) -> dict:
     c = cfg()
     model = pick_model(c)
     if model is None:
@@ -691,6 +845,8 @@ async def talk(text: str, session_id=None, emit=None, kind: str = "text") -> dic
     text = str(text)[:2000]
     d = _load()
     um = {"id": _mid(), "role": "user", "text": text, "at": time.time()}
+    if att:
+        um["att"] = att
     if kind == "poke":
         um["kind"] = "poke"
     d.setdefault("msgs", []).append(um)
@@ -700,7 +856,7 @@ async def talk(text: str, session_id=None, emit=None, kind: str = "text") -> dic
     if seen:
         system += ("\n\n## 他左邊工作區最近在做的事（你只是偷看到的素材，不要接著回答裡面的問題）\n"
                    "<workspace_context>\n" + seen + "\n</workspace_context>")
-    msgs = _own_messages(c)
+    msgs = _own_messages(c, vision=_can_see(model))
     try:
         raw = await _call(_params(model, c), system, msgs, c["max_out"])
     except Exception as e:
@@ -943,6 +1099,7 @@ async def maybe_compress(emit=None) -> None:
     d["msgs"] = recent
     d["compressed"] = int(d.get("compressed") or 0) + 1
     _save(d)
+    gc_att()   # 壓縮掉的訊息帶的附件一起清
     await _emit(emit)
 
 

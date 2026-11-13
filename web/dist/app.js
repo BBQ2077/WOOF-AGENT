@@ -6977,7 +6977,7 @@ function petPokeLabel(m) {
 function petRow(m) {
   if (m.role !== 'pet' && m.kind === 'poke') return `<div class="pnote">${esc(petPokeLabel(m))}</div>`;
   if (m.role !== 'pet') {
-    return `<div class="pmsg u"><div class="petline">${esc(m.text)}</div>${petRx(m)}</div>`;
+    return `<div class="pmsg u">${petAttHtml(m)}${m.text ? `<div class="petline">${esc(m.text)}</div>` : ''}${petRx(m)}</div>`;
   }
   const lines = petLines(m);
   if (!lines.length) return '';
@@ -7126,17 +7126,70 @@ function petGrow() {
   inp.style.overflowY = inp.scrollHeight > 120 ? 'auto' : 'hidden';
 }
 
+// ---- 丟給寵物的圖片、文件：按 ＋、拖進寵物欄、在輸入框貼上
+PET.att = [];
+function petAddFiles(files) {
+  for (const f of files || []) {
+    if (PET.att.length >= 6) { toast('一次最多丟 6 個'); break; }
+    if (f.size > FILE_MAX) { toast(`${f.name} 太大（${fmtBytes(f.size)}），上限 ${fmtBytes(FILE_MAX)}`); continue; }
+    const r = new FileReader();
+    r.onload = () => {
+      const url = String(r.result);
+      PET.att.push({ name: f.name || (f.type.startsWith('image/') ? '貼上的圖片.png' : '檔案'), media_type: f.type || 'application/octet-stream',
+                     bytes: f.size, data: url.split(',')[1], preview: f.type.startsWith('image/') ? url : '' });
+      petPaintAtt();
+    };
+    r.readAsDataURL(f);
+  }
+}
+function petPaintAtt() {
+  const box = $('#petAtts');
+  if (!box) return;
+  box.innerHTML = PET.att.map((a, i) => a.preview
+    ? `<div class="pa img"><img src="${a.preview}" alt=""><span data-pet="attx" data-i="${i}" title="拿掉">×</span></div>`
+    : `<div class="pa doc"><b>${esc(a.name)}</b><small>${esc(fmtBytes(a.bytes))}</small><span data-pet="attx" data-i="${i}" title="拿掉">×</span></div>`).join('');
+  box.classList.toggle('on', PET.att.length > 0);
+}
+function petAttHtml(m) {
+  const at = m.att || [];
+  if (!at.length) return '';
+  return `<div class="patt">${at.map((a) => a.kind === 'image' || a.preview
+    ? `<img src="${a.preview || fileUrl(a.path)}" alt="" data-pet="attopen" data-path="${esc(a.path || '')}" title="${esc(a.name || '')}">`
+    : `<span class="pdoc" data-pet="attopen" data-path="${esc(a.path || '')}" title="${esc(a.read === false ? '這種格式牠讀不到內容' : '')}">📄 ${esc(a.name || '檔案')}</span>`).join('')}</div>`;
+}
+$('#petAttIn').onchange = (e) => { petAddFiles(e.target.files); e.target.value = ''; };
+$('#petIn').addEventListener('paste', (e) => {
+  const fs = [...(e.clipboardData && e.clipboardData.files || [])];
+  if (fs.length) { e.preventDefault(); petAddFiles(fs); }
+});
+// 拖進寵物欄的檔案給寵物，不要讓主輸入框也亮起「放這裡」（主視窗的 drag 樣式靠 document 的 drop 才拿掉）
+['dragenter', 'dragover'].forEach((t) => $('#panePet').addEventListener(t, (e) => {
+  if (![...(e.dataTransfer && e.dataTransfer.types || [])].includes('Files')) return;
+  e.preventDefault(); e.stopPropagation();
+  $('#panePet').classList.add('drop'); $('#cbox').classList.remove('drag');
+}));
+$('#panePet').addEventListener('dragleave', (e) => { if (!$('#panePet').contains(e.relatedTarget)) $('#panePet').classList.remove('drop'); });
+$('#panePet').addEventListener('drop', (e) => {
+  $('#panePet').classList.remove('drop'); $('#cbox').classList.remove('drag');
+  if (!(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length)) return;
+  e.preventDefault(); e.stopPropagation();
+  petAddFiles(e.dataTransfer.files);
+});
+
 async function petSay(forced) {
   const inp = $('#petIn');
   if (!inp || PET.busy) return;
   const text = String(forced || inp.value).trim();
-  if (!text) return;
+  const att = forced ? [] : PET.att.slice();
+  if (!text && !att.length) return;
   petRxClose();
   PET.busy = true; inp.value = ''; petGrow();
-  PET.hist.push({ role: 'user', text, id: '' });
+  if (att.length) { PET.att = []; petPaintAtt(); }
+  PET.hist.push({ role: 'user', text, id: '', att: att.map((a) => ({ name: a.name, preview: a.preview, kind: a.preview ? 'image' : 'file' })) });
   petPaint();
   try {
-    const d = await api('POST', '/api/pet/say', { text, session_id: S.sid || '' });
+    const d = await api('POST', '/api/pet/say', { text, session_id: S.sid || '',
+      att: att.map((a) => ({ name: a.name, media_type: a.media_type, data: a.data })) });
     PET.st = d; PET.hist = d.history || PET.hist;
     PET.busy = false;
     petMaybeReveal(true);
@@ -7144,6 +7197,7 @@ async function petSay(forced) {
   } catch (e) {
     PET.hist.pop();
     PET.busy = false;
+    if (att.length) { PET.att = att.concat(PET.att); petPaintAtt(); }
     petPaint();
     notify('error', '牠沒聽到', e.message);
     inp.value = text;
@@ -7316,6 +7370,9 @@ $('#panePet').addEventListener('click', (e) => {
   if (k === 'sug') petSay(b.dataset.say || '');
   if (k === 'menu') petMenu($('#panePet .petmore') || b);
   if (k === 'boop') petBoop();
+  if (k === 'att') $('#petAttIn').click();
+  if (k === 'attx') { PET.att.splice(+b.dataset.i, 1); petPaintAtt(); }
+  if (k === 'attopen' && b.dataset.path) openPreview(b.dataset.path);
   if (k === 'rxpick') petRxPick(b, b.dataset.mid || '');
   if (k === 'unrx') { const m = PET.hist.find((x) => x.id === b.dataset.mid); if (m) petReact(m.id, m.ureact); }
 });
