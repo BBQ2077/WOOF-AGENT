@@ -1676,7 +1676,7 @@ class AskSkipButton(unittest.TestCase):
     def test_empty_submit_is_skip(self):
         import re as _re
 
-        js = open(r"C:\Users\user\hermes-files\WOOF\web\dist\app.js", encoding="utf-8").read()
+        js = open(str(ROOT / "web/dist/app.js"), encoding="utf-8").read()
         self.assertIn("answerAsk(id, v || ASK_SKIP, !v)", js)      # 空白送出＝略過
         self.assertIn("data-askskip", js)                          # 卡片上有略過按鈕
         self.assertIn("已略過", js)                                 # 答完留在畫面上
@@ -1711,7 +1711,7 @@ class EffortLadder(unittest.TestCase):
         self.assertEqual(effort.resolve(["low", "high", "max"], "minimal"), "low")
 
     def test_ui_labels_are_chinese(self):
-        js = open(r"C:\Users\user\hermes-files\WOOF\web\dist\app.js", encoding="utf-8").read()
+        js = open(str(ROOT / "web/dist/app.js"), encoding="utf-8").read()
         self.assertIn("max: '最高'", js)
         self.assertIn("ultra: '超高'", js)
         self.assertNotIn("max: 'MAX'", js)          # 不要中文清單裡突然冒一個英文
@@ -1831,7 +1831,7 @@ class MidTurnSteer(unittest.TestCase):
         self.assertIn("已把追加要求送給子代理", src)
 
     def test_busy_default_is_steer(self):
-        js = open(r"C:\Users\user\hermes-files\WOOF\web\dist\app.js", encoding="utf-8").read()
+        js = open(str(ROOT / "web/dist/app.js"), encoding="utf-8").read()
         self.assertIn("includes(v) ? v : 'steer'", js)
 
 class AskDonePayload(unittest.TestCase):
@@ -1936,7 +1936,7 @@ class OpenStateKept(unittest.TestCase):
     """手動展開的 details（內部指令、子代理清單、壓縮記號）重畫後不能被收起來。"""
 
     def test_chat_details_remember_open(self):
-        js = open(r"C:\\Users\\user\\hermes-files\\WOOF\\web\\dist\\app.js", encoding="utf-8").read()
+        js = open(str(ROOT / "web/dist/app.js"), encoding="utf-8").read()
         self.assertIn("const itk = 'internal-' + m.id;", js)
         self.assertIn("det.dataset.tk = itk;", js)
         self.assertIn("det.open = THINK_OPEN.has(itk);", js)
@@ -1948,7 +1948,7 @@ class ChatUx29(unittest.TestCase):
     """第二十九輪：子代理分兩疊、捲動錨點、背景還在跑、右鍵、本機路徑連結、便條預設關。"""
 
     def setUp(self):
-        self.js = open(r"C:\\Users\\user\\hermes-files\\WOOF\\web\\dist\\app.js", encoding="utf-8").read()
+        self.js = open(str(ROOT / "web/dist/app.js"), encoding="utf-8").read()
 
     def test_frontend_pieces(self):
         js = self.js
@@ -1963,13 +1963,13 @@ class ChatUx29(unittest.TestCase):
         from woof.agent import loop
         self.assertEqual(loop.SUB_KIND.get("review_request"), "review")
         self.assertEqual(loop.SUB_KIND.get("expand_request"), "review")
-        src = open(r"C:\\Users\\user\\hermes-files\\WOOF\\plugins\\subagent\\__init__.py", encoding="utf-8").read()
+        src = open(str(ROOT / "plugins/subagent/__init__.py"), encoding="utf-8").read()
         self.assertIn("SUB_BATCH.set(", src)
 
     def test_focus_off_by_default(self):
         import tomllib
         from woof import presets
-        t = tomllib.loads(open(r"C:\\Users\\user\\hermes-files\\WOOF\\plugins\\focus\\plugin.toml", encoding="utf-8").read())
+        t = tomllib.loads(open(str(ROOT / "plugins/focus/plugin.toml"), encoding="utf-8").read())
         self.assertFalse(t["enabled"])
         self.assertNotIn('"focus"', open(presets.__file__, encoding="utf-8").read())
 
@@ -2111,20 +2111,20 @@ class ResumeNotShownWhileBusy(unittest.TestCase):
     """還在跑（方案／對抗／子代理／待答）時不能顯示「上一回合沒做完」，那會讓人以為卡死。"""
 
     def test_js_and_server(self):
-        js = open(r"C:\\Users\\user\\hermes-files\\WOOF\\web\\dist\\app.js", encoding="utf-8").read()
+        js = open(str(ROOT / "web/dist/app.js"), encoding="utf-8").read()
         self.assertIn("(cur() || {}).busy", js)
         self.assertIn("bar._h === h", js)
-        sv = open(r"C:\\Users\\user\\hermes-files\\WOOF\\woof\\server.py", encoding="utf-8").read()
+        sv = open(str(ROOT / "woof/server.py"), encoding="utf-8").read()
         self.assertIn("def _busy(", sv)
         self.assertIn('ev["busy"] = _busy(sid)', sv)
-        css = open(r"C:\\Users\\user\\hermes-files\\WOOF\\web\\dist\\app.css", encoding="utf-8").read()
+        css = open(str(ROOT / "web/dist/app.css"), encoding="utf-8").read()
         self.assertIn(".resumecard{user-select:text}", css)
 
 class ReviewAlwaysRuns(unittest.TestCase):
     """按了方案／對抗又真的拆了步驟，最後一定要派一次審核模型（純問答在前面就 return 了）。"""
 
     def test_no_changed_paths_guard(self):
-        src = open(r"C:\\Users\\user\\hermes-files\\WOOF\\woof\\agent\\tasks.py", encoding="utf-8").read()
+        src = open(str(ROOT / "woof/agent/tasks.py"), encoding="utf-8").read()
         self.assertIn("ok, gaps = await final_check(ctx, session_id, objective, steps, emit)", src)
         self.assertNotIn("if changed_paths(session_id):\n            ok, gaps", src)
 
@@ -2132,11 +2132,11 @@ class ToolErrPreview(unittest.TestCase):
     """工具失敗要直接寫出原因（不必點開），點一下才展開完整輸出。"""
 
     def test_js_has_inline_error(self):
-        js = open(r"C:\\Users\\user\\hermes-files\\WOOF\\web\\dist\\app.js", encoding="utf-8").read()
+        js = open(str(ROOT / "web/dist/app.js"), encoding="utf-8").read()
         self.assertIn("function errPreview(", js)
         self.assertIn("eb.className = 'terr'", js)
         self.assertIn("el.insertBefore(eb, $('pre', el))", js)
-        css = open(r"C:\\Users\\user\\hermes-files\\WOOF\\web\\dist\\app.css", encoding="utf-8").read()
+        css = open(str(ROOT / "web/dist/app.css"), encoding="utf-8").read()
         self.assertIn(".tool .terr{", css)
 
 class ResumeDigest(unittest.TestCase):
@@ -2160,7 +2160,7 @@ class ResumeDigest(unittest.TestCase):
         self.assertLess(len(d), 6000, "摘要不能比重新探索還貴")
 
     def test_continue_uses_digest(self):
-        sv = open(r"C:\\Users\\user\\hermes-files\\WOOF\\woof\\server.py", encoding="utf-8").read()
+        sv = open(str(ROOT / "woof/server.py"), encoding="utf-8").read()
         self.assertIn("_tasks.resume_digest(sid)", sv)
 
 class StopOneSubagent(unittest.TestCase):
@@ -2190,9 +2190,9 @@ class StopOneSubagent(unittest.TestCase):
         asyncio.run(main())
 
     def test_session_stop_touches_agent(self):
-        sv = open(r"C:\\Users\\user\\hermes-files\\WOOF\\woof\\server.py", encoding="utf-8").read()
+        sv = open(str(ROOT / "woof/server.py"), encoding="utf-8").read()
         self.assertIn("_loop.stop_agent(sid)", sv)
-        js = open(r"C:\\Users\\user\\hermes-files\\WOOF\\web\\dist\\app.js", encoding="utf-8").read()
+        js = open(str(ROOT / "web/dist/app.js"), encoding="utf-8").read()
         self.assertIn("data-stopsub", js)
         self.assertIn("data-closesub", js)
 
@@ -2203,7 +2203,7 @@ class XlsxRawTsv(unittest.TestCase):
         import base64
         from woof import server as srv, store
 
-        raw = open(r"C:\\Users\\user\\hermes-files\\WOOF\\plugins\\files\\__init__.py", "rb").read()
+        raw = open(str(ROOT / "plugins/files/__init__.py"), "rb").read()
         self.assertIn(b"_xlsx_digest", raw)
         src = raw.decode("utf-8")
         self.assertIn("raw=True", src)
@@ -2219,14 +2219,14 @@ class PythonHint(unittest.TestCase):
         from pathlib import Path
 
         spec = importlib.util.spec_from_file_location(
-            "woof_term_plugin", r"C:\\Users\\user\\hermes-files\\WOOF\\plugins\\terminal\\__init__.py")
+            "woof_term_plugin", str(ROOT / "plugins/terminal/__init__.py"))
         m = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(m)
         self.assertIn("venv", m._python_hint("ModuleNotFoundError: No module named 'openpyxl'"))
         self.assertIn("venv", m._python_hint("bash: python: command not found"))
         self.assertEqual(m._python_hint("hello world"), "")
         # 沒有改 PATH 這種事：檔案裡不該有影響環境的寫法
-        src = Path(r"C:\\Users\\user\\hermes-files\\WOOF\\plugins\\terminal\\__init__.py").read_text(encoding="utf-8")
+        src = Path(str(ROOT / "plugins/terminal/__init__.py")).read_text(encoding="utf-8")
         self.assertNotIn("os.environ[\"PATH\"]", src)
 
 class ExpandGate(unittest.TestCase):
@@ -2272,15 +2272,15 @@ class ExpandGate(unittest.TestCase):
         self.assertEqual((steps, notes), ([], ""))
 
     def test_wiring(self):
-        src = open(r"C:\\Users\\user\\hermes-files\\WOOF\\woof\\agent\\tasks.py", encoding="utf-8").read()
+        src = open(str(ROOT / "woof/agent/tasks.py"), encoding="utf-8").read()
         self.assertIn('if gate == "expand":', src)
         self.assertIn("await expand_plan(ctx, objective, steps)", src)
-        sv = open(r"C:\\Users\\user\\hermes-files\\WOOF\\woof\\server.py", encoding="utf-8").read()
+        sv = open(str(ROOT / "woof/server.py"), encoding="utf-8").read()
         self.assertIn('("off", "human", "model", "expand")', sv)
-        js = open(r"C:\\Users\\user\\hermes-files\\WOOF\\web\\dist\\app.js", encoding="utf-8").read()
+        js = open(str(ROOT / "web/dist/app.js"), encoding="utf-8").read()
         self.assertIn("方案・思維拓展", js)
         self.assertIn("v: 'expand'", js)
-        pr = open(r"C:\\Users\\user\\hermes-files\\WOOF\\woof\\prompts.py", encoding="utf-8").read()
+        pr = open(str(ROOT / "woof/prompts.py"), encoding="utf-8").read()
         self.assertIn('_e("expand"', pr)
         self.assertIn('_e("expand_body"', pr)
 
@@ -2334,10 +2334,10 @@ class SubagentAlwaysReports(unittest.TestCase):
         self.assertIn("bomb", got["text"])
 
     def test_source_has_steer_and_report(self):
-        lp = open(r"C:\\Users\\user\\hermes-files\\WOOF\\woof\\agent\\loop.py", encoding="utf-8").read()
+        lp = open(str(ROOT / "woof/agent/loop.py"), encoding="utf-8").read()
         self.assertIn("子代理被停止，沒有產出結論", lp)
         self.assertIn("asyncio.shield(inject(parent_sid, \"bg_done\", report_text(r)))", lp)
-        sp = open(r"C:\\Users\\user\\hermes-files\\WOOF\\plugins\\subagent\\__init__.py", encoding="utf-8").read()
+        sp = open(str(ROOT / "plugins/subagent/__init__.py"), encoding="utf-8").read()
         self.assertIn("if sid in AGENT_RUNS:", sp)
         self.assertIn('"steered": True', sp)
         self.assertIn("它最後在做的", sp)
@@ -2360,7 +2360,7 @@ class SubagentProgress(unittest.TestCase):
         tasks.last_text = lambda sid, role: "正在跑回測"
         try:
             spec = importlib.util.spec_from_file_location(
-                "subplug_t", r"C:\\Users\\user\\hermes-files\\WOOF\\plugins\\subagent\\__init__.py")
+                "subplug_t", str(ROOT / "plugins/subagent/__init__.py"))
             m = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(m)
 
@@ -2376,7 +2376,7 @@ class SubagentProgress(unittest.TestCase):
 
             class Parent:
                 session_id = root_session_id = "parentX"
-                cwd = r"C:\\Users\\user\\hermes-files\\WOOF"
+                cwd = str(ROOT)
                 turn_mid = 1
 
                 async def output(self, s):
