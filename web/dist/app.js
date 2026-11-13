@@ -6790,6 +6790,24 @@ function petRow(m) {
   return `<div class="pmsg p" data-mid="${esc(m.id || '')}">${lines.map((x) => `<div class="petline">${esc(x)}</div>`).join('')}`
     + `<span class="rxadd" data-pet="rxpick" data-mid="${esc(m.id || '')}" title="按表情">☺</span>${petRx(m)}</div>`;
 }
+// 跟通訊軟體一樣：隔了一段時間才有下一則，就在中間標時間（看得出牠是隔多久自己找你的）
+function petWhen(t) {
+  const d = new Date(t * 1000), now = new Date();
+  const hm = `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
+  if (d.toDateString() === now.toDateString()) return hm;
+  const y = new Date(now); y.setDate(now.getDate() - 1);
+  if (d.toDateString() === y.toDateString()) return `昨天 ${hm}`;
+  return `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
+}
+function petRows(rows) {
+  let prev = 0;
+  return rows.map((m) => {
+    const at = Number(m.at) || 0;
+    const gap = at && (!prev || at - prev > 30 * 60) ? `<div class="pnote ptime">${esc(petWhen(at))}${m.kind === 'nudge' ? ' · 牠主動找你' : ''}</div>` : '';
+    if (at) prev = at;
+    return gap + petRow(m);
+  }).join('');
+}
 function petPara(x) {
   const aside = /^[（(].*[）)]$/.test(x);
   return `<p${aside ? ' class="aside"' : ''}>${esc(x)}</p>`;
@@ -6847,10 +6865,17 @@ function petPaint() {
   if (h) {
     const { rows, top } = petSplit();
     h.innerHTML = rows.length || top || PET.busy
-      ? rows.map(petRow).join('')
+      ? petRows(rows)
       : (PET.cfg && PET.cfg.on === false
         ? '<div class="pethint">主動說話關著：牠不會自己開口。<br>想找牠，直接打字或摸摸牠就好。</div>'
-        : '<div class="pethint">牠會看著你開著的對話，偶爾說一兩句。<br>想找牠說話，直接打字就好。</div>');
+        : `<div class="pethint">${esc(PET_MODES[petMode()].hint)}<br>想找牠說話，直接打字就好。</div>`);
+  }
+  const pm = $('#petMode');
+  if (pm) {
+    const k = petMode();
+    pm.textContent = PET_MODES[k].label + (PET.cfg && PET.cfg.on === false ? ' · 不主動' : '');
+    pm.className = `petmode m-${k}${PET.cfg && PET.cfg.on === false ? ' quiet' : ''}`;
+    pm.title = `${PET_MODES[k].label}模式：${PET_MODES[k].desc}（點一下切換）`;
   }
   petPaintStage();
   // 泡泡、建議鈕的高度會把紀錄區擠小：畫完上面再捲到底，最後一則才不會被泡泡蓋住
@@ -7015,6 +7040,12 @@ async function petSave(patch) {
   } catch (e) { notify('error', '存不起來', e.message); return null; }
 }
 
+const PET_MODES = {
+  heart: { label: '情感', desc: '不看你的對話，單純陪你聊', hint: '情感模式：牠不看你的對話，會看時間偶爾找你聊兩句。' },
+  mix: { label: '混合', desc: '看著你的對話，也會聊心情', hint: '牠會看著你開著的對話，偶爾說一兩句。' },
+  work: { label: '工作', desc: '看著你的對話，只聊工作（個性不變）', hint: '工作模式：牠看著你的對話，只聊手上的事。' },
+};
+function petMode() { const k = PET.cfg && PET.cfg.mode; return PET_MODES[k] ? k : 'mix'; }
 function petMenu(anchor) {
   const old = $('#petMenu');
   if (old) { old.remove(); return; }
@@ -7022,10 +7053,16 @@ function petMenu(anchor) {
   const m = document.createElement('div');
   m.id = 'petMenu';
   m.className = 'mi petmenu';
-  m.innerHTML = '<div data-pm="file">編輯寵物檔</div>'
+  const cur = petMode();
+  const on = !(PET.cfg && PET.cfg.on === false);
+  m.innerHTML = '<div class="pm-hd">模式</div>'
+    + Object.entries(PET_MODES).map(([k, x]) => `<div data-pm="mode" data-v="${k}" class="pm-mode${k === cur ? ' on' : ''}">`
+      + `<span class="pm-tx"><b>${x.label}</b><small>${x.desc}</small></span><span class="pm-ck">${k === cur ? ico('check') : ''}</span></div>`).join('')
+    + `<div class="pm-sep"></div><div data-pm="on" class="pm-sw"><span class="pm-tx"><b>主動說話</b><small>${on ? '會自己找你講話' : '只在你找牠時回'}</small></span><span class="sw sm${on ? ' on' : ''}"></span></div>`
+    + '<div class="pm-sep"></div><div data-pm="file">編輯寵物檔</div>'
     + '<div data-pm="reset">清空牠的記憶</div><div data-pm="set">寵物設定</div>';
   document.body.appendChild(m);
-  m.style.left = `${Math.max(8, r.right - 150)}px`;
+  m.style.left = `${Math.max(8, r.right - 236)}px`;
   m.style.top = `${r.bottom + 6}px`;
   const close = (ev) => {
     if (ev && m.contains(ev.target)) return;
@@ -7043,6 +7080,12 @@ function petMenu(anchor) {
     if (!it) return;
     close();
     const k = it.dataset.pm;
+    if (k === 'mode') {
+      const v = it.dataset.v;
+      if (v !== petMode()) petSave({ mode: v }).then((r) => r && notify('ok', `切到${PET_MODES[v].label}模式`, PET_MODES[v].desc));
+      return;
+    }
+    if (k === 'on') { petSave({ on: !on }); return; }
     if (k === 'set' || k === 'file') openSettings('pet');
     if (k === 'reset') {
       confirmBox('清掉牠記得的事？', '牠自己的對話與摘要會清空。主對話完全不受影響。', { ok: '清空', danger: true })
@@ -7060,7 +7103,7 @@ $('#panePet').addEventListener('click', (e) => {
   const k = b.dataset.pet;
   if (k === 'say') petSay();
   if (k === 'sug') petSay(b.dataset.say || '');
-  if (k === 'menu') petMenu(b);
+  if (k === 'menu') petMenu($('#panePet .petmore') || b);
   if (k === 'boop') petBoop();
   if (k === 'rxpick') petRxPick(b, b.dataset.mid || '');
   if (k === 'unrx') { const m = PET.hist.find((x) => x.id === b.dataset.mid); if (m) petReact(m.id, m.ureact); }
@@ -7079,8 +7122,8 @@ $('#panePet').addEventListener('keydown', (e) => {
 // ---- 設定 → 寵物
 // 數字設定都是「拉桿＋數字框」，兩邊同步；改值只存檔、只更新說明，不重畫整頁（不會跳回頂端）
 const PET_NUM = {
-  every_sec: { min: 3, max: 600, step: 1, unit: '秒', desc: (v) => `開著「主動說話」時，每 ${v} 秒瞄一眼你開著的對話。沒有新內容就不叫模型，放著不花錢。` },
-  peek: { min: 300, max: 20000, step: 100, unit: 'tk', desc: (v) => `從主對話抓最近約 ${Number(v).toLocaleString()} tokens 給牠看。越多越懂你在忙什麼，也越花錢。` },
+  every_sec: { min: 3, max: 120, step: 1, unit: '秒', desc: (v) => `每 ${v} 秒瞄一眼你開著的對話，有新回覆才叫模型，放著不花錢。情感模式不看對話，這兩項不用。` },
+  peek: { min: 300, max: 8000, step: 100, unit: 'tk', desc: (v) => `從主對話抓最近約 ${Number(v).toLocaleString()} tokens 給牠看。越多越懂你在忙什麼，也越花錢。` },
   max_out: { min: 40, max: 800, step: 20, unit: 'tk', desc: (v) => `單次最多 ${v} tokens。平常牠只講一兩句，用不到上限；只有你問想法、牠講長的時候才會碰到。太低會被截斷。` },
   ctx: { min: 4000, max: 200000, step: 1000, unit: 'tk', desc: (v) => `${Number(v).toLocaleString()} tokens；超過八成牠會自己整理成筆記。` },
   keep: { min: 2, max: 60, step: 1, unit: '則', desc: (v) => `整理筆記時保留最近 ${v} 則原文，更早的變成筆記。` },
@@ -7090,6 +7133,10 @@ function petNumRow(k, title, c) {
   return `<div class="frow"><div><b>${title}</b><small data-petd="${k}">${o.desc(c[k])}</small></div>
     <div class="fctl numrng"><input type="range" min="${o.min}" max="${o.max}" step="${o.step}" value="${c[k]}" data-petn="${k}">
       <label class="numbox"><input type="number" inputmode="numeric" min="${o.min}" max="${o.max}" step="${o.step}" value="${c[k]}" data-petn="${k}"><i>${o.unit}</i></label></div></div>`;
+}
+function petQuietDesc(c) {
+  const a = Number(c.quiet_from), b = Number(c.quiet_to);
+  return a === b ? '兩個一樣＝整天都可以找你。' : `${a} 點到${b < a ? '隔天 ' : ''}${b} 點不會看時間找你；你還在用、牠看到對話有新東西，照樣會說。`;
 }
 function renderPetSec(box) {
   if (!box.innerHTML.trim()) box.innerHTML = '<div class="blank">讀取中…</div>';
@@ -7107,10 +7154,20 @@ function renderPetSec(box) {
     <div class="card"><div class="card-hd"><b>角色</b><small>每個角色有自己的角色檔、記憶與表情圖，切換不會共用。右上角的表情是牠的招牌。</small></div>
       <div class="chargrid">${(d.chars || []).map(charCard).join('')}</div>
     </div>
-    <div class="card"><div class="card-hd"><b>互動</b><small>點寵物欄裡牠的圖＝摸摸牠，牠會回應；你說話、摸牠，牠一定會回。下面管的是牠「自己開口」與按表情。</small></div>
-      ${row('pet_on', '主動說話', '開著：牠會定時瞄你的對話，有新東西時自己說一句。關掉：牠只在你跟牠說話或摸牠時回，不會自己開口，也不會偷看。', sw('on'))}
-      ${petNumRow('every_sec', '多久瞄一次', c)}
+    <div class="card"><div class="card-hd"><b>模式</b><small>寵物欄右上 ⋯ 也能切。你跟牠說話、摸牠，三種模式都一定會回。</small></div>
+      ${row('pet_mode', '聊什麼', '情感：不看你的對話，單純陪你聊。混合：看著對話，也聊心情。工作：看著對話，只聊手上的事，個性和口頭禪照舊。', seg('mode', [['heart', '情感'], ['mix', '混合'], ['work', '工作']]))}
+    </div>
+    <div class="card"><div class="card-hd"><b>自己開口</b><small>牠自己開口有兩種：看到你的對話有新東西時說一句（情感模式沒有這個），或隔一段時間自己找你。</small></div>
+      ${row('pet_on', '主動說話', '關掉：牠不會自己開口，也不看你的對話；你找牠時照樣回。', sw('on'))}
+      ${row('pet_nudge', '看時間找你', '你一陣子沒找牠，或換到早上、中午、晚上時，牠會自己傳一句，優先接你之前提過的事。每多一則你沒回，就隔更久；連續三則沒回就不再找，等你先開口。', seg('nudge', [['off', '不找'], ['rare', '很少'], ['some', '偶爾'], ['often', '常常']]))}
+      <div class="frow" data-f="pet_quiet"><div><b>安靜時段</b><small data-petquiet>${petQuietDesc(c)}</small></div>
+        <div class="fctl quiet"><label class="numbox"><input type="number" min="0" max="23" step="1" value="${c.quiet_from}" data-petq="quiet_from"><i>點</i></label><span class="to">到</span><label class="numbox"><input type="number" min="0" max="23" step="1" value="${c.quiet_to}" data-petq="quiet_to"><i>點</i></label></div></div>
+      <div class="petlook${c.mode === 'heart' ? ' off' : ''}" data-petlook>
+      ${petNumRow('every_sec', '多久瞄一次對話', c)}
       ${petNumRow('peek', '每次看多少', c)}
+      </div>
+    </div>
+    <div class="card"><div class="card-hd"><b>互動</b><small>點寵物欄裡牠的圖＝摸摸牠，牠會回應。</small></div>
       ${row('pet_rx', '按表情', '牠一邊說話一邊對你的訊息按表情的頻率。你只回「好」「哈哈」時，牠只按表情不說話，這種不受限。', seg('react_rate', [['off', '不按'], ['low', '偶爾'], ['high', '常常']]))}
       ${row('pet_quick', '固定回覆', '輸入框上方固定的幾顆，用 | 分隔，最多四個。上面那顆會變的是模型猜你想回的。', `<input data-petf="quick" value="${esc((c.quick || []).join('|'))}" placeholder="怎麼了？|繼續說">`)}
       ${row('pet_speak', '在主對話留言', '預設關＝完全唯讀：看得到你的對話但寫不進去。打開後，牠主動說的話也會以招牌表情開頭出現在主對話。', sw('speak_up'))}
@@ -7153,6 +7210,14 @@ function renderPetSec(box) {
       numTimer = setTimeout(() => saveQuiet({ [k]: v }), el.type === 'range' ? 300 : 700);
     };
     box.onchange = (e) => {
+      const q = e.target.closest('[data-petq]');
+      if (q) {
+        let v = Math.round(Number(q.value));
+        if (!Number.isFinite(v)) v = c[q.dataset.petq];
+        v = Math.max(0, Math.min(23, v)); q.value = v;
+        saveQuiet({ [q.dataset.petq]: v }).then(() => { const s = box.querySelector('[data-petquiet]'); if (s) s.textContent = petQuietDesc(c); });
+        return;
+      }
       const n = e.target.closest('[data-petn]');
       if (n) {
         const k = n.dataset.petn;
@@ -7187,6 +7252,7 @@ function renderPetSec(box) {
       const sg = e.target.closest('[data-petseg]');
       if (sg) {
         sg.parentElement.querySelectorAll('b').forEach((x) => x.classList.toggle('on', x === sg));
+        if (sg.dataset.petseg === 'mode') { const lk = box.querySelector('[data-petlook]'); if (lk) lk.classList.toggle('off', sg.dataset.v === 'heart'); }
         saveQuiet({ [sg.dataset.petseg]: sg.dataset.v });
         return;
       }

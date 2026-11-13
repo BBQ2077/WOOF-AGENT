@@ -1808,3 +1808,28 @@ body.pane2 #paneA{padding:0}
 #sessionList .item.child.on .t{color:var(--text)}
 #sessionList .item.child small{display:none}
 #sessionList .item.child .t::before{margin:-6px 6px 0 -12px}
+
+/* ---- 寵物：模式標籤、⋯ 選單、時間分隔、設定頁的安靜時段 */
+.petmode{font-size:10.5px;padding:1px 7px;border-radius:9px;cursor:pointer;user-select:none;letter-spacing:.02em;border:1px solid transparent}
+.petmode.m-heart{background:color-mix(in srgb,#ec4899 13%,transparent);color:#db2777}
+.petmode.m-mix{background:color-mix(in srgb,var(--acc) 12%,transparent);color:var(--acc)}
+.petmode.m-work{background:color-mix(in srgb,#64748b 16%,transparent);color:var(--dim)}
+.petmode.quiet{opacity:.7}
+.petmode:hover{border-color:var(--line)}
+#petMenu{width:228px}
+#petMenu .pm-hd{font-size:11px;color:var(--faint);padding:6px 12px 2px;cursor:default}
+#petMenu .pm-hd:hover{background:none}
+#petMenu .pm-mode,#petMenu .pm-sw{display:flex;align-items:center;gap:10px}
+#petMenu .pm-tx{display:flex;flex-direction:column;min-width:0;flex:1}
+#petMenu .pm-tx b{font-weight:500}
+#petMenu .pm-tx small{font-size:11px;color:var(--faint);white-space:normal;line-height:1.35}
+#petMenu .pm-ck{width:16px;display:flex;color:var(--acc)}
+#petMenu .pm-ck svg{width:15px;height:15px}
+#petMenu .pm-mode.on b{color:var(--acc)}
+#petMenu .pm-sep{height:1px;background:var(--line);margin:4px 8px;padding:0;cursor:default}
+.pnote.ptime{font-size:10.5px;margin-top:6px}
+#setList .petset .fctl.quiet{display:flex;align-items:center;gap:8px;justify-content:flex-end}
+#setList .petset .fctl.quiet .to{color:var(--faint);font-size:12.5px}
+#setList .petset .petlook.off{opacity:.45}
+#petMenu .pm-sep:hover{background:var(--line)}
+#petMenu .pm-hd:hover{background:none}

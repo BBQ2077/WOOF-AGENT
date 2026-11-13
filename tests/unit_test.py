@@ -1974,6 +1974,57 @@ class ChatUx29(unittest.TestCase):
         self.assertNotIn('"focus"', open(presets.__file__, encoding="utf-8").read())
 
 
+class PetModesNudge(unittest.TestCase):
+    """寵物三種模式與看時間主動找你：只測規則（不叫模型）。"""
+
+    def _seed(self, msgs):
+        from woof import pet
+        d = pet._load("dog")
+        d["msgs"] = msgs
+        d.pop("nudge_skip", None)
+        pet._save(d, "dog")
+
+    def _plan(self, msgs, **c):
+        from woof import pet
+        self._seed(msgs)
+        return pet.nudge_plan({**pet.cfg(), "char": "dog", "on": True, "quiet_from": 3, "quiet_to": 3, **c})
+
+    def test_clean(self):
+        from woof import pet
+        self.assertEqual(pet.clean({"mode": "work", "nudge": "often", "quiet_from": 99})["quiet_from"], 23)
+        self.assertNotIn("mode", pet.clean({"mode": "bogus"}))
+        self.assertEqual(pet.clean({"every_sec": 600})["every_sec"], 120)
+
+    def test_backoff_and_stop(self):
+        now = time.time()
+        u = {"id": "u", "role": "user", "text": "好喔", "at": now - 5 * 3600}
+        n = lambda i, at: {"id": "n%d" % i, "role": "pet", "kind": "nudge", "text": "x", "at": at}
+        self.assertTrue(self._plan([u], nudge="some")["go"])
+        # 兩則沒回：間隔變四倍（常常＝1 小時 → 4 小時），1.5 小時前才傳過就先不找
+        self.assertFalse(self._plan([u, n(0, now - 3 * 3600), n(1, now - 1.5 * 3600)], nudge="often")["go"])
+        self.assertEqual(self._plan([u, n(0, now - 4 * 3600), n(1, now - 3 * 3600), n(2, now - 2 * 3600)],
+                                    nudge="often")["stop"], "unanswered")
+        self.assertEqual(self._plan([u, n(0, now - 60)], nudge="rare")["stop"], "cap")
+        self.assertEqual(self._plan([u], nudge="off")["stop"], "off")
+        self.assertEqual(self._plan([u], nudge="some", on=False)["stop"], "off")
+        self.assertEqual(self._plan([u], nudge="some", quiet_from=0, quiet_to=23)["stop"], "quiet")
+        # 剛聊過：不插話
+        self.assertFalse(self._plan([{**u, "at": now - 120}], nudge="often")["go"])
+
+    def test_mode_prompts(self):
+        from woof import pet
+        heart = pet.build_system({"mode": "heart"}, "talk", "")
+        work = pet.build_system({"mode": "work"}, "talk", "")
+        mix = pet.build_system({"mode": "mix"}, "talk", "")
+        self.assertIn("情感模式", heart)
+        self.assertNotIn("左邊工作區", heart)
+        self.assertIn("工作模式", work)
+        self.assertIn("左邊工作區", mix)
+        self.assertNotIn("## 模式", mix)
+        self.assertIn("自己想找他", pet.build_system({"mode": "mix"}, "nudge", "- 他已經3 小時沒跟你講話了。"))
+        self.assertFalse(pet.MODES["heart"]["peek"])
+
+
 class AttachFiles(unittest.TestCase):
     """附件（xlsx／pdf 之類）要能附加，存進 data/files，跟對話一起清。"""
 

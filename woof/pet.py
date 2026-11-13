@@ -69,7 +69,30 @@ DEFAULTS = {
     "speak_up": False,
     "quick": ["怎麼了？", "繼續說"],   # 固定的通用回覆，永遠在
     "react_rate": "low",              # 牠說話時順便按表情的頻率：off／low／high
+    "mode": "mix",                    # heart 情感／mix 混合／work 工作
+    "nudge": "some",                  # 看時間自己找你：off／rare／some／often
+    "quiet_from": 23,                 # 這段時間不主動找你（小時，跨午夜）
+    "quiet_to": 8,
 }
+
+# 三種模式：情感＝不看對話純聊；混合＝看對話也聊心情；工作＝看對話、只聊工作，人設照舊
+MODES = {
+    "heart": {"label": "情感", "peek": False, "rules": [
+        "- 現在是情感模式：你看不到他在做什麼，你們就是單純聊天、陪伴。",
+        "- 可以聊心情、生活、天氣、吃什麼、你們之間的事；不要問工作進度，不要給技術建議。",
+    ]},
+    "mix": {"label": "混合", "peek": True, "rules": []},
+    "work": {"label": "工作", "peek": True, "rules": [
+        "- 現在是工作模式：只聊他手上的事（進度、卡在哪、下一步、做完了沒、該不該休息一下）。",
+        "- 不撒嬌、不討拍、不說想他、不聊感情和心情；你的口頭禪、語氣、說話方式照舊。",
+        "- 他自己跑來講心情時，簡短接一句就好，不要展開。",
+    ]},
+}
+
+# 看時間自己找你（參考 Nomi／Kindroid）：沉默多久才找、一天最多幾次。
+# 每多一則沒回，間隔加倍；連續三則沒回就不再找，等他先開口。
+NUDGE = {"off": None, "rare": (12 * 3600, 1), "some": (3 * 3600, 4), "often": (3600, 8)}
+NUDGE_MAX_UNANSWERED = 3
 
 # 說話時順便按表情：最近幾句你的話裡牠按過一次，就先不按（只按表情不說話的回覆不受限）
 REACT_GAP = {"off": 10 ** 6, "low": 4, "high": 2}
@@ -119,6 +142,12 @@ def cfg() -> dict:
             out[k] = raw[k]
     if out.get("char") not in CHARS:
         out["char"] = "dog"
+    if out.get("mode") not in MODES:
+        out["mode"] = "mix"
+    if out.get("nudge") not in NUDGE:
+        out["nudge"] = "some"
+    out["every_sec"] = max(3, min(120, int(out.get("every_sec") or 10)))
+    out["peek"] = max(300, min(8000, int(out.get("peek") or 1500)))
     return out
 
 
@@ -172,6 +201,10 @@ def clean(patch: dict) -> dict:
         out["effort"] = "on" if patch["effort"] == "on" else "off"
     if "react_rate" in patch and patch["react_rate"] in REACT_GAP:
         out["react_rate"] = patch["react_rate"]
+    if "mode" in patch and patch["mode"] in MODES:
+        out["mode"] = patch["mode"]
+    if "nudge" in patch and patch["nudge"] in NUDGE:
+        out["nudge"] = patch["nudge"]
     if "quick" in patch:
         q = patch["quick"]
         if isinstance(q, str):
@@ -181,7 +214,7 @@ def clean(patch: dict) -> dict:
             if vals:
                 out["quick"] = vals
     for k, lo, hi in (("max_out", 40, 800), ("ctx", 4000, 200000), ("keep", 2, 60),
-                      ("every_sec", 3, 600), ("peek", 300, 20000)):
+                      ("every_sec", 3, 120), ("peek", 300, 8000), ("quiet_from", 0, 23), ("quiet_to", 0, 23)):
         if k in patch:
             try:
                 out[k] = max(lo, min(hi, int(patch[k])))
@@ -246,6 +279,7 @@ def state() -> dict:
             "say": d.get("say", ""), "sug": (d.get("sug") or [])[:1], "react": d.get("react", ""),
             "reacts": palette(c), "at": d.get("at", 0),
             "calls": d.get("calls", 0), "msgs": len(d.get("msgs") or []),
+            "mode": cfg()["mode"], "next_nudge": nudge_plan().get("at", 0),
             "summary": (d.get("summary") or "")[:400]}
 
 
@@ -395,12 +429,27 @@ def build_system(c: dict | None = None, mode: str = "glance", hint: str = "") ->
              "很爽→cheer 或 excited，想睡→sleepy，疑惑→confused，得意→proud，好笑→laugh。",
              "- mood 填兩到三個字，例如心疼、搖尾巴、想睡、吃飽了。"]
 
+    rules = MODES.get(c.get("mode") or "mix", MODES["mix"])["rules"]
+    if rules:
+        lines += ["", "## 模式"] + rules
+
     if mode == "talk":
         lines += ["", "## 這次",
                   "- 他正在跟你講話，直接回他。",
-                  f"- 長度：{hint or '一兩句。'}",
-                  "- 左邊工作區的片段只是你偷瞄到的素材，不要接著回答裡面的技術問題；"
-                  "他在討拍就陪他，他問你想法才順口點一下你瞄到的東西。"]
+                  f"- 長度：{hint or '一兩句。'}"]
+        if MODES[c.get("mode") or "mix"]["peek"]:
+            lines.append("- 左邊工作區的片段只是你偷瞄到的素材，不要接著回答裡面的技術問題；"
+                         "他在討拍就陪他，他問你想法才順口點一下你瞄到的東西。")
+    elif mode == "nudge":
+        lines += ["", "## 這次",
+                  "- 他沒有找你，是你自己想找他講話（像傳一則訊息給他）。為什麼是現在，看下面「現在」那段。",
+                  "- 一則、一句，二十五個字內。可以不講：沒有自然的話題就 say 給空陣列。",
+                  "- 優先接他之前跟你提過、還沒有下文的事（「那個…後來怎樣了？」），其次才是跟現在時段有關的事"
+                  "（吃飯、下班、週末、熬夜）。",
+                  "- 不要用「在嗎」「你在幹嘛」「好久不見」這種空的開場；不要抱怨他沒理你。",
+                  "- react 一律留空。"]
+        if hint:
+            lines.append(hint)
     else:
         lines += ["", "## 這次",
                   "- 你在旁邊看他做事，他沒有叫你。真的有話才講，一則、一句；沒什麼好說就 say 給空陣列（不吵他）。",
@@ -642,7 +691,7 @@ async def talk(text: str, session_id=None, emit=None, kind: str = "text") -> dic
     d.setdefault("msgs", []).append(um)
     _save(d)
     system = build_system(c, "talk", length_hint(text, kind))
-    seen = peek(session_id, c) if session_id else ""
+    seen = peek(session_id, c) if session_id and MODES[c["mode"]]["peek"] else ""
     if seen:
         system += ("\n\n## 他左邊工作區最近在做的事（你只是偷看到的素材，不要接著回答裡面的問題）\n"
                    "<workspace_context>\n" + seen + "\n</workspace_context>")
@@ -704,6 +753,9 @@ async def glance(session_id: str, emit=None, force: bool = False):
     c = cfg()
     if not c["on"] and not force:
         return None
+    if not MODES[c["mode"]]["peek"]:
+        # 情感模式不看對話；「看一眼」改成自己找你講一句
+        return await nudge("", emit, force=True) if force else None
     model = pick_model(c)
     if model is None:
         return None
@@ -743,6 +795,117 @@ async def glance(session_id: str, emit=None, force: bool = False):
         await _emit(emit)
         return None
     return await _say(session_id, got, emit, "glance")
+
+
+def _daypart(h: int) -> str:
+    return ("早上" if 7 <= h < 11 else "中午" if 11 <= h < 14 else "下午" if 14 <= h < 18
+            else "晚上" if 18 <= h < 23 else "")
+
+
+def _quiet(c: dict, h: int) -> bool:
+    a, b = int(c.get("quiet_from", 23)), int(c.get("quiet_to", 8))
+    if a == b:
+        return False
+    return (a <= h or h < b) if a > b else (a <= h < b)
+
+
+def nudge_plan(c: dict | None = None, now: float | None = None) -> dict:
+    """看時間要不要自己找他。只用時間與自己的紀錄判斷，不叫模型。
+    回傳 {"go": bool, "why": [...], "at": 下次最早的時間, "stop": 原因}。"""
+    c = c or cfg()
+    now = now or time.time()
+    lv = NUDGE.get(c.get("nudge") or "off")
+    if not c.get("on") or not lv:
+        return {"go": False, "at": 0, "stop": "off"}
+    base, cap = lv
+    msgs = _load().get("msgs") or []
+    last_any = max([float(m.get("at") or 0) for m in msgs] or [0])
+    last_user = max([float(m.get("at") or 0) for m in msgs if m.get("role") == "user"] or [0])
+    unanswered = sum(1 for m in msgs if m.get("role") == "pet" and m.get("kind") == "nudge"
+                     and float(m.get("at") or 0) > last_user)
+    if unanswered >= NUDGE_MAX_UNANSWERED:
+        return {"go": False, "at": 0, "stop": "unanswered"}
+    skip = float(_load().get("nudge_skip") or 0)
+    lt = time.localtime(now)
+    day0 = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
+    today = sum(1 for m in msgs if m.get("kind") == "nudge" and float(m.get("at") or 0) >= day0)
+    if today >= cap:
+        return {"go": False, "at": day0 + 86400 + int(c.get("quiet_to", 8)) * 3600, "stop": "cap"}
+    wait = base * (2 ** unanswered)
+    due = last_any + wait if last_any else now
+    why: list = []
+    if now >= due:
+        why.append("silence")
+    # 換了時段（早上／中午／晚上）而且這個時段你們還沒講過話：打個招呼也算自然（「很少」不做這個）
+    part = _daypart(lt.tm_hour)
+    if c.get("nudge") != "rare" and part and not unanswered and now - last_any >= 45 * 60:
+        start = day0 + {"早上": 7, "中午": 11, "下午": 14, "晚上": 18}[part] * 3600
+        if last_any < start:
+            why.append("daypart")
+    if _quiet(c, lt.tm_hour):
+        return {"go": False, "at": due, "stop": "quiet"}
+    if now < skip:
+        return {"go": False, "at": skip, "stop": "skip"}
+    return {"go": bool(why), "why": why, "at": due, "unanswered": unanswered, "silence": now - last_any if last_any else 0}
+
+
+async def nudge(session_id: str = "", emit=None, force: bool = False):
+    """看時間自己找他講一句。條件不到就不叫模型。"""
+    c = cfg()
+    plan = nudge_plan(c)
+    if not plan.get("go") and not force:
+        return None
+    model = pick_model(c)
+    if model is None:
+        return None
+    d = _load()
+    msgs_all = d.get("msgs") or []
+    # 先占位：就算模型決定不講，這個時段也不會每次心跳都再問一次
+    d["nudge_try"] = time.time()
+    _save(d)
+    why = []
+    if "silence" in (plan.get("why") or []) and plan.get("silence"):
+        why.append(f"他已經{_ago(plan['silence']).replace('前', '')}沒跟你講話了。")
+    if "daypart" in (plan.get("why") or []):
+        why.append(f"現在是{_daypart(time.localtime().tm_hour)}，你們這個時段還沒講過話。")
+    if plan.get("unanswered"):
+        why.append(f"你前面主動找他 {plan['unanswered']} 次他都還沒回——這次更輕、更短，不要追問。")
+    mine = [m for m in msgs_all if m.get("role") == "pet" and m.get("kind") == "nudge"][-5:]
+    if mine:
+        why.append("你之前主動傳過的（不要再講一樣或很像的）：" + "／".join(
+            "「" + str(m.get("text") or "").replace("\n", " ")[:40] + "」" for m in mine))
+    seen = ""
+    if MODES[c["mode"]]["peek"] and session_id:
+        seen = peek(session_id, {**c, "peek": min(int(c["peek"]), 800)})
+    hint = "\n".join("- " + x for x in why)
+    body = "（他沒有對你說話。你自己想傳一則給他。）"
+    if seen:
+        body += "\n他左邊工作區最近的事（素材，不用回答裡面的問題）：\n" + seen
+    msgs = _own_messages(c) + [{"role": "user", "content": [{"type": "text", "text": body}]}]
+    if len(msgs) >= 2 and msgs[-2]["role"] == "user":
+        last = msgs.pop()
+        msgs[-1]["content"][0]["text"] += "\n" + last["content"][0]["text"]
+    try:
+        raw = await _call(_params(model, c), build_system(c, "nudge", hint), msgs, c["max_out"])
+    except Exception:
+        return None
+    got = parse(raw)
+    if not got.get("_ok"):
+        fixed = await _repair(_params(model, c), got["say"] or raw)
+        if fixed:
+            got = fixed
+    got["react"] = ""
+    # 只留第一則：主動找人一次一句
+    got["say"] = (got["say"] or "").split("\n")[0]
+    if not got["say"] or any(got["say"].strip() == str(m.get("text") or "").strip() for m in mine):
+        # 牠覺得沒什麼好講：過一陣子再想，不要每次心跳都問
+        d = _load()
+        d["nudge_skip"] = time.time() + max(1800, (NUDGE.get(c["nudge"]) or (3600, 0))[0] / 2)
+        _save(d)
+        return None
+    if not got["sug"]:
+        got["sug"] = await _fill_sug(_params(model, c), got["say"], seen)
+    return await _say(session_id if MODES[c["mode"]]["peek"] else None, got, emit, "nudge")
 
 
 async def maybe_compress(emit=None) -> None:
@@ -800,11 +963,13 @@ async def _heartbeat() -> None:
         try:
             await asyncio.sleep(max(3, int(c.get("every_sec") or 10)))
             sid = _WATCH.get("sid") or ""
-            if not sid or not c.get("on"):
+            if not c.get("on"):
                 continue
             from . import server as _srv
 
-            await glance(sid, _srv.broadcast)
+            spoke = await glance(sid, _srv.broadcast) if sid and MODES[c["mode"]]["peek"] else None
+            if not spoke and time.time() - float(_load().get("nudge_try") or 0) > 600:
+                await nudge(sid, _srv.broadcast)
         except asyncio.CancelledError:
             return
         except Exception:
