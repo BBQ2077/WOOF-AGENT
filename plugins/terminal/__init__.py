@@ -2,9 +2,23 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 
 from woof import procs
+
+
+_PY_HINT_RE = re.compile(r"ModuleNotFoundError|No module named|command not found|不是內部或外部命令", re.I)
+
+
+def _python_hint(out: str) -> str:
+    """缺套件／缺指令時直接給正確的做法（用提示，不去改 PATH）。"""
+    if not _PY_HINT_RE.search(out or ""):
+        return ""
+    import sys as _sys
+
+    return (f"\n（提示：要用 Python 請直接呼叫 {_sys.executable} —— 已裝 pandas、openpyxl、numpy；"
+            "系統 PATH 上的 python 沒有這些，改叫這一顆就好，不要重裝重試同一支指令。）")
 
 
 def _tail(text: str, limit: int) -> str:
@@ -133,7 +147,7 @@ def register(woof):
                               f"\n最近輸出：\n{_tail(out, 4000)}"}
         code = task.exit_code
         body = _tail(out, limit) or "(無輸出)"
-        return {"output": f"{body}\n[exit {code}]", "is_error": code != 0}
+        return {"output": f"{body}\n[exit {code}]{_python_hint(out)}", "is_error": code != 0}
 
     async def process(args: dict, ctx) -> dict:
         action = args.get("action", "list")
@@ -180,11 +194,16 @@ def register(woof):
             return {"output": f"{state}\n{_tail(procs.read_log(task), 4000)}"}
         return {"output": f"不支援的 action：{action}", "is_error": True}
 
+    import sys as _sys
+
+    _py = _sys.executable
     woof.add_tool(
         "terminal",
         "在 Git Bash 執行指令（POSIX 語法）。長時間任務設 background=true，或超過 timeout 會自動轉背景；"
         "背景指令結束時會自動通知，不必反覆查。"
-        "停止時會結束整棵程序樹。",
+        "停止時會結束整棵程序樹。"
+        f"要用 Python 時直接呼叫這一顆（已裝 pandas、openpyxl、numpy）：{_py}；"
+        "系統 PATH 上的 python 不一定有這些套件，不要為此重複安裝。",
         {
             "type": "object",
             "properties": {

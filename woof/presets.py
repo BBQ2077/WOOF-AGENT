@@ -23,15 +23,15 @@ _LOCK = threading.Lock()
 # plugins 是「這個模式要用的插件」，沒列到的在套用時會被關掉。權限用 perms.MODES 的代號。
 BUILTIN = [
     {"id": "chat", "name": "一般聊天", "desc": "問問題、查資料、看圖。不給終端機和子代理，權限先問你再動手。",
-     "perm": "ask", "plugins": ["files", "info", "history", "memory", "web_search", "vision", "tasks", "style", "focus", "context", "tool_search"]},
+     "perm": "ask", "plugins": ["files", "info", "history", "memory", "web_search", "vision", "tasks", "style", "context", "tool_search"]},
     {"id": "write", "name": "寫作創作", "desc": "寫檔、改檔直接做，跑指令和連網先問。留著網路搜尋和看圖，可以邊查邊寫。",
-     "perm": "edits", "plugins": ["files", "info", "memory", "web_search", "vision", "tasks", "style", "focus", "context", "tool_search"]},
+     "perm": "edits", "plugins": ["files", "info", "memory", "web_search", "vision", "tasks", "style", "context", "tool_search"]},
     {"id": "build", "name": "動手做", "desc": "讀寫檔、跑指令、開子代理都放行，適合把整個專案交給它做。",
-     "perm": "auto", "plugins": ["files", "terminal", "subagent", "tasks", "info", "history", "memory", "web_search", "vision", "style", "focus", "context", "tool_search", "skills", "schedule"]},
+     "perm": "auto", "plugins": ["files", "terminal", "subagent", "tasks", "info", "history", "memory", "web_search", "vision", "style", "context", "tool_search", "skills", "schedule"]},
     {"id": "orchestrate", "name": "統籌", "desc": "以子代理為主：自己不動手，把子任務派出去，再收集結果。",
-     "perm": "edits", "plugins": ["files", "terminal", "subagent", "tasks", "info", "history", "memory", "web_search", "focus", "context", "tool_search", "schedule"]},
+     "perm": "edits", "plugins": ["files", "terminal", "subagent", "tasks", "info", "history", "memory", "web_search", "context", "tool_search", "schedule"]},
     {"id": "readonly", "name": "只查不改", "desc": "只能讀和搜尋，寫檔、跑指令一律擋下。看程式碼、查資料用。",
-     "perm": "readonly", "plugins": ["files", "info", "history", "web_search", "vision", "memory", "tasks", "focus", "context", "tool_search"]},
+     "perm": "readonly", "plugins": ["files", "info", "history", "web_search", "vision", "memory", "tasks", "context", "tool_search"]},
 ]
 
 DEFAULT_PERM = "ask"

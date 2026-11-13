@@ -1,5 +1,15 @@
 name = "memory"
-version = "0.2.0"
+version = "0.3.0"
 kinds = ["hook", "tool"]
-description = "提示詞檔：設定檔、人物檔、使用者檔、記憶檔放進系統提示（內容在「提示詞與記憶」頁編輯）；memory 工具讓模型自己記下長期有用的事"
+description = "提示詞檔：設定檔、人物檔、使用者檔、記憶檔放進系統提示（內容在「提示詞與記憶」頁編輯）；memory 工具讓模型自己記下長期有用的事。關掉這個插件只是模型看不到、也改不了，檔案內容不會被刪"
 enabled = true
+
+[settings.allow_read]
+type = "bool"
+default = true
+label = "記憶放進提示詞（讀）：記憶檔與使用者檔進系統提示。關掉只是模型看不到內容，檔案還在、你照樣改得動"
+
+[settings.allow_write]
+type = "bool"
+default = true
+label = "讓模型自己寫記憶（add／replace／remove）。關掉後模型只能讀不能改，改由你在「提示詞與記憶」頁手動編"

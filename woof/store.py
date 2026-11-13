@@ -279,6 +279,34 @@ def delete_session(sid: str) -> None:
         _db.commit()
 
 
+def child_sessions(session_id: str) -> list[dict]:
+    """這一條派出去的子代理對話（sessions.parent）。"""
+    con = _conn()
+    rows = con.execute(
+        "SELECT id, title, created FROM sessions WHERE parent = ? ORDER BY created DESC LIMIT 10",
+        (session_id,)).fetchall()
+    return [dict(r) if isinstance(r, dict) else {"id": r[0], "title": r[1], "created": r[2]} for r in rows]
+
+
+def upload_names(session_id: str | None = None) -> set[str]:
+    """訊息裡提到的 uploads 檔名（session_id=None 表示全部對話）。"""
+    from . import uploads
+
+    if session_id is None:
+        rows = _db.execute("SELECT content FROM messages WHERE content LIKE '%uploads%' OR content LIKE '%pastes%' OR content LIKE '%files%'").fetchall()
+    else:
+        rows = _db.execute("SELECT content FROM messages WHERE session_id=? AND (content LIKE '%uploads%' OR content LIKE '%pastes%' OR content LIKE '%files%')",
+                           (session_id,)).fetchall()
+    names: set[str] = set()
+    for r in rows:
+        names |= uploads.names_in(r["content"] or "")
+    return names
+
+
+def all_upload_names() -> set[str]:
+    return upload_names(None)
+
+
 def add_message(sid: str, role: str, content: list, meta: dict | None = None) -> dict:
     now = time.time()
     with _lock:

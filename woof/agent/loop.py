@@ -53,25 +53,25 @@ _clean_spill()
 
 TPE = datetime.now().astimezone().tzinfo  # 這台電腦的時區
 
-BASE_PROMPT = """你是 WOOF，使用者的個人 AI agent，在使用者自己的 Windows 電腦上執行。
-- 用繁體中文回覆，說人話，先講結論。
-- 需要動手時直接用工具完成，完成後根據實際結果回報，不要編造輸出。
-- 改完能驗證就驗證（重讀檔案、跑一次指令）；沒驗證到的明說。做完使用者要的就停，不加做沒被要求的事。
-- 終端機是 Git Bash（POSIX 語法），原生 Windows 程式的路徑用 C:/... 形式。
-- 產出檔案放進對應的專案資料夾，不要丟在使用者家目錄根層。"""
-
-BASE_PROMPT_EN = """You are WOOF, the user's personal AI agent, running on the user's own Windows computer.
-- Reply in English unless the user asks for another language. Use plain words and lead with the conclusion.
-- When something needs doing, use the tools to do it, then report from the actual results. Never make up output.
-- After a change, verify it when you can (re-read the file, run the command once) and say plainly what you could not verify. Stop when the request is done; do not add work nobody asked for.
-- The terminal is Git Bash (POSIX syntax); give native Windows programs paths in C:/... form.
-- Put output files in the relevant project folder, not in the root of the user's home directory."""
+from ..promptfiles import DEFAULT_IDENTITY as BASE_PROMPT, DEFAULT_IDENTITY_EN as BASE_PROMPT_EN
 
 
 def base_prompt(lang: str | None = None) -> str:
-    """介面語言是英文就用英文版，回覆語言跟著改。"""
+    """身份與環境：設定 → 提示詞與記憶 → 身份與環境（data/prompts/IDENTITY.md）。
+    檔案是空的才用程式裡的預設；介面語言是英文且沒改過內容，就用英文預設。"""
+    from woof import promptfiles
     from woof.lang import ui_lang
-    return BASE_PROMPT_EN if (lang or ui_lang()) == "en" else BASE_PROMPT
+
+    en = (lang or ui_lang()) == "en"
+    try:
+        txt = promptfiles.read("identity")
+    except Exception:
+        txt = ""
+    if not txt.strip():
+        return BASE_PROMPT_EN if en else BASE_PROMPT
+    if en and txt.strip() == BASE_PROMPT.strip():
+        return BASE_PROMPT_EN
+    return txt
 
 
 class ToolContext:
@@ -123,6 +123,13 @@ async def build_parts(ctx: TurnContext) -> list[dict]:
     parts = [{"key": "base", "source": "基礎提示詞", "text": ov if ov is not None else base_prompt(),
               "overridden": ov is not None}]
     parts.append({"key": "env", "source": "系統", "text": f"{model_identity(ctx.model_cfg)}\n對話開始日期：{now}；現在的日期與時間請用 current_time 工具查詢。\n工作目錄：{ctx.cwd}（相對路徑以這裡為準）"})
+    # 提示詞檔（人物檔、設定檔、使用者檔、記憶檔）是核心的，不掛在任何插件上：
+    # 關掉某個插件不該讓它們跟著從系統提示消失
+    from woof import promptfiles as _pf
+
+    _pf_text = _pf.build_prompt_gated()
+    if _pf_text:
+        parts.append({"key": "promptfiles", "source": "提示詞檔", "text": _pf_text})
     for plugin, text in await REG.events.collect_named("build_prompt", ctx):
         if isinstance(text, str) and text.strip():
             parts.append({"key": "plugin", "source": plugin, "text": text})
@@ -545,6 +552,9 @@ async def _run_tool(call: dict, ctx: TurnContext) -> dict:
 
 
 
+# 正在跑的子代理對話（run_subagent 開的）。使用者在那些子對話裡打字＝插話給它，不是開新回合。
+AGENT_RUNS: set[str] = set()
+
 _steer: dict[str, list[list[dict]]] = {}
 _steer_lock = threading.Lock()
 
@@ -950,11 +960,18 @@ async def run_turn(session_id: str, blocks: list[dict], emit: Emit) -> None:
 
 
 # ---------------------------------------------------------------- 子代理
-async def run_subagent(parent: TurnContext, goal: str, context: str = "", model_id: str = "",
-                       progress: Callable[[str], Awaitable[None]] | None = None, label: str = "",
-                       title_hint: str = "", kind: str = "subagent_task",
-                       read_only: bool = True, write_scope: list | None = None) -> dict:
-    """開一個子對話，用自己的上下文跑完任務，回傳最後的回答。子代理不能再開子代理。"""
+import contextvars as _cv
+
+# 同一次 delegate_task 派出的子代理共用一個批次 id（側欄依批次分層、可整批刪）
+SUB_BATCH: "_cv.ContextVar[str]" = _cv.ContextVar("woof_sub_batch", default="")
+SUB_KIND = {"review_request": "review", "expand_request": "review"}
+
+async def _prepare_subagent(parent: TurnContext, goal: str, context: str = "", model_id: str = "",
+                            progress: Callable[[str], Awaitable[None]] | None = None, label: str = "",
+                            title_hint: str = "", kind: str = "subagent_task", read_only: bool = True,
+                            write_scope: list | None = None,
+                            session_id: str = "") -> tuple[dict, dict, TurnContext]:
+    """建一個子對話（或接續既有的那一個）並把任務寫進去。回 (對話, 模型設定, ctx)。"""
     if parent.session.get("parent"):  # 工具清單已經拿掉 delegate_task，這裡再擋一次，萬一別的插件繞過來呼叫
         raise RuntimeError("子代理不能再派子代理")
     model_cfg = find_model(model_id) if model_id else aux_model("subagent", parent.model_cfg)
@@ -963,11 +980,26 @@ async def run_subagent(parent: TurnContext, goal: str, context: str = "", model_
     if model_cfg.get("provider") not in REG.providers:
         raise RuntimeError(f"「{model_cfg.get('label', model_cfg['id'])}」不能當子代理（需要 API 型連線），"
                            "請在「設定 → 輔助模型」指定子代理模型")
-    title = title_hint or f"子代理：{goal.strip().splitlines()[0][:24]}"
-    child = store.create_session(model_cfg["id"], model_cfg.get("default_effort"), title)
-    store.update_session(child["id"], parent=parent.session_id)
-    child = store.get_session(child["id"])
-    await parent.emit({"type": "session_updated", "session": child})
+    if session_id:
+        # 接續同一個子代理：同一個對話、同一份上下文，不要再開新的
+        child = store.get_session(session_id)
+        if not child:
+            raise RuntimeError(f"找不到子代理對話 {session_id}")
+        owner = child.get("parent") or ""
+        if owner not in (parent.session_id, getattr(parent, "root_session_id", "")):
+            raise RuntimeError("那個對話不是這個對話的子代理，不能接續")
+        title = child.get("title") or "子代理"
+        own = REG.model_cfg(child.get("model"))
+        if own and own.get("provider") in REG.providers:
+            model_cfg = own
+    else:
+        title = title_hint or f"子代理：{goal.strip().splitlines()[0][:24]}"
+        child = store.create_session(model_cfg["id"], model_cfg.get("default_effort"), title)
+        # 側欄分層用：審核／拓展跟一般子代理分開放；同一次 delegate_task 派出的算同一批
+        sub = {"kind": SUB_KIND.get(kind, "task"), "batch": SUB_BATCH.get() or ""}
+        store.update_session(child["id"], parent=parent.session_id, engine_state={"sub": sub})
+        child = store.get_session(child["id"])
+        await parent.emit({"type": "session_updated", "session": child})
 
     async def emit(ev: dict) -> None:
         await parent.emit(ev)
@@ -990,12 +1022,15 @@ async def run_subagent(parent: TurnContext, goal: str, context: str = "", model_
 
     m = store.add_message(child["id"], "user", [{"type": "text", "text": text}], meta=internal.meta(kind))
     await emit({"type": "message", "session_id": child["id"], "message": m})
-    await run_model_loop(ctx)
-    msgs = store.get_messages(child["id"])
+    return child, model_cfg, ctx
+
+
+def _subagent_report(child_id: str, title: str, model_cfg: dict) -> dict:
+    """從子對話整理出結構化回報：結論、步數、改過的檔、跑過的指令、出錯的工具。"""
+    msgs = store.get_messages(child_id)
     last = next((x for x in reversed(msgs) if x["role"] == "assistant"), None)
     answer = "".join(b.get("text", "") for b in (last or {}).get("content", []) if b.get("type") == "text").strip()
     steps = sum(1 for x in msgs if x["role"] == "tool")
-    # 結構化回報：改了哪些檔、跑了哪些指令、哪些工具出錯——主代理不用只靠子代理的文字描述
     files, cmds, errs, names = [], [], [], {}
     for x in msgs:
         for b in x["content"]:
@@ -1008,10 +1043,120 @@ async def run_subagent(parent: TurnContext, goal: str, context: str = "", model_
                     cmds.append(str(a["command"])[:160])
             elif b.get("type") == "tool_result" and b.get("is_error"):
                 errs.append(f"{b.get('name') or names.get(b.get('id'))}：{str(b.get('output') or '')[:120]}")
-    return {"session_id": child["id"], "title": title, "model": model_cfg.get("label", model_cfg["id"]),
+    return {"session_id": child_id, "title": title, "model": model_cfg.get("label", model_cfg.get("id", "")),
             "answer": answer or "（子代理沒有給出文字回覆）", "steps": steps,
             "files_touched": files, "commands_run": cmds[-10:], "errors": errs[-5:]}
 
+
+def report_text(r: dict) -> str:
+    """把回報變成一段文字（送回主對話的內部訊息）。"""
+    facts = []
+    if r.get("files_touched"):
+        facts.append("改過的檔：" + "、".join(r["files_touched"]))
+    if r.get("commands_run"):
+        facts.append("跑過的指令：" + "；".join(r["commands_run"]))
+    if r.get("errors"):
+        facts.append("出錯的工具：" + "；".join(r["errors"]))
+    if r.get("error"):
+        facts.append("失敗原因：" + str(r["error"]))
+    head = f"子代理〔{r.get('title') or ''}〕（對話 {str(r.get('session_id') or '')[:12]}，{r.get('model') or ''}，{r.get('steps', 0)} 次工具）回報："
+    tail = ("\n\n［實際紀錄］\n" + "\n".join(facts)) if facts else ""
+    return head + "\n" + str(r.get("answer") or "") + tail
+
+
+async def _drive(ctx: TurnContext) -> None:
+    AGENT_RUNS.add(ctx.session_id)
+    try:
+        await run_model_loop(ctx)
+    finally:
+        AGENT_RUNS.discard(ctx.session_id)
+
+
+async def run_subagent(parent: TurnContext, goal: str, context: str = "", model_id: str = "",
+                       progress: Callable[[str], Awaitable[None]] | None = None, label: str = "",
+                       title_hint: str = "", kind: str = "subagent_task",
+                       read_only: bool = True, write_scope: list | None = None,
+                       session_id: str = "") -> dict:
+    """跑到完（對抗、審核這種要拿到結果才能往下走的地方用）。"""
+    child, model_cfg, ctx = await _prepare_subagent(
+        parent, goal, context, model_id, progress, label, title_hint, kind, read_only, write_scope, session_id)
+    await _drive(ctx)
+    return _subagent_report(child["id"], child.get("title") or title_hint, model_cfg)
+
+
+# 背景子代理：放著讓它跑，跑完自己把結果送回來（不要擋住主對話）
+BG_TASKS: set[asyncio.Task] = set()
+BG_BY_SID: dict[str, asyncio.Task] = {}   # 子代理對話 id → 背景任務（要能單獨停掉那一個）
+
+
+def stop_agent(session_id: str) -> bool:
+    """停掉某個子代理對話的背景任務（不影響主對話）。回傳有沒有真的停到。"""
+    t = BG_BY_SID.get(session_id)
+    if t and not t.done():
+        t.cancel()
+        return True
+    return False
+
+
+async def run_subagent_bg(parent: TurnContext, goal: str, context: str = "", model_id: str = "",
+                          progress: Callable[[str], Awaitable[None]] | None = None, label: str = "",
+                          title_hint: str = "", kind: str = "subagent_task", read_only: bool = True,
+                          write_scope: list | None = None, session_id: str = "",
+                          done: Callable[[dict], Awaitable[None]] | None = None,
+                          lock: "asyncio.Lock | None" = None) -> dict:
+    """派出子代理但「不等它」：立刻回傳子代理對話，主對話可以繼續做別的事或跟使用者對話。
+    跑完把回報送進主對話（閒置就開一步處理，執行中就在下一步看到）。"""
+    child, model_cfg, ctx = await _prepare_subagent(
+        parent, goal, context, model_id, progress, label, title_hint, kind, read_only, write_scope, session_id)
+    parent_sid = parent.session_id
+
+    async def _bg() -> None:
+        status = "done"
+        err = ""
+        await parent.emit({"type": "run_start", "session_id": ctx.session_id})
+        try:
+            if lock is None:
+                await _drive(ctx)
+            else:
+                async with lock:      # 寫入模式排隊：等前面那個寫完才開始，但主對話照樣能動
+                    await _drive(ctx)
+        except asyncio.CancelledError:
+            # 被停掉也要回報，否則主對話會一直以為「它還在跑」而卡住
+            err, status = "子代理被停止，沒有產出結論", "stopped"
+            raise
+        except Exception as e:  # 背景任務炸掉不能拖垮主對話
+            err, status = f"{type(e).__name__}: {e}", "error"
+        finally:
+            try:
+                await asyncio.shield(parent.emit({"type": "run_end", "session_id": ctx.session_id, "status": status}))
+            except Exception:
+                pass
+            # 不管成功、出錯、被停掉，都要讓主對話聽到結果（不然它會一直等一個不會來的回報）
+            try:
+                r = _subagent_report(ctx.session_id, child.get("title") or title_hint, model_cfg)
+                if err:
+                    r["error"] = err
+                if done is not None:
+                    await asyncio.shield(done(r))
+                inject = getattr(REG, "inject", None)
+                if inject is not None:
+                    await asyncio.shield(inject(parent_sid, "bg_done", report_text(r)))
+            except Exception:
+                log.exception("子代理回報送出失敗")
+
+    task = asyncio.create_task(_bg())
+    BG_TASKS.add(task)
+    child_id = child["id"]
+    BG_BY_SID[child_id] = task
+
+    def _done(_t):
+        BG_TASKS.discard(_t)
+        if BG_BY_SID.get(child_id) is _t:
+            BG_BY_SID.pop(child_id, None)
+
+    task.add_done_callback(_done)
+    return {"session_id": child["id"], "title": child.get("title") or title_hint,
+            "model": model_cfg.get("label", model_cfg.get("id", "")), "background": True}
 
 
 async def resume_session(session_id: str, emit: Emit) -> None:

@@ -25,6 +25,10 @@ EFFORTS_BY_STYLE = {
     "nim": ["off", "on"],
     "deepseek": ["off", "low", "high", "max"],
 }
+# DeepSeek 走 OpenAI 相容代理（opencode zen 等，位址不是 api.deepseek.com）時，檔位照 DeepSeek 官方文件：
+# reasoning_effort 收 low/high/max，沒有 medium（medium 會被對映成 high）。官方 thinking_mode 文件 2026-11 查證。
+# 這種代理只送頂層 reasoning_effort，關不掉思考，所以不列 "off"。
+EFFORTS_DEEPSEEK_PROXY = ["low", "high", "max"]
 DEFAULT_WAIT = 30
 
 # 錯誤字樣（小寫比對）
@@ -100,9 +104,16 @@ def apply(m: dict) -> dict:
             m["efforts"] = []
             m["default_effort"] = None
         elif m["effort_style"] != "none" and not m.get("efforts"):
-            m["efforts"] = list(EFFORTS_BY_STYLE.get(m["effort_style"], EFFORTS_STD))
+            if "deepseek" in f"{m.get('id', '')} {m.get('model', '')}".lower() and m["effort_style"] != "deepseek":
+                m["efforts"] = list(EFFORTS_DEEPSEEK_PROXY)
+            else:
+                m["efforts"] = list(EFFORTS_BY_STYLE.get(m["effort_style"], EFFORTS_STD))
         if m.get("efforts") and m.get("default_effort") not in m["efforts"]:
             m["default_effort"] = "high" if "high" in m["efforts"] else ("on" if "on" in m["efforts"] else m["efforts"][-1])
+        if m.get("efforts"):  # 設定檔寫 MAX / Max 也認：內部一律小寫，顯示才用中文標籤（前端 EFFORT_LABEL）
+            m["efforts"] = [str(e).strip().lower() for e in m["efforts"] if str(e).strip()]
+            if isinstance(m.get("default_effort"), str):
+                m["default_effort"] = m["default_effort"].strip().lower()
         if m.get("rate_limit_wait") is None:
             m["rate_limit_wait"] = DEFAULT_WAIT
     if "vision" not in m:

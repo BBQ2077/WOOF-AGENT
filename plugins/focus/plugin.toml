@@ -1,13 +1,13 @@
 name = "focus"
 version = "1.0.0"
 kinds = ["hook"]
-description = "重點便條：多步工作時，每次送模型前在最後面附一小段目前狀態（要求、步數、待辦、改過的檔、最近出錯、權限）。只在這次請求裡，不存進對話，不影響快取前綴"
-enabled = true
+description = "重點便條（預設關）：上下文壓縮把待辦／權限／出錯摘要掉之後，於下一次請求尾端補一小段狀態。會讓部分模型把同一件事重想一遍，長任務出現原地打轉時保持關閉"
+enabled = false
 
 [settings.from_step]
 type = "number"
 default = 2
-label = "從這一回合的第幾步開始附（0＝每一步都附；第 0 步是使用者剛送出的那次）"
+label = "從這一回合的第幾步開始附（第 0 步是使用者剛送出的那次）。沒剛壓縮過的那一步不會貼"
 
 [settings.max_tokens]
 type = "number"

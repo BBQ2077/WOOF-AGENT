@@ -68,7 +68,11 @@ DEFAULTS = {
     "peek": 1500,
     "speak_up": False,
     "quick": ["怎麼了？", "繼續說"],   # 固定的通用回覆，永遠在
+    "react_rate": "low",              # 牠說話時順便按表情的頻率：off／low／high
 }
+
+# 說話時順便按表情：最近幾句你的話裡牠按過一次，就先不按（只按表情不說話的回覆不受限）
+REACT_GAP = {"off": 10 ** 6, "low": 4, "high": 2}
 
 
 def _sha(text: str) -> str:
@@ -166,6 +170,8 @@ def clean(patch: dict) -> dict:
             out["char"] = v
     if "effort" in patch:
         out["effort"] = "on" if patch["effort"] == "on" else "off"
+    if "react_rate" in patch and patch["react_rate"] in REACT_GAP:
+        out["react_rate"] = patch["react_rate"]
     if "quick" in patch:
         q = patch["quick"]
         if isinstance(q, str):
@@ -312,8 +318,11 @@ _ASK = re.compile(r"[?？]|怎麼|要不要|該不該|建議|意見|覺得|為�
 _ACK = re.compile(r"^(好|好喔|好啦|好的|嗯+|恩+|喔+|哦+|ok|OK|okay|讚|收到|謝謝|謝啦|感謝|哈+|呵+|lol|晚安|掰|bye)[!！。.~～]*$", re.I)
 
 
-def length_hint(text: str) -> str:
+def length_hint(text: str, kind: str = "text") -> str:
     """依使用者這句話決定回多長。程式先算，模型照做，比叫模型自己判斷穩。"""
+    if kind == "poke":
+        return ("他沒說話，只是伸手摸了你（點了你的圖）。用你的方式回應被摸這件事，一則、十五個字內；"
+                "如果瞄到他在忙什麼，可以順口提一句。不要按表情。")
     t = (text or "").strip()
     n = len(re.sub(r"\s", "", t))
     if _ACK.match(t):
@@ -377,7 +386,7 @@ def build_system(c: dict | None = None, mode: str = "glance", hint: str = "") ->
              "## 按表情（像 LINE／Telegram 的訊息反應）",
              f"- react 是你對他剛剛那句按的表情，只能從這幾個挑：{' '.join(pal)}。",
              f"- 好笑→😂；累、難過→🥺；好消息、做完了→🔥 或 👍；很貼心、在撒嬌→❤️；嚇一跳→😮；說要睡→😴；{sig} 是你的招牌，偶爾才用。",
-             "- 大多數時候不用按，留空字串。只有他那句真的讓你有感覺才按。",
+             "- 大多數時候不用按，留空字串。只有他那句真的讓你有感覺才按；說話時大概四五句才按一次。",
              "- 只按表情、不說話也是一種回覆：他只回「好」「嗯」「哈哈」時，按一個表情、say 給空陣列就好。",
              "",
              "## 表情與心情",
@@ -519,8 +528,9 @@ def fit_react(emoji: str, c_id: str | None = None) -> str:
 
 def _params(model: dict, c: dict) -> dict:
     m = dict(model)
-    if c.get("effort") in (m.get("efforts") or []):
-        m["effort"] = c["effort"]
+    from .effort import norm as _norm
+    if _norm(c.get("effort")) in [_norm(e) for e in (m.get("efforts") or [])]:
+        m["effort"] = _norm(c["effort"])
     else:
         m.pop("effort", None)
     return m
@@ -589,7 +599,8 @@ async def _say(session_id, got: dict, emit, kind: str) -> dict:
                 break
     if got["say"]:
         d["say"] = got["say"]
-        d["sug"] = (got.get("sug") or [])[:1]
+        said = {x.strip() for x in str(got["say"]).splitlines() if x.strip()}
+        d["sug"] = [s for s in (got.get("sug") or []) if str(s).strip() and str(s).strip() not in said][:1]
         d.setdefault("msgs", []).append({"id": _mid(), "role": "pet", "text": got["say"], "at": d["at"],
                                         "face": got["face"], "kind": kind})
     elif kind == "talk":
@@ -613,16 +624,24 @@ async def _say(session_id, got: dict, emit, kind: str) -> dict:
     return st
 
 
-async def talk(text: str, session_id=None, emit=None) -> dict:
+def poke_text(n: int) -> str:
+    n = max(1, min(int(n or 1), 20))
+    return "（摸了摸你的頭）" if n == 1 else f"（連摸了你 {n} 下）"
+
+
+async def talk(text: str, session_id=None, emit=None, kind: str = "text") -> dict:
     c = cfg()
     model = pick_model(c)
     if model is None:
         return {"error": "沒有可用的模型，請在「設定 → 寵物」挑一個"}
     text = str(text)[:2000]
     d = _load()
-    d.setdefault("msgs", []).append({"id": _mid(), "role": "user", "text": text, "at": time.time()})
+    um = {"id": _mid(), "role": "user", "text": text, "at": time.time()}
+    if kind == "poke":
+        um["kind"] = "poke"
+    d.setdefault("msgs", []).append(um)
     _save(d)
-    system = build_system(c, "talk", length_hint(text))
+    system = build_system(c, "talk", length_hint(text, kind))
     seen = peek(session_id, c) if session_id else ""
     if seen:
         system += ("\n\n## 他左邊工作區最近在做的事（你只是偷看到的素材，不要接著回答裡面的問題）\n"
@@ -641,9 +660,21 @@ async def talk(text: str, session_id=None, emit=None) -> dict:
         fixed = await _repair(_params(model, c), got["say"] or raw)
         if fixed:
             got = fixed
-    if not got["say"] and not fit_react(got.get("react") or "", c["char"]):
+    react = fit_react(got.get("react") or "", c["char"])
+    if kind == "poke":
+        react = ""
+        if not got["say"]:
+            got["say"] = "……" if c["char"] == "fish" else "汪～"
+    elif not got["say"] and not react:
         # 不說話也沒按表情＝已讀不回；依表情補一顆反應
-        got["react"] = FACE_REACT.get(got["face"], "❤️")
+        react = FACE_REACT.get(got["face"], "❤️")
+    elif got["say"] and react:
+        # 說話時順便按的表情：照頻率設定，最近幾句按過就先不按
+        gap = REACT_GAP.get(c.get("react_rate") or "low", 4)
+        earlier = [m for m in (_load().get("msgs") or []) if m.get("role") == "user"][:-1]
+        if gap >= 10 ** 6 or any(m.get("react") for m in earlier[-(gap - 1):]):
+            react = ""
+    got["react"] = react
     if got["say"] and not got["sug"]:
         got["sug"] = await _fill_sug(_params(model, c), got["say"], seen)
     st = await _say(session_id, got, emit, "talk")

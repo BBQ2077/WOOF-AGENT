@@ -32,6 +32,133 @@ def _in_scope(path: Path, ctx) -> bool:
     return any(p == s or s in p.parents for s in scope)
 
 
+def _col_of(ref: str) -> int:
+    """B12 → 2（1 起算）。"""
+    n = 0
+    for ch in ref:
+        if ch.isalpha():
+            n = n * 26 + (ord(ch.upper()) - 64)
+        else:
+            break
+    return n
+
+
+def _xlsx_digest(path: Path, rows: int = 20, start: int = 1, raw: bool = False) -> str:
+    """用標準庫拆 xlsx（zip + xml）：工作表、範圍、欄位、前幾列。
+    模型一次就看懂這張表長什麼樣，不必開十幾支 terminal 反覆試 pandas／openpyxl。"""
+    import zipfile
+    import xml.etree.ElementTree as ET
+
+    NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+    try:
+        zf = zipfile.ZipFile(path)
+    except Exception as e:
+        return f"這個 xlsx 打不開（{e}）"
+
+    shared: list[str] = []
+    if "xl/sharedStrings.xml" in zf.namelist():
+        for si in ET.fromstring(zf.read("xl/sharedStrings.xml")).iter(f"{NS}si"):
+            shared.append("".join(t.text or "" for t in si.iter(f"{NS}t")))
+
+    rels: dict[str, str] = {}
+    if "xl/_rels/workbook.xml.rels" in zf.namelist():
+        for r in ET.fromstring(zf.read("xl/_rels/workbook.xml.rels")):
+            rels[r.get("Id")] = r.get("Target", "")
+    rid_attr = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+
+    wb = ET.fromstring(zf.read("xl/workbook.xml"))
+    sheets = [(s.get("name"), rels.get(s.get(rid_attr), "")) for s in wb.iter(f"{NS}sheet")]
+
+    if raw:
+        lines: list[str] = []
+        for idx, (name, target) in enumerate(sheets, 1):
+            if idx < max(1, start):
+                continue
+            member = "xl/" + str(target).lstrip("/")
+            if not member.startswith("xl/"):
+                member = "xl/" + member
+            if member not in zf.namelist():
+                continue
+            root = ET.fromstring(zf.read(member))
+            lines.append(f"# 工作表 {idx} {name}（TSV，{path.name}）")
+            for r in root.iter(f"{NS}row"):
+                cells: dict[int, str] = {}
+                for c in r.findall(f"{NS}c"):
+                    v = c.find(f"{NS}v")
+                    if v is None:
+                        continue
+                    val = v.text or ""
+                    if c.get("t") == "s":
+                        try:
+                            val = shared[int(val)]
+                        except Exception:
+                            pass
+                    cells[_col_of(c.get("r", "A1"))] = str(val).replace("\t", " ").replace("\n", " ")
+                if cells:
+                    lines.append("\t".join(cells.get(i, "") for i in range(1, max(cells) + 1)))
+                if len(lines) > 400000:
+                    break
+            lines.append("")
+        zf.close()
+        return "\n".join(lines)
+
+    out = [f"{path.name}（{path.stat().st_size / 1024:.0f} KB，{len(sheets)} 個工作表）",
+           "工作表：" + " / ".join(f"{i} {n}" for i, (n, _t) in enumerate(sheets, 1))]
+    budget = 7000   # 一次讀完的預算：模型不用為了一張表來回十幾次
+    for idx, (name, target) in enumerate(sheets, 1):
+        if idx < max(1, start):
+            continue
+        member = "xl/" + str(target).lstrip("/")
+        if not member.startswith("xl/"):
+            member = "xl/" + member
+        if member not in zf.namelist():
+            out.append(f"\n[{idx}] {name}（讀不到內容）")
+            continue
+        root = ET.fromstring(zf.read(member))
+        dim = root.find(f"{NS}dimension")
+        span = dim.get("ref") if dim is not None else ""
+        nrows = 0
+        body: list[str] = []
+        for r in root.iter(f"{NS}row"):
+            nrows += 1
+            if len(body) >= rows or budget <= 0:
+                continue
+            cells: dict[int, str] = {}
+            for c in r.findall(f"{NS}c"):
+                v = c.find(f"{NS}v")
+                if v is None:
+                    t = c.find(f"{NS}is/{NS}t")
+                    val = t.text if t is not None else ""
+                else:
+                    val = v.text or ""
+                    if c.get("t") == "s":
+                        try:
+                            val = shared[int(val)]
+                        except Exception:
+                            pass
+                col = _col_of(c.get("r", "A1"))
+                if val != "":
+                    cells[col] = str(val).replace("\n", " ")[:40]
+            if cells:
+                width = max(cells)
+                line = "|".join(cells.get(k, "") for k in range(1, width + 1))[:240]
+                body.append(line)
+                budget -= len(line) + 5
+        head = f"{span}，" if span else ""
+        out.append(f"\n[{idx}] {name}　（{head}{nrows} 列）")
+        out.extend("    " + line for line in body)
+        if nrows > len(body):
+            where = "篇幅到上限了" if budget <= 0 else "把 limit 加大"
+            out.append(f"    …還有 {nrows - len(body)} 列（{where}，或 terminal 指定儲存格）")
+        if budget <= 0:
+            out.append(f"\n（後面還有 {len(sheets) - idx} 個工作表沒列出；同一支 read_file 加 offset={idx + 1} 從下一個看起）")
+            break
+    zf.close()
+    out.append("\n（要看整張表的原始數值：同一個檔再 read_file 一次，limit 設 200000、offset=工作表編號，"
+               "會直接吐 TSV；不需要 python／openpyxl）")
+    return "\n".join(out)
+
+
 def register(woof):
     async def read_file(args: dict, ctx) -> dict:
         path = _resolve(args["path"], ctx.cwd)
@@ -43,8 +170,24 @@ def register(woof):
         offset = max(int(args.get("offset") or 1), 1)
         limit = min(int(args.get("limit") or 2000), 2000)
         raw = path.read_bytes()
+        if path.suffix.lower() in (".xlsx", ".xlsm"):
+            if int(args.get("limit") or 0) >= 5000:
+                txt = _xlsx_digest(path, limit, offset, raw=True)
+                if len(txt) > 11000:   # 太長：整份存檔，只回前面幾行＋位置（模型用 read_file/search_files 取區段）
+                    out_path = path.with_name(f"{path.stem}.s{offset}.tsv")
+                    out_path.write_text(txt, encoding="utf-8", newline="")
+                    head = "\n".join(txt.splitlines()[:120])
+                    return {"output": f"{head}\n\n（整張表 {len(txt):,} 字已存成檔案：{out_path}"
+                                      "；要看某一段就 read_file 那個檔加 offset，要找人／值就用 search_files）"}
+                return {"output": txt}
+            return {"output": _xlsx_digest(path, limit, offset)}
         if b"\x00" in raw[:4096]:
-            return {"output": f"二進位檔案（{len(raw)} bytes），無法以文字讀取", "is_error": True}
+            hint = ""
+            if path.suffix.lower() in (".pdf", ".doc", ".pptx", ".zip", ".7z", ".docx"):
+                hint = ("；這種檔要用 terminal 轉文字再看"
+                        "（uv run --with pypdf python -c \"import pypdf;print(pypdf.PdfReader(r'%s')"
+                        ".pages[0].extract_text())\"）" % path)
+            return {"output": f"二進位檔案（{len(raw)} bytes），無法以文字讀取{hint}", "is_error": True}
         lines = raw.decode("utf-8", errors="replace").splitlines()
         part = lines[offset - 1: offset - 1 + limit]
         body = "\n".join(f"{i}|{l}" for i, l in enumerate(part, start=offset))
@@ -199,7 +342,7 @@ def register(woof):
     woof.add_tool("read_file", "讀取文字檔（附行號），或列出資料夾內容。",
                   {"type": "object", "properties": {
                       "path": {"type": "string"}, "offset": {"type": "integer", "description": "起始行，從 1 開始"},
-                      "limit": {"type": "integer", "description": "最多行數，上限 2000"}},
+                      "limit": {"type": "integer", "description": "最多行數／xlsx 最多列數，上限 2000。xlsx 會直接給工作表、範圍、欄位與前幾列，不要自己開 python 拆；要看整張表的原始數值就同一個檔加 limit=200000（吐 TSV，太長會存成 .tsv 檔給你）"}},
                    "required": ["path"]}, read_file)
     woof.add_tool("write_file", "寫入整個檔案（覆蓋），會自動建立資料夾並讀回驗證。",
                   {"type": "object", "properties": {

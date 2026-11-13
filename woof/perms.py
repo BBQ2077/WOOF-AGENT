@@ -103,7 +103,11 @@ def settings() -> dict:
     }
 
 
-def category(name: str) -> str:
+def category(name: str, args: dict | None = None) -> str:
+    if name == "memory":
+        # 讀與寫分開算：list 只讀（讀取類），add／replace／remove 會動檔案（寫入類）。
+        # 這樣「唯讀」模式或把寫入設成不允許時，模型仍然看得到記憶，只是改不動。
+        return "read" if str((args or {}).get("action") or "") == "list" else "write"
     if name in TOOL_CAT:
         return TOOL_CAT[name]
     from .loader import REG
@@ -153,7 +157,7 @@ def decide(mode: str, name: str, args: dict | None, headless: bool = False) -> d
     args = args or {}
     cfg = settings()
     mode = mode if mode in MODES else "auto"
-    cat = category(name)
+    cat = category(name, args)
     table = cfg["custom"] if mode == "custom" else TABLE[mode]
     d = table.get(cat, "ask")
     reason = f"{MODES[mode][0]}：{CATS[cat][0]}{'直接執行' if d == 'auto' else '先問' if d == 'ask' else '不允許'}"

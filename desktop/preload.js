@@ -13,6 +13,8 @@ contextBridge.exposeInMainWorld('woofDesktop', {
   win: (action) => ipcRenderer.invoke('win', action),
   openPath: (p) => ipcRenderer.invoke('open-path', p),
   showItem: (p) => ipcRenderer.invoke('show-item', p),
+  readImage: (p) => ipcRenderer.invoke('read-image', p),
+  saveImage: (p) => ipcRenderer.invoke('save-image', p),
   pickFolder: (start) => ipcRenderer.invoke('pick-folder', start || ''),
   root: () => ipcRenderer.invoke('root'),
   profiles: () => ipcRenderer.invoke('profiles'),

@@ -1393,5 +1393,973 @@ class Pet(unittest.TestCase):
                 self.assertIsNotNone(p.sprite(f, cid), f"{cid}/{f}")
 
 
+class FocusNote(unittest.TestCase):
+    """重點便條：只在壓縮把狀態摘要掉之後接回來一次；平常不貼。"""
+
+    def mod(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("focus_plugin", ROOT / "plugins" / "focus" / "__init__.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def hook(self):
+        m = self.mod()
+        got = {}
+
+        class W:
+            settings = types.SimpleNamespace(get=lambda self, k, d=None: d)
+
+            def on(self, ev, fn, order=0):
+                got[ev] = fn
+
+        m.register(W())
+        return got["before_request"]
+
+    def session(self, todos=True, cc=0):
+        st = {"engine_state": {"todos": [
+            {"text": "修好 UI", "status": "done"}, {"text": "寫測試", "status": "doing"}]}} if todos else {}
+        if cc:
+            st["engine_state"]["compress_count"] = cc
+        s = store.create_session("m", None, "便條測試")
+        store.add_message(s["id"], "user", [{"type": "text", "text": "把 UI 修好"}])
+        store.update_session(s["id"], **st)
+        return store.get_session(s["id"])
+
+    def ctx(self, sid, step=2):
+        return types.SimpleNamespace(session_id=sid, step=step, max_steps=60, mid_turn=False, focus_note=None)
+
+    def test_no_request_restated(self):
+        m = self.mod()
+        sess = self.session()
+        text, _ = m.build(sess, store.get_messages(sess["id"]), 1, 60, 300)
+        self.assertIn("待辦 1/2", text)
+        self.assertNotIn("這回合的要求", text)
+        self.assertNotIn("把 UI 修好", text)  # 需求不重貼：它本來就在對話裡
+
+    def test_sig_ignores_step(self):
+        m = self.mod()
+        sess = self.session()
+        _, a = m.build(sess, store.get_messages(sess["id"]), 1, 60, 300)
+        _, b = m.build(sess, store.get_messages(sess["id"]), 7, 60, 300)
+        self.assertEqual(a, b)  # 只有步數變不算狀態變
+
+    def test_nothing_to_say(self):
+        m = self.mod()
+        sess = self.session(todos=False)
+        text, _ = m.build(sess, store.get_messages(sess["id"]), 3, 60, 300)
+        self.assertEqual(text, "")  # 沒東西可說就不附
+
+    def test_attach_only_after_compress(self):
+        hook = self.hook()
+        sess = self.session()
+        msgs = [{"id": 1, "role": "user", "content": [{"type": "text", "text": "把 UI 修好"}]}]
+        ctx = self.ctx(sess["id"])
+        self.assertIsNone(hook(list(msgs), ctx))        # 平常：不貼
+        self.assertIsNone(hook(list(msgs), ctx, ))      # 下一步：還是不貼
+        es = dict(store.get_session(sess["id"])["engine_state"])
+        es["compress_count"] = 1                        # 剛剛壓縮過
+        store.update_session(sess["id"], engine_state=es)
+        out = hook(list(msgs), ctx)
+        self.assertIsNotNone(out)                       # 壓縮後：接回來一次
+        self.assertEqual(out[-1]["content"][-1]["type"], "note")
+        self.assertIsNone(hook(list(msgs), ctx))        # 再下一步：不重貼
+
+
+class AskSkip(unittest.TestCase):
+    """使用者直接打字送訊息時，還在等的提問要一起結掉，不能讓回合卡在等那張卡。"""
+
+    def test_skip_only_that_session(self):
+        from woof.agent import tasks
+
+        loop = asyncio.new_event_loop()
+        try:
+            f1, f2, f3 = loop.create_future(), loop.create_future(), loop.create_future()
+            f3.set_result("already")
+            tasks.ASKS["t1"] = {"future": f1, "session_id": "s1"}
+            tasks.ASKS["t2"] = {"future": f2, "session_id": "s2"}
+            tasks.ASKS["t3"] = {"future": f3, "session_id": "s1"}
+            self.assertEqual(tasks.skip_ask("s1"), 1)
+            self.assertTrue(f1.done())
+            self.assertEqual(f1.result(), "（使用者直接回話，跳過這個問題）")
+            self.assertFalse(f2.done())
+            self.assertEqual(tasks.skip_ask("s1"), 0)   # 已經結掉的不重複算
+        finally:
+            tasks.ASKS.clear()
+            loop.close()
+
+    def test_has_ask_and_typed_answer(self):
+        from woof.agent import tasks
+
+        loop = asyncio.new_event_loop()
+        try:
+            f1 = loop.create_future()
+            tasks.ASKS["a1"] = {"future": f1, "session_id": "s1"}
+            self.assertTrue(tasks.has_ask("s1"))
+            self.assertFalse(tasks.has_ask("s2"))
+            # 使用者打的那句話要原樣當成答案（不是罐頭訊息）
+            self.assertEqual(tasks.skip_ask("s1", "我要處理 WOOF 的顯示問題"), 1)
+            self.assertEqual(f1.result(), "我要處理 WOOF 的顯示問題")
+            self.assertFalse(tasks.has_ask("s1"))       # 結掉之後就不算在等
+        finally:
+            tasks.ASKS.clear()
+            loop.close()
+
+
+class MemoryPerms(unittest.TestCase):
+    """memory 的讀與寫分開：讀＝記憶與使用者偏好放進系統提示，寫＝模型自己改記憶檔。"""
+
+    def mod(self, flags):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("memory_plugin", ROOT / "plugins" / "memory" / "__init__.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        got = {}
+
+        class Sett:
+            def get(self, k, d=None):
+                return flags.get(k, d)
+
+        class W:
+            settings = Sett()
+
+            def on(self, ev, fn, order=0):
+                got.setdefault(ev, []).append(fn)
+
+            def add_tool(self, name, desc, schema, fn):
+                got["tool"] = fn
+
+        mod.register(W())
+        return got
+
+    def test_category_splits_read_and_write(self):
+        self.assertEqual(perms.category("memory", {"action": "list"}), "read")
+        for a in ("add", "replace", "remove", ""):
+            self.assertEqual(perms.category("memory", {"action": a}), "write")
+        self.assertEqual(perms.category("memory", None), "write")   # 沒帶 action 當寫，寧可保守
+        self.assertEqual(perms.category("terminal", {"command": "ls"}), "exec")  # 其他工具不受影響
+
+    def test_read_only_mode_still_reads_memory(self):
+        REG.config = {"permissions": {}}
+        self.assertEqual(perms.decide("readonly", "memory", {"action": "list"})["decision"], "auto")
+        self.assertEqual(perms.decide("readonly", "memory", {"action": "add", "text": "x"})["decision"], "deny")
+
+    def test_write_off_still_reads(self):
+        run = self.mod({"allow_read": True, "allow_write": False})["tool"]
+        out = asyncio.run(run({"action": "add", "text": "x"}, None))
+        self.assertTrue(out.get("is_error"))
+        self.assertIn("關掉", out["output"])
+        listed = asyncio.run(run({"action": "list"}, None))
+        self.assertFalse(listed.get("is_error"))   # 只關寫，讀照常
+
+    def test_read_off_hides_prompt_and_list(self):
+        from woof import promptfiles
+
+        data = {"soul": "人格", "instructions": "規則", "user": "偏好甲", "memory": "記憶乙"}
+        with unittest.mock.patch.object(promptfiles, "read", lambda k: data.get(k, "")), \
+                unittest.mock.patch.object(promptfiles, "memory_switch", lambda k, d=True: k != "allow_read"):
+            text_off = promptfiles.build_prompt_gated()
+            self.assertNotIn("記憶乙", text_off)
+            self.assertNotIn("偏好甲", text_off)
+            self.assertIn("人格", text_off)          # 人物檔、設定檔不受影響
+        with unittest.mock.patch.object(promptfiles, "read", lambda k: data.get(k, "")), \
+                unittest.mock.patch.object(promptfiles, "memory_switch", lambda k, d=True: True):
+            self.assertIn("記憶乙", promptfiles.build_prompt_gated())
+        out = asyncio.run(self.mod({"allow_read": False, "allow_write": True})["tool"]({"action": "list"}, None))
+        self.assertTrue(out.get("is_error"))
+
+    def test_prompt_files_are_core_not_plugin(self):
+        """關掉 memory 插件只是少了工具；提示詞檔照樣進系統提示（不再掛在插件掛鉤上）。"""
+        src = (ROOT / "plugins" / "memory" / "__init__.py").read_text(encoding="utf-8")
+        self.assertNotIn('"build_prompt"', src)
+        loop_src = (ROOT / "woof" / "agent" / "loop.py").read_text(encoding="utf-8")
+        self.assertIn("build_prompt_gated", loop_src)
+
+
+class PromptLimits(unittest.TestCase):
+    """字數上限：預設值在程式裡，使用者在設定頁改的值存在 data/prompt_limits.json。"""
+
+    def setUp(self):
+        from woof import promptfiles
+        self.pf = promptfiles
+        if promptfiles.LIMITS_FILE.is_file():
+            promptfiles.LIMITS_FILE.unlink()
+
+    def test_default_and_override(self):
+        pf = self.pf
+        self.assertEqual(pf.limit("memory"), pf.LIMITS["memory"])
+        pf.set_limit("memory", 6000)
+        self.assertEqual(pf.limit("memory"), 6000)
+        self.assertEqual(pf.limits()["user"], pf.LIMITS["user"])   # 沒改的還是預設
+        self.assertEqual(pf.info("memory")["limit"], 6000)
+        pf.set_limit("memory", pf.LIMITS["memory"])                 # 改回去
+        self.assertEqual(pf.limit("memory"), pf.LIMITS["memory"])
+
+    def test_rejects_bad_values(self):
+        pf = self.pf
+        for bad in (0, 10, 999999, "abc", None):
+            with self.assertRaises(ValueError):
+                pf.set_limit("memory", bad)
+        with self.assertRaises(KeyError):
+            pf.set_limit("nope", 4000)
+
+    def test_memory_tool_respects_limit(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("memory_plugin_lim", ROOT / "plugins" / "memory" / "__init__.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        got = {}
+
+        class Sett:
+            def get(self, k, d=None):
+                return d
+
+        class W:
+            settings = Sett()
+
+            def on(self, ev, fn, order=0):
+                got.setdefault(ev, []).append(fn)
+
+            def add_tool(self, name, desc, schema, fn):
+                got["tool"] = fn
+
+        mod.register(W())
+        self.pf.set_limit("memory", 200)
+        out = asyncio.run(got["tool"]({"action": "add", "text": "字" * 300}, None))
+        self.assertTrue(out.get("is_error"))
+        self.assertIn("200", out["output"])
+
+    def test_broken_file_falls_back_to_defaults(self):
+        pf = self.pf
+        pf.LIMITS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        pf.LIMITS_FILE.write_text("{ 壞掉的 json", encoding="utf-8")
+        self.assertEqual(pf.limit("memory"), pf.LIMITS["memory"])
+
+
+class GoalFlow(unittest.TestCase):
+    """目標／方案流程：步驟 1～5、每步不再逐步子代理審核、最後只對抗檢查一次。"""
+
+    def test_parse_check(self):
+        from woof.agent import tasks
+
+        ok, gaps, _ = tasks._parse_check('{"pass": true, "gaps": []}')
+        self.assertTrue(ok)
+        self.assertEqual(gaps, [])
+        ok, gaps, _ = tasks._parse_check('檢查完了\n{"pass": false, "gaps": ["沒有跑測試", "少改一個檔"]}')
+        self.assertFalse(ok)
+        self.assertEqual(gaps, ["沒有跑測試", "少改一個檔"])
+        ok, gaps, why = tasks._parse_check('我覺得還行')          # 格式不對：不能當成通過
+        self.assertFalse(ok)
+        self.assertTrue(why)
+
+    def test_gaps_capped_at_three(self):
+        from woof.agent import tasks
+
+        ok, gaps, _ = tasks._parse_check('{"pass": false, "gaps": ["a", "b", "c", "d", "e"]}')
+        self.assertFalse(ok)
+        self.assertEqual(len(gaps), 3)
+
+    def test_recent_report_includes_tool_output(self):
+        from woof.agent import tasks
+
+        s = store.create_session("m", None, "對抗檢查")
+        store.add_message(s["id"], "assistant", [{"type": "text", "text": "檔案改好了"}])
+        store.add_message(s["id"], "tool", [{"type": "tool_result", "output": "已寫入 a.py（3 行）"}])
+        rep = tasks._recent_report(s["id"])
+        self.assertIn("檔案改好了", rep)
+        self.assertIn("已寫入 a.py", rep)          # 證據要帶給檢查員，不只執行者的說法
+
+
+class AskSkipButton(unittest.TestCase):
+    """ask 卡：空白按送出一樣是略過；略過要留下「已略過」的痕跡。"""
+
+    def test_empty_submit_is_skip(self):
+        import re as _re
+
+        js = open(r"C:\Users\user\hermes-files\WOOF\web\dist\app.js", encoding="utf-8").read()
+        self.assertIn("answerAsk(id, v || ASK_SKIP, !v)", js)      # 空白送出＝略過
+        self.assertIn("data-askskip", js)                          # 卡片上有略過按鈕
+        self.assertIn("已略過", js)                                 # 答完留在畫面上
+
+    def test_skip_marks_flag(self):
+        from woof.agent import tasks
+
+        loop = asyncio.new_event_loop()
+        try:
+            f = loop.create_future()
+            tasks.ASKS["a9"] = {"future": f, "session_id": "s9", "skipped": False}
+            tasks.skip_ask("s9", "（略過這題，你自己判斷決定）")
+            self.assertTrue(tasks.ASKS["a9"]["skipped"])
+        finally:
+            tasks.ASKS.clear()
+            loop.close()
+
+
+class EffortLadder(unittest.TestCase):
+    """推理強度檔位統一一組：最小／低／中／高／極高／最高／超高（不再混英文 MAX）。"""
+
+    def test_scale_has_seven_levels(self):
+        from woof import effort
+
+        self.assertEqual(effort.SCALE, ("minimal", "low", "medium", "high", "xhigh", "max", "ultra"))
+
+    def test_ultra_falls_back_to_model_max(self):
+        from woof import effort
+
+        self.assertEqual(effort.resolve(["low", "high", "max"], "ultra"), "max")
+        self.assertEqual(effort.resolve(["low", "high", "max"], "xhigh"), "high")
+        self.assertEqual(effort.resolve(["low", "high", "max"], "minimal"), "low")
+
+    def test_ui_labels_are_chinese(self):
+        js = open(r"C:\Users\user\hermes-files\WOOF\web\dist\app.js", encoding="utf-8").read()
+        self.assertIn("max: '最高'", js)
+        self.assertIn("ultra: '超高'", js)
+        self.assertNotIn("max: 'MAX'", js)          # 不要中文清單裡突然冒一個英文
+        self.assertIn("'xhigh', 'max', 'ultra'", js)
+
+
+class BasePrompt(unittest.TestCase):
+    """系統提示只留必要的事：身分是軟體名，不是把人定死成執行者；不加額外的禁令。"""
+
+    def test_no_agent_framing(self):
+        from woof.agent import loop
+
+        self.assertNotIn("個人 AI agent", loop.BASE_PROMPT)
+        self.assertNotIn("personal AI agent", loop.BASE_PROMPT_EN)
+        self.assertIn("使用者的要求優先", loop.BASE_PROMPT)
+        self.assertIn("The user's actual request comes first", loop.BASE_PROMPT_EN)
+
+    def test_stays_short(self):
+        from woof.agent import loop
+
+        # 剃刀原則：只有身分、語言、工具、驗證、環境、輸出位置六條，不再往上長
+        for p in (loop.BASE_PROMPT, loop.BASE_PROMPT_EN):
+            self.assertLessEqual(len([l for l in p.splitlines() if l.startswith("- ")]), 5)
+            self.assertLess(len(p), 700)
+
+    def test_chinese_is_first_rule(self):
+        from woof.agent import loop
+
+        lines = [l for l in loop.BASE_PROMPT.splitlines() if l.startswith("- ")]
+        self.assertTrue(lines[0].startswith("- 用繁體中文回覆"))
+
+
+class IdentityTab(unittest.TestCase):
+    """身份與環境要能在設定頁看到、改得動（設定頁分頁走 TABS，不被 build_prompt 的 ORDER 綁住）。"""
+
+    def test_tabs_has_identity_first(self):
+        from woof import promptfiles
+
+        self.assertEqual(promptfiles.TABS[0], "identity")
+        self.assertNotIn("identity", promptfiles.ORDER)  # 不重複塞進系統提示
+
+    def test_edit_changes_base_prompt(self):
+        from woof import promptfiles
+        from woof.agent import loop
+
+        promptfiles.write("identity", "你是測試身分。")
+        self.assertEqual(loop.base_prompt(), "你是測試身分。")
+        self.assertEqual(promptfiles.info("identity")["label"], "身份與環境")
+
+class UploadsGC(unittest.TestCase):
+    """貼圖（data/uploads）是快取：對話刪掉要跟著刪，沒人引用的要回收。"""
+
+    def test_gc_keeps_referenced_only(self):
+        from woof import store, uploads
+
+        sid = store.create_session("m", "high", "測試")["id"]
+        keep = uploads.DIR / "aaaa11112222.png"
+        junk = uploads.DIR / "bbbb33334444.png"
+        for p in (keep, junk):
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b"x" * 10)
+        store.add_message(sid, "user", [{"type": "image", "path": str(keep.resolve())}])
+
+        self.assertEqual(uploads.files_of(sid), [keep])
+        n, size = uploads.gc()
+        self.assertGreaterEqual(n, 1)
+        self.assertTrue(keep.is_file())
+        self.assertFalse(junk.is_file())
+        uploads.remove(uploads.files_of(sid))
+        self.assertFalse(keep.is_file())
+
+class PasteToFile(unittest.TestCase):
+    """貼上的長文存成檔案（data/pastes），跟貼圖同一條生命週期，但專案產出永遠不碰。"""
+
+    def test_paste_saved_and_referenced(self):
+        from woof import store, uploads
+
+        sid = store.create_session("m", "high", "貼上測試")["id"]
+        p = uploads.save_paste("x" * 5000)
+        self.assertEqual(p.parent.name, "pastes")
+        store.add_message(sid, "user", [{"type": "text", "text": f"（貼上內容 5 KB，已存成檔案：{p.resolve()}）"}])
+        self.assertIn(p, uploads.files_of(sid))
+        uploads.remove(uploads.files_of(sid))
+        self.assertFalse(p.exists())
+
+    def test_gc_never_touches_outputs(self):
+        from woof import uploads
+        from woof.config import DATA
+
+        keepdir = DATA / "report"
+        keepdir.mkdir(parents=True, exist_ok=True)
+        out = keepdir / "gc_probe.md"
+        out.write_text("產出", encoding="utf-8")
+        orphan = uploads.save_paste("沒人引用")
+        uploads.gc()
+        self.assertTrue(out.is_file(), "gc 不准碰專案／產出資料夾")
+        self.assertFalse(orphan.exists())
+        out.unlink()
+
+
+class MidTurnSteer(unittest.TestCase):
+    """子代理跑的時候可以追加要求；主對話執行中 Enter 預設插話。"""
+
+    def test_agent_runs_registered(self):
+        from woof.agent import loop
+
+        self.assertTrue(hasattr(loop, "AGENT_RUNS"))
+        src = open(loop.__file__, encoding="utf-8").read()
+        self.assertIn("AGENT_RUNS.add(ctx.session_id)", src)
+        self.assertIn("AGENT_RUNS.discard(ctx.session_id)", src)
+
+    def test_server_routes_steer_to_agent(self):
+        from woof import server
+
+        src = open(server.__file__, encoding="utf-8").read()
+        self.assertIn("agent_running = (not running) and sid in AGENT_RUNS", src)
+        self.assertIn("已把追加要求送給子代理", src)
+
+    def test_busy_default_is_steer(self):
+        js = open(r"C:\Users\user\hermes-files\WOOF\web\dist\app.js", encoding="utf-8").read()
+        self.assertIn("includes(v) ? v : 'steer'", js)
+
+class AskDonePayload(unittest.TestCase):
+    """ask_done 要帶答案跟「是不是略過」，不然前端只會留一張空白的已回答卡。"""
+
+    def _run(self, answer_fn):
+        import asyncio
+        from types import SimpleNamespace
+        from woof.agent import tasks
+
+        events = []
+
+        async def emit(ev):
+            events.append(ev)
+
+        turn = SimpleNamespace(session_id="asktest", emit=emit)
+
+        async def go():
+            t = asyncio.create_task(tasks.ask(turn, "這張圖你想我做什麼？", [], timeout=5))
+            for _ in range(50):
+                await asyncio.sleep(0.01)
+                ids = [k for k, v in tasks.ASKS.items() if v.get("session_id") == "asktest"]
+                if ids:
+                    answer_fn(ids[0])
+                    break
+            return await t
+
+        got = asyncio.run(go())
+        done = [e for e in events if e.get("type") == "ask_done"][-1]
+        return got, done
+
+    def test_answer_carried_back(self):
+        from woof.agent import tasks
+
+        got, done = self._run(lambda aid: tasks.skip_ask("asktest", "好色"))
+        self.assertEqual(got, "好色")
+        self.assertEqual(done.get("answer"), "好色")
+        self.assertFalse(done.get("skipped"))
+
+    def test_skip_flagged(self):
+        from woof.agent import tasks
+
+        got, done = self._run(lambda aid: tasks.resolve_ask(aid, "略過"))
+        self.assertEqual(got, "略過")
+        self.assertEqual(done.get("answer"), "略過")
+        self.assertTrue(done.get("skipped"))
+
+class BackgroundSubagent(unittest.TestCase):
+    """派出子代理不該讓主對話停下來等；同一個子代理要能接續。"""
+
+    def test_non_blocking_and_continue(self):
+        from woof.agent import loop
+
+        sid = store.create_session("m", "high", "主對話")["id"]
+
+        async def emit(ev):
+            return None
+
+        parent = types.SimpleNamespace(session={"id": sid, "parent": None}, session_id=sid,
+                                       model_cfg={"id": "m", "provider": "p"}, emit=emit, cwd=str(ROOT),
+                                       tool_exclude=set(), root_session_id=sid, turn_mid=0)
+
+        async def fake_loop(ctx):
+            await asyncio.sleep(0.5)
+            store.add_message(ctx.session_id, "assistant", [{"type": "text", "text": "做完了"}])
+
+        injected = []
+
+        async def fake_inject(s, kind, text):
+            injected.append((s, kind, text))
+
+        model = {"id": "m", "provider": "p", "label": "M", "default_effort": "high"}
+
+        async def go():
+            with unittest.mock.patch.dict(loop.REG.providers, {"p": object()}), \
+                 unittest.mock.patch.object(loop, "run_model_loop", fake_loop), \
+                 unittest.mock.patch.object(loop.REG, "inject", fake_inject, create=True), \
+                 unittest.mock.patch.object(loop, "aux_model", lambda role, cfg: dict(model)):
+                t0 = time.monotonic()
+                info = await loop.run_subagent_bg(parent, "測試任務")
+                waited = time.monotonic() - t0
+                first = info["session_id"]
+
+                # 接續同一個子代理：同一個對話，不要重開
+                again = await loop.run_subagent_bg(parent, "再補一句", session_id=first,
+                                                   kind="subagent_followup")
+                for _ in range(60):
+                    if not loop.BG_TASKS:
+                        break
+                    await asyncio.sleep(0.05)
+                return waited, info, first, again, [m for m in store.get_messages(first)]
+
+        waited, info, first, again, msgs = asyncio.run(go())
+        self.assertLess(waited, 0.4, "delegate 不能等子代理跑完")
+        self.assertTrue(info["background"])
+        self.assertNotEqual(first, sid, "子代理要有自己的對話")
+        self.assertEqual(again["session_id"], first, "接續要用同一個子代理對話")
+        self.assertGreaterEqual(len(msgs), 2, "接續的訊息要進同一份上下文")
+        self.assertTrue(any("回報" in t for _, _, t in injected), "跑完要把報告送回主對話")
+
+class OpenStateKept(unittest.TestCase):
+    """手動展開的 details（內部指令、子代理清單、壓縮記號）重畫後不能被收起來。"""
+
+    def test_chat_details_remember_open(self):
+        js = open(r"C:\\Users\\user\\hermes-files\\WOOF\\web\\dist\\app.js", encoding="utf-8").read()
+        self.assertIn("const itk = 'internal-' + m.id;", js)
+        self.assertIn("det.dataset.tk = itk;", js)
+        self.assertIn("det.open = THINK_OPEN.has(itk);", js)
+        # 每個 delegate_task 各自記，開一個不會把其他的一起打開
+        self.assertIn("bar.dataset.tk = 'subfold-' + (call.id || S.sid || '');", js)
+        self.assertIn("det.dataset.tk = 'cmp-' + (S.sid || '');", js)
+
+class ChatUx29(unittest.TestCase):
+    """第二十九輪：子代理分兩疊、捲動錨點、背景還在跑、右鍵、本機路徑連結、便條預設關。"""
+
+    def setUp(self):
+        self.js = open(r"C:\\Users\\user\\hermes-files\\WOOF\\web\\dist\\app.js", encoding="utf-8").read()
+
+    def test_frontend_pieces(self):
+        js = self.js
+        for s in ("function subKind(", "function subBatches(", "async function deleteSubs(", "function chatAnchor(",
+                  "function chatRestore(", "function innerScrolls(", "function restoreInnerScrolls(",
+                  "function renderBgRun(", "function linkPaths(", "function chatCtxItems(", "function copyImageSrc(",
+                  "function openFileLink("):
+            self.assertIn(s, js)
+        self.assertEqual(js.count("function subKind("), 1)
+
+    def test_subagent_tagging(self):
+        from woof.agent import loop
+        self.assertEqual(loop.SUB_KIND.get("review_request"), "review")
+        self.assertEqual(loop.SUB_KIND.get("expand_request"), "review")
+        src = open(r"C:\\Users\\user\\hermes-files\\WOOF\\plugins\\subagent\\__init__.py", encoding="utf-8").read()
+        self.assertIn("SUB_BATCH.set(", src)
+
+    def test_focus_off_by_default(self):
+        import tomllib
+        from woof import presets
+        t = tomllib.loads(open(r"C:\\Users\\user\\hermes-files\\WOOF\\plugins\\focus\\plugin.toml", encoding="utf-8").read())
+        self.assertFalse(t["enabled"])
+        self.assertNotIn('"focus"', open(presets.__file__, encoding="utf-8").read())
+
+
+class AttachFiles(unittest.TestCase):
+    """附件（xlsx／pdf 之類）要能附加，存進 data/files，跟對話一起清。"""
+
+    def test_save_files_and_notes(self):
+        import base64
+        from woof import server as srv, store, uploads
+
+        raw = b"PK\x03\x04" + b"x" * 200
+        blocks = srv._save_files([{"name": "股票數據爬取統整.xlsx", "data": base64.b64encode(raw).decode(),
+                                   "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}])
+        self.assertEqual(len(blocks), 1)
+        b = blocks[0]
+        self.assertEqual(b["type"], "file")
+        self.assertEqual(b["bytes"], len(raw))
+        p = Path(b["path"])
+        self.assertEqual(p.parent.name, "files")
+        self.assertEqual(p.suffix, ".xlsx")
+        self.assertEqual(p.read_bytes(), raw)
+
+        notes = srv._file_notes(blocks)
+        self.assertTrue(notes and "股票數據爬取統整.xlsx" in notes[0]["text"])
+        self.assertIn(b["path"], notes[0]["text"])
+
+        # 對話引用它 → gc 不能刪；沒引用 → 可以刪
+        sid = store.create_session("m", "high", "附件測試")["id"]
+        store.add_message(sid, "user", blocks + notes)
+        self.assertIn(p, uploads.files_of(sid))
+        uploads.gc()
+        self.assertTrue(p.is_file(), "被引用的附件不能被回收")
+        uploads.remove(uploads.files_of(sid))
+        self.assertFalse(p.exists(), "刪對話要連附件一起刪")
+
+    def test_regex_handles_file_names(self):
+        from woof import uploads
+
+        s = r'{"type": "file", "path": "C:\\Users\\u\\data\\files\\ab12cd34ef56.xlsx"}'
+        self.assertEqual(uploads.names_in(s), {"files/ab12cd34ef56.xlsx"})
+
+class XlsxDigest(unittest.TestCase):
+    """xlsx 用 read_file 一次看懂：工作表、欄位、前幾列（不必開一堆 terminal）。"""
+
+    def _mk(self, tmp):
+        import zipfile
+        path = Path(tmp) / "t.xlsx"
+        ns = 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
+        rel = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
+        with zipfile.ZipFile(path, "w") as z:
+            z.writestr("xl/workbook.xml",
+                       f'<workbook {ns} {rel}><sheets>'
+                       '<sheet name="持股" sheetId="1" r:id="rId1"/>'
+                       '<sheet name="回測" sheetId="2" r:id="rId2"/></sheets></workbook>')
+            z.writestr("xl/_rels/workbook.xml.rels",
+                       '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                       '<Relationship Id="rId1" Target="worksheets/sheet1.xml"/>'
+                       '<Relationship Id="rId2" Target="worksheets/sheet2.xml"/></Relationships>')
+            z.writestr("xl/sharedStrings.xml",
+                       f'<sst {ns}><si><t>代號</t></si><si><t>股數</t></si><si><t>00687B</t></si></sst>')
+            z.writestr("xl/worksheets/sheet1.xml",
+                       f'<worksheet {ns}><dimension ref="A1:B2"/><sheetData>'
+                       '<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row>'
+                       '<row r="2"><c r="A2" t="s"><v>2</v></c><c r="B2"><v>1437800</v></c></row>'
+                       '</sheetData></worksheet>')
+            z.writestr("xl/worksheets/sheet2.xml",
+                       f'<worksheet {ns}><dimension ref="A1:A1"/><sheetData>'
+                       '<row r="1"><c r="A1"><v>42</v></c></row></sheetData></worksheet>')
+        return path
+
+    def test_digest(self):
+        import tempfile
+        from plugins_files_probe import _xlsx_digest
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._mk(tmp)
+            s = _xlsx_digest(path, 20, 1)
+            self.assertIn("[1] 持股", s)
+            self.assertIn("代號|股數", s)
+            self.assertIn("00687B|1437800", s)
+            self.assertIn("工作表：1 持股 / 2 回測", s)
+            s2 = _xlsx_digest(path, 20, 2)
+            self.assertIn("[2] 回測", s2)
+            self.assertNotIn("[1] 持股", s2)
+
+
+class ResumeNotShownWhileBusy(unittest.TestCase):
+    """還在跑（方案／對抗／子代理／待答）時不能顯示「上一回合沒做完」，那會讓人以為卡死。"""
+
+    def test_js_and_server(self):
+        js = open(r"C:\\Users\\user\\hermes-files\\WOOF\\web\\dist\\app.js", encoding="utf-8").read()
+        self.assertIn("(cur() || {}).busy", js)
+        self.assertIn("bar._h === h", js)
+        sv = open(r"C:\\Users\\user\\hermes-files\\WOOF\\woof\\server.py", encoding="utf-8").read()
+        self.assertIn("def _busy(", sv)
+        self.assertIn('ev["busy"] = _busy(sid)', sv)
+        css = open(r"C:\\Users\\user\\hermes-files\\WOOF\\web\\dist\\app.css", encoding="utf-8").read()
+        self.assertIn(".resumecard{user-select:text}", css)
+
+class ReviewAlwaysRuns(unittest.TestCase):
+    """按了方案／對抗又真的拆了步驟，最後一定要派一次審核模型（純問答在前面就 return 了）。"""
+
+    def test_no_changed_paths_guard(self):
+        src = open(r"C:\\Users\\user\\hermes-files\\WOOF\\woof\\agent\\tasks.py", encoding="utf-8").read()
+        self.assertIn("ok, gaps = await final_check(ctx, session_id, objective, steps, emit)", src)
+        self.assertNotIn("if changed_paths(session_id):\n            ok, gaps", src)
+
+class ToolErrPreview(unittest.TestCase):
+    """工具失敗要直接寫出原因（不必點開），點一下才展開完整輸出。"""
+
+    def test_js_has_inline_error(self):
+        js = open(r"C:\\Users\\user\\hermes-files\\WOOF\\web\\dist\\app.js", encoding="utf-8").read()
+        self.assertIn("function errPreview(", js)
+        self.assertIn("eb.className = 'terr'", js)
+        self.assertIn("el.insertBefore(eb, $('pre', el))", js)
+        css = open(r"C:\\Users\\user\\hermes-files\\WOOF\\web\\dist\\app.css", encoding="utf-8").read()
+        self.assertIn(".tool .terr{", css)
+
+class ResumeDigest(unittest.TestCase):
+    """「繼續」要把做過的事交給模型，不要讓它從頭逛專案。"""
+
+    def test_digest_has_state(self):
+        from woof import store
+        from woof.agent import tasks
+
+        sid = store.create_session("m", "high", "接續摘要")["id"]
+        store.add_message(sid, "user", [{"type": "text", "text": "把 excel 看完給我策略"}])
+        store.add_message(sid, "assistant", [{"type": "tool_call", "id": "c1", "name": "write_file",
+                                              "args": {"path": "x.py"}}])
+        store.add_message(sid, "tool", [{"type": "tool_result", "id": "c1", "name": "write_file",
+                                         "output": "已寫入 C:\\tmp\\x.py（10 bytes）", "is_error": False}])
+        store.set_engine_state = getattr(store, "set_engine_state", None)
+        d = tasks.resume_digest(sid)
+        self.assertIn("不必重新探索", d)
+        self.assertIn("這次要做的事：把 excel 看完給我策略", d)
+        self.assertIn("x.py", d)
+        self.assertLess(len(d), 6000, "摘要不能比重新探索還貴")
+
+    def test_continue_uses_digest(self):
+        sv = open(r"C:\\Users\\user\\hermes-files\\WOOF\\woof\\server.py", encoding="utf-8").read()
+        self.assertIn("_tasks.resume_digest(sid)", sv)
+
+class StopOneSubagent(unittest.TestCase):
+    """子代理要能單獨停掉，不用切到它的分頁，也不影響主對話。"""
+
+    def test_stop_agent_cancels_only_that_one(self):
+        import asyncio
+        from woof.agent import loop
+
+        async def main():
+            started = asyncio.Event()
+
+            async def job():
+                started.set()
+                await asyncio.sleep(30)
+
+            t = asyncio.create_task(job())
+            await started.wait()
+            loop.BG_TASKS.add(t)
+            loop.BG_BY_SID["childA"] = t
+            t.add_done_callback(lambda _t: (loop.BG_TASKS.discard(_t), loop.BG_BY_SID.pop("childA", None)))
+            self.assertTrue(loop.stop_agent("childA"))
+            await asyncio.sleep(0.05)
+            self.assertTrue(t.cancelled() or t.done())
+            self.assertFalse(loop.stop_agent("childA"))
+
+        asyncio.run(main())
+
+    def test_session_stop_touches_agent(self):
+        sv = open(r"C:\\Users\\user\\hermes-files\\WOOF\\woof\\server.py", encoding="utf-8").read()
+        self.assertIn("_loop.stop_agent(sid)", sv)
+        js = open(r"C:\\Users\\user\\hermes-files\\WOOF\\web\\dist\\app.js", encoding="utf-8").read()
+        self.assertIn("data-stopsub", js)
+        self.assertIn("data-closesub", js)
+
+class XlsxRawTsv(unittest.TestCase):
+    """要看整張表的原始數值時，直接吐 TSV；太長就存成檔並回位置（不用 python／openpyxl）。"""
+
+    def test_raw_mode_writes_tsv(self):
+        import base64
+        from woof import server as srv, store
+
+        raw = open(r"C:\\Users\\user\\hermes-files\\WOOF\\plugins\\files\\__init__.py", "rb").read()
+        self.assertIn(b"_xlsx_digest", raw)
+        src = raw.decode("utf-8")
+        self.assertIn("raw=True", src)
+        self.assertIn("已存成檔案：{out_path}", src)
+        # 摘要要告訴模型怎麼拿整張表
+        self.assertIn("limit 設 200000", src)
+
+class PythonHint(unittest.TestCase):
+    """缺套件／缺指令時給「換哪一顆 python」的提示，不是重裝重試；也不改 PATH。"""
+
+    def test_hint(self):
+        import importlib.util
+        from pathlib import Path
+
+        spec = importlib.util.spec_from_file_location(
+            "woof_term_plugin", r"C:\\Users\\user\\hermes-files\\WOOF\\plugins\\terminal\\__init__.py")
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        self.assertIn("venv", m._python_hint("ModuleNotFoundError: No module named 'openpyxl'"))
+        self.assertIn("venv", m._python_hint("bash: python: command not found"))
+        self.assertEqual(m._python_hint("hello world"), "")
+        # 沒有改 PATH 這種事：檔案裡不該有影響環境的寫法
+        src = Path(r"C:\\Users\\user\\hermes-files\\WOOF\\plugins\\terminal\\__init__.py").read_text(encoding="utf-8")
+        self.assertNotIn("os.environ[\"PATH\"]", src)
+
+class ExpandGate(unittest.TestCase):
+    """「方案・拓展」：先補成完整的一套再做，做完照樣驗收。"""
+
+    def test_expand_parses_steps(self):
+        import asyncio
+        from woof.agent import loop, tasks
+
+        calls = {}
+
+        async def fake(parent, goal, *a, **kw):
+            calls["kind"] = kw.get("kind")
+            calls["goal"] = goal
+            return {"answer": '{"steps": ["算出 A 的數字", "同步 B 的公式", "跑回測驗證"], "notes": "B 的公式也要一起改"}',
+                    "steps": 3, "session_id": "x"}
+
+        real = loop.run_subagent
+        loop.run_subagent = fake
+        try:
+            steps, notes = asyncio.run(tasks.expand_plan(None, "改一下 A 的算法", ["改 A 的算法"]))
+        finally:
+            loop.run_subagent = real
+        self.assertEqual(steps, ["算出 A 的數字", "同步 B 的公式", "跑回測驗證"])
+        self.assertEqual(notes, "B 的公式也要一起改")
+        self.assertEqual(calls["kind"], "expand_request")
+        self.assertIn("網路", calls["goal"])          # 該查的要先查
+        self.assertIn("不要", calls["goal"])          # 不要瞎試
+
+    def test_expand_bad_json_is_safe(self):
+        import asyncio
+        from woof.agent import loop, tasks
+
+        async def fake(parent, goal, *a, **kw):
+            return {"answer": "我覺得可以再想想"}
+
+        real = loop.run_subagent
+        loop.run_subagent = fake
+        try:
+            steps, notes = asyncio.run(tasks.expand_plan(None, "x", ["y"]))
+        finally:
+            loop.run_subagent = real
+        self.assertEqual((steps, notes), ([], ""))
+
+    def test_wiring(self):
+        src = open(r"C:\\Users\\user\\hermes-files\\WOOF\\woof\\agent\\tasks.py", encoding="utf-8").read()
+        self.assertIn('if gate == "expand":', src)
+        self.assertIn("await expand_plan(ctx, objective, steps)", src)
+        sv = open(r"C:\\Users\\user\\hermes-files\\WOOF\\woof\\server.py", encoding="utf-8").read()
+        self.assertIn('("off", "human", "model", "expand")', sv)
+        js = open(r"C:\\Users\\user\\hermes-files\\WOOF\\web\\dist\\app.js", encoding="utf-8").read()
+        self.assertIn("方案・思維拓展", js)
+        self.assertIn("v: 'expand'", js)
+        pr = open(r"C:\\Users\\user\\hermes-files\\WOOF\\woof\\prompts.py", encoding="utf-8").read()
+        self.assertIn('_e("expand"', pr)
+        self.assertIn('_e("expand_body"', pr)
+
+class SubagentAlwaysReports(unittest.TestCase):
+    """子代理中斷／被停掉也要回報，否則主對話會一直等一個不會來的結論。"""
+
+    def test_cancelled_still_injects(self):
+        import asyncio
+        from woof.agent import loop
+
+        got = {}
+
+        class FakeCtx:
+            session_id = "childX"
+
+        async def fake_prepare(*a, **kw):
+            return {"id": "childX", "title": "子代理"}, {"id": "m", "label": "M"}, FakeCtx()
+
+        async def fake_drive(ctx):
+            raise RuntimeError("bomb")
+
+        async def fake_inject(sid, kind, text):
+            got["sid"], got["kind"], got["text"] = sid, kind, text
+
+        class FakeReg:
+            inject = staticmethod(fake_inject)
+
+        class Parent:
+            session_id = "parentX"
+
+            async def emit(self, ev):
+                return None
+
+        real = (loop._prepare_subagent, loop._drive, loop.REG, loop._subagent_report)
+        loop._prepare_subagent = fake_prepare
+        loop._drive = fake_drive
+        loop.REG = FakeReg()
+        loop._subagent_report = lambda *a, **kw: {"session_id": "childX", "answer": "（沒有結論）", "steps": 0}
+        try:
+            async def go():
+                await loop.run_subagent_bg(Parent(), "做點事")
+                for _ in range(50):
+                    await asyncio.sleep(0.01)
+                    if got:
+                        break
+            asyncio.run(go())
+        finally:
+            loop._prepare_subagent, loop._drive, loop.REG, loop._subagent_report = real
+        self.assertTrue(got, "子代理炸掉卻沒有回報主對話")
+        self.assertEqual(got["sid"], "parentX")
+        self.assertIn("bomb", got["text"])
+
+    def test_source_has_steer_and_report(self):
+        lp = open(r"C:\\Users\\user\\hermes-files\\WOOF\\woof\\agent\\loop.py", encoding="utf-8").read()
+        self.assertIn("子代理被停止，沒有產出結論", lp)
+        self.assertIn("asyncio.shield(inject(parent_sid, \"bg_done\", report_text(r)))", lp)
+        sp = open(r"C:\\Users\\user\\hermes-files\\WOOF\\plugins\\subagent\\__init__.py", encoding="utf-8").read()
+        self.assertIn("if sid in AGENT_RUNS:", sp)
+        self.assertIn('"steered": True', sp)
+        self.assertIn("它最後在做的", sp)
+
+class SubagentProgress(unittest.TestCase):
+    """要問正在跑的子代理：帶 session_id 再呼叫 = 插話，不會重開一輪，還會回它最後在做什麼。"""
+
+    def test_steer_when_running(self):
+        import asyncio, importlib.util, sys
+
+        from woof.agent import loop, tasks
+
+        got = {}
+
+        def fake_steer(sid, blocks, meta=None):
+            got["sid"], got["text"] = sid, blocks[0]["text"]
+
+        real_steer, real_last = loop.push_steer, tasks.last_text
+        loop.push_steer = fake_steer
+        tasks.last_text = lambda sid, role: "正在跑回測"
+        try:
+            spec = importlib.util.spec_from_file_location(
+                "subplug_t", r"C:\\Users\\user\\hermes-files\\WOOF\\plugins\\subagent\\__init__.py")
+            m = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(m)
+
+            class W:
+                settings = {"models": "", "max_parallel": 3, "max_per_turn": 3}
+                config = {"models": []}
+
+                def add_tool(self, name, *a, **kw):
+                    for x in a:
+                        if callable(x):
+                            self.fn = x
+                    return lambda f: f
+
+            class Parent:
+                session_id = root_session_id = "parentX"
+                cwd = r"C:\\Users\\user\\hermes-files\\WOOF"
+                turn_mid = 1
+
+                async def output(self, s):
+                    return None
+
+            class Ctx:
+                turn = Parent()
+
+                async def output(self, s):
+                    return None
+
+            w = W()
+            m.register(w)
+            loop.AGENT_RUNS.add("childA")
+            r = asyncio.run(w.fn({"goal": "進度怎樣？", "session_id": "childA"}, Ctx()))
+        finally:
+            loop.AGENT_RUNS.discard("childA")
+            loop.push_steer, tasks.last_text = real_steer, real_last
+        self.assertFalse(r.get("is_error"))
+        self.assertIn("已經送進去", r["output"])
+        self.assertIn("正在跑回測", r["output"])
+        self.assertEqual((got["sid"], got["text"]), ("childA", "進度怎樣？"))
+
+    def test_resume_mentions_dead_subagents(self):
+        from woof import store
+        from woof.agent import tasks
+
+        con = store._conn()
+        row = con.execute("SELECT parent FROM sessions WHERE parent IS NOT NULL AND parent != '' LIMIT 1").fetchone()
+        if not row:
+            self.skipTest("沒有子代理對話")
+        txt = tasks.resume_digest(row[0])
+        self.assertIn("子代理", txt)
+        self.assertIn("不會再回報", txt)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -13,6 +13,8 @@ LABEL = {
     "plan_request": "方案請求",
     "plan_feedback": "方案回饋",
     "subagent_task": "子代理任務",
+    "subagent_followup": "子代理追加要求",
+    "expand_request": "思維拓展請求",
     "nudge": "空回覆補問",
     "truncated": "截斷接續",
     "stall": "停下補推",

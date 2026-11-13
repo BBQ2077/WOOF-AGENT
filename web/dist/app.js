@@ -9,12 +9,13 @@ const LOGIN_KEY = 'woof.login';
 let TOKEN = CONN.token;
 let BASE = CONN.base;
 const D = window.woofDesktop || null;
+const ASKDONE_TTL = 8000;   // 已回答的卡片留在畫面上多久（毫秒）
 const NL = String.fromCharCode(10);
 const ico = (name, cls = '') => `<svg class="${cls}"><use href="#i-${name}"/></svg>`;
 
-const EFFORT_LABEL = { none: '關', off: '關', on: '開', minimal: '最小', low: '低', medium: '中', high: '高', xhigh: '極高', max: '最高' };
-const EFFORT_SCALE = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
-const EFFORT_HINT = { on: '開啟思考，先推理再回答', off: '不思考，最快', none: '不思考，最快', minimal: '幾乎不思考', low: '快速回答', medium: '一般難度', high: '仔細推理', xhigh: '更深入推理', max: '用到上限' };
+const EFFORT_LABEL = { none: '關', off: '關', on: '開', minimal: '最小', low: '低', medium: '中', high: '高', xhigh: '極高', max: '最高', ultra: '超高' };
+const EFFORT_SCALE = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+const EFFORT_HINT = { on: '開啟思考，先推理再回答', off: '不思考，最快', none: '不思考，最快', minimal: '幾乎不思考', low: '快速回答', medium: '一般難度', high: '仔細推理', xhigh: '更深入推理', max: '想得更久', ultra: '想最久，慢但最完整' };
 const TOOL_ICON = { delegate_task: '🤖', terminal: '⌨️', read_file: '📄', write_file: '✏️', patch: '🩹', search_files: '🔎', list_tree: '🗂️', skill_view: '📘',
   skills_list: '📚', web_search: '🌐', web_extract: '🌐', vision_analyze: '👁️', Bash: '⌨️', Read: '📄', Write: '✏️',
   Edit: '🩹', Grep: '🔎', Glob: '🔎', WebSearch: '🌐', WebFetch: '🌐', Task: '🤖', TodoWrite: '📝' };
@@ -26,8 +27,8 @@ localStorage.removeItem('woof.perm'); localStorage.removeItem('woof.effortWant')
 const S = {
   draft: {}, follow: true,
   models: [], vendors: [], backends: [], plugins: [], keys: {}, sessions: [], sid: null, msgs: [],
-  running: new Set(), live: {}, tools: {}, errors: {}, usage: {}, attach: [], plugFilter: '全部', ws: null, approvals: {}, asks: {}, todos: {}, planOn: {}, gate: {}, subOpen: new Set(), groups: [], drag: null,
-  modelId: null, workdir: '', tasks: [], queue: {}, srvQ: {}, resumeHide: {}, interrupting: {},
+  running: new Set(), live: {}, tools: {}, errors: {}, usage: {}, attach: [], plugFilter: '全部', ws: null, approvals: {}, asks: {}, askDone: {}, todos: {}, planOn: {}, gate: {}, subOpen: new Set(), subShut: new Set(), act: {}, groups: [], drag: null,
+  modelId: null, workdir: '', tasks: [], queue: {}, srvQ: {}, resumeHide: {}, interrupting: {}, askDraft: {},
   pins: new Set(JSON.parse(localStorage.getItem('woof.pins') || '[]')),
   profile: null,
   cfg: null, dirty: false, setSec: localStorage.getItem('woof.setSec') || 'vendors', openVendors: new Set(),
@@ -39,10 +40,10 @@ const S = {
 //      所以右側面板、TODO、額度、終端機一律跟著目前的分頁走，不會指錯對話。
 const TAB_MAX = 4;
 S.tabs = []; S.tab = 0;
-const tabNew = (sid) => ({ sid: sid || null, msgs: [], follow: true, attach: [], draft: {}, liveThink: null, top: 0, loaded: false, text: '' });
+const tabNew = (sid) => ({ sid: sid || null, msgs: [], follow: true, attach: [], files: [], draft: {}, liveThink: null, top: 0, loaded: false, text: '' });
 const tab = () => S.tabs[S.tab] || (S.tabs[S.tab] = tabNew(null));
 const tabOf = (sid) => (sid ? S.tabs.find((t) => t.sid === sid) : null);
-for (const k of ['sid', 'msgs', 'follow', 'attach', 'draft', 'liveThink']) {
+for (const k of ['sid', 'msgs', 'follow', 'attach', 'files', 'draft', 'liveThink']) {
   Object.defineProperty(S, k, { configurable: true, get: () => tab()[k], set: (v) => { tab()[k] = v; } });
 }
 function saveTabs() {
@@ -402,6 +403,17 @@ function avatar(name, cls = 'av') {
 }
 
 marked.setOptions({ gfm: true, breaks: true });
+// 思考框展開狀態：renderChat 每次都會把整段對話重建，details 的 open 不記住就會「點開→模型下一步→自己收起來」。
+// 用 message.id + 區塊序號當 key；toggle 不冒泡，所以用 capture 攔。
+const THINK_OPEN = new Set();
+document.addEventListener('toggle', (e) => {
+  const d = e.target;
+  if (!d || d.tagName !== 'DETAILS' || !d.dataset.tk) return;
+  if (d.open) THINK_OPEN.add(d.dataset.tk); else THINK_OPEN.delete(d.dataset.tk);
+  // 展開的當下才把文字塞進去（見 renderChat 的 _th）
+  const tx = d.querySelector('.tx');
+  if (tx && d._th != null && !tx.textContent && d.open) tx.textContent = d._th;
+}, true);
 const MEDIA_RE = /(?:(?<![\w:/.])MEDIA:|(?<![\w:/.]))(?:[A-Za-z]:[\\/]|\/)[^\s`"'<>|*?]+?\.(png|jpe?g|gif|webp|bmp|mp4|webm|mov|mp3|wav|m4a|ogg)(?![\w])/gi;
 const IMG_EXT = /\.(png|jpe?g|gif|webp|bmp)$/i, VID_EXT = /\.(mp4|webm|mov)$/i;
 // 訊息文字裡的本機圖片／影片／音訊路徑 → 直接預覽（檔案不存在或不在允許清單時自動隱藏）
@@ -427,17 +439,84 @@ function attachMedia(box, text) {
   }
   box.appendChild(wrap);
 }
-function md(text) {
+// 回覆裡提到的本機檔案路徑（C:\...、C:/...、/c/...）變成可點的連結：點了在 WOOF 裡預覽，右鍵可用預設程式開、開資料夾
+const PATH_RE = /(?<![\w/\\])(?:[A-Za-z]:[\\/]|\/[a-z]\/)[^\s`"'<>|*?()（），。、；：「」]+/g;
+const REL_FILE = /^(?:\.{0,2}[\\/])?(?:[^\s<>|*?"':`\\/]+[\\/])*[^\s<>|*?"':`\\/]+\.(?:html?|md|txt|json|csv|tsv|xlsx?|docx?|pptx?|pdf|png|jpe?g|gif|webp|svg|mp4|mp3|wav|py|js|ts|css|toml|ya?ml|log|zip)$/i;
+function flinkPath(a) {
+  if (a.dataset.path) return a.dataset.path;
+  const base = (S.workdir || '').replace(/[\\/]+$/, '');
+  const rel = (a.dataset.rel || '').replace(/^\.[\\/]/, '');
+  return base ? `${base}${base.includes('/') ? '/' : '\\'}${rel}` : rel;
+}
+function cleanPath(p) {
+  p = p.replace(/[.,;:!?。，、；：！？)\]}」』]+$/, '');
+  const m = /^\/([a-z])\//.exec(p);
+  return m ? `${m[1].toUpperCase()}:/${p.slice(3)}` : p;
+}
+function linkPaths(box) {
+  // 行內程式碼整段就是一個路徑：直接整段可點
+  $$('code', box).forEach((c) => {
+    if (c.closest('pre, a')) return;
+    const t = c.textContent.trim();
+    if (/^(?:[A-Za-z]:[\\/]|\/[a-z]\/)\S+$/.test(t) && !/[<>|*?"]/.test(t)) {
+      const a = document.createElement('a'); a.className = 'flink'; a.dataset.path = cleanPath(t); a.title = '點一下預覽；右鍵有更多';
+      c.replaceWith(a); a.appendChild(c);
+    } else if (REL_FILE.test(t)) {
+      // 相對路徑（`out\report.md`、`floor_engine.py`）：點的時候才對這個對話的工作目錄解開
+      const a = document.createElement('a'); a.className = 'flink'; a.dataset.rel = t.replace(/^\.[\\/]/, ''); a.title = '點一下預覽（相對於工作目錄）；右鍵有更多';
+      c.replaceWith(a); a.appendChild(c);
+    }
+  });
+  const walk = document.createTreeWalker(box, NodeFilter.SHOW_TEXT, {
+    acceptNode: (n) => (n.parentElement.closest('a, pre, code, .mprev') || !/[A-Za-z]:[\\/]|\/[a-z]\//.test(n.nodeValue)
+      ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+  });
+  const nodes = []; while (walk.nextNode()) nodes.push(walk.currentNode);
+  for (const n of nodes) {
+    const s = n.nodeValue; let last = 0; const frag = document.createDocumentFragment(); let hit = false;
+    for (const m of s.matchAll(PATH_RE)) {
+      const raw = m[0].replace(/[.,;:!?。，、；：！？)\]}」』]+$/, '');
+      const p = cleanPath(raw);
+      if (raw.length < 4) continue;
+      hit = true;
+      frag.append(s.slice(last, m.index));
+      const a = document.createElement('a'); a.className = 'flink'; a.dataset.path = p; a.textContent = raw; a.title = '點一下預覽；右鍵有更多';
+      frag.append(a);
+      last = m.index + raw.length;
+    }
+    if (!hit) continue;
+    frag.append(s.slice(last));
+    n.replaceWith(frag);
+  }
+}
+// 重畫整段對話時，同一段文字會一而再地被 marked 解析、消毒、上色；長對話這樣很吃主執行緒（打字、按鈕都跟著卡）。
+// 用「原文 → 處理好的 HTML」快取，第二次以後直接貼回去；上色結果也另外記一份。
+const MD_HTML = new Map();
+const MD_HL = new Map();
+function md(text, live) {
   // 單獨一行的 MEDIA:<路徑> 是「顯示這個檔」的指令：下面直接預覽，原文不顯示（行內提到的路徑照常保留）
   const shown = String(text || '').replace(/^[ \t]*MEDIA:\S+[ \t]*$/gm, '').replace(/\n{3,}/g, '\n\n').trim();
-  const html = DOMPurify.sanitize(marked.parse(shown), { ADD_ATTR: ['target'] });
+  let html = live ? null : MD_HTML.get(shown);
+  if (html == null) {
+    html = DOMPurify.sanitize(marked.parse(shown), { ADD_ATTR: ['target'] });
+    if (!live) { if (MD_HTML.size > 400) MD_HTML.clear(); MD_HTML.set(shown, html); }
+  }
   const box = document.createElement('div');
   box.className = 'md';
   box.innerHTML = html;
   $$('a', box).forEach((a) => a.setAttribute('target', '_blank'));
+  linkPaths(box);
   attachMedia(box, text);
-  $$('pre code', box).forEach((c) => {
-    try { hljs.highlightElement(c); } catch {}
+  // live＝串流中每一格都會重畫，程式碼上色很貴又看不出來，等定稿那次才做
+  if (!live) $$('pre code', box).forEach((c) => {
+    const src = c.textContent;
+    const hit = MD_HL.get(src);
+    if (hit != null) { c.innerHTML = hit; c.classList.add('hljs'); }
+    else {
+      try { hljs.highlightElement(c); } catch {}
+      if (MD_HL.size > 300) MD_HL.clear();
+      MD_HL.set(src, c.innerHTML);
+    }
     const b = document.createElement('span');
     b.className = 'copy'; b.textContent = '複製';
     b.onclick = () => { navigator.clipboard.writeText(c.innerText); b.textContent = '已複製'; setTimeout(() => (b.textContent = '複製'), 1200); };
@@ -467,8 +546,68 @@ function wsSend(obj) {
   S.ws.send(JSON.stringify(obj)); return true;
 }
 
+// 每個對話最近一次有動靜的時間與內容：背景子代理、審核在跑但畫面沒在閃時，用它告訴使用者「還在動」
+function actText(ev) {
+  const a = ev.args || {};
+  const brief = String(a.command || a.path || a.query || a.url || a.goal || '').replace(/\s+/g, ' ').slice(0, 60);
+  switch (ev.type) {
+    case 'run_start': return '開始';
+    case 'delta': return ev.kind === 'thinking' || ev.thinking ? '思考中' : '寫回覆中';
+    case 'tool_start': return `${ev.name || '工具'} ${brief}`.trim();
+    case 'tool_output': return '工具輸出中';
+    case 'tool_end': return `${ev.name || '工具'} 完成`;
+    case 'notice': return String(ev.text || '').slice(0, 60);
+    case 'message': return '';
+    default: return '';
+  }
+}
+function noteAct(ev) {
+  const sid = ev.session_id;
+  if (!sid || ev.type === 'pet' || ev.type === 'usage' || ev.type === 'session_updated') return;
+  const t = actText(ev);
+  const now = Date.now();
+  S.act[sid] = { at: now, text: t || (S.act[sid] || {}).text || '' };
+  const s = S.sessions.find((x) => x.id === sid);
+  if (s && s.parent) S.act[s.parent] = { at: now, text: t || (S.act[s.parent] || {}).text || '', child: sid };
+  if (S.sid && (sid === S.sid || (s && s.parent === S.sid))) renderBgRun();
+}
+// 輸入框上方一行：主對話沒在串流、但它自己或底下的子代理還在跑時顯示（附「幾秒前有動靜」）
+function bgRunInfo() {
+  const s = cur(); if (!s) return null;
+  const kids = S.sessions.filter((k) => k.parent === s.id && (S.running.has(k.id) || k.busy));
+  const self = S.running.has(s.id) || s.busy;
+  if (!kids.length && !self) return null;
+  const a = S.act[s.id] || {};
+  const lv = S.live[s.id];
+  // 主對話正在串流字的時候不用這行（畫面本來就在動）
+  if (!kids.length && lv && (Date.now() - (a.at || 0) < 4000)) return null;
+  const nm = (k) => (k.title || '子代理').replace(/^(子代理|審核模型|拓展模型)[:：]\s*/, (m0, k0) => (k0 === '子代理' ? '' : '審核：'));
+  const who = kids.length ? kids.map(nm).slice(0, 2).join('、') + (kids.length > 2 ? ` 等 ${kids.length} 個` : '') : '';
+  return { who, text: a.text || '', at: a.at || 0 };
+}
+function renderBgRun() {
+  const el = $('#bgRun'); if (!el) return;
+  const i = bgRunInfo();
+  if (!i) { el.hidden = true; el._k = ''; return; }
+  const k = `${i.who}|${i.text}`;
+  if (el._k !== k) {
+    el._k = k;
+    el.innerHTML = `<i class="run"></i><span class="bg-who">${esc(i.who ? `還在跑：${i.who}` : '還在跑')}</span>`
+      + (i.text ? `<span class="bg-tx" title="${esc(i.text)}">${esc(i.text)}</span>` : '') + '<span class="bg-age"></span>';
+  }
+  el.hidden = false;
+  const age = $('.bg-age', el);
+  if (age) { const sec = i.at ? Math.floor((Date.now() - i.at) / 1000) : -1; age.textContent = sec < 0 ? '' : sec < 2 ? '剛剛有動靜' : `${sec} 秒前有動靜`; }
+}
+setInterval(renderBgRun, 1000);
 function onEvent(ev) {
   const sid = ev.session_id;
+  noteAct(ev);
+  if (typeof ev.busy === 'boolean' && sid) {
+    const s = S.sessions.find((x) => x.id === sid);
+    if (s) s.busy = ev.busy;
+    if (sid === S.sid) { renderTaskBar(); renderComposer(); }
+  }
   switch (ev.type) {
     case 'pet':
       petEvent(ev.pet, ev.history);
@@ -493,6 +632,9 @@ function onEvent(ev) {
       break;
     }
     case 'message':
+      // 思考過程中是展開的，commit 成訊息後沿用：不然模型一動，剛才看到一半的思考就自己收起來
+      if (sid === S.sid && ev.message.role === 'assistant' && typeof ev.message.id === 'number'
+        && S.liveThink && S.liveThink.open !== false) S.thinkCarry = ev.message.id;
       if (S.live[sid]) S.live[sid] = { thinking: '', text: '' };
       if (sid === S.sid) S.liveThink = null;
       if (sid === S.sid) {
@@ -556,12 +698,27 @@ function onEvent(ev) {
       break;
     case 'ask':
       S.asks[ev.id] = ev;
+      if (sid === S.sid) { S.follow = true; renderChat(); }   // 卡片在對話串尾端，捲到底才看得到
       renderTaskBar();
       if (sid !== S.sid) notify('warn', '有問題等你回答', (S.sessions.find((x) => x.id === sid) || {}).title || '');
       break;
-    case 'ask_done':
-      delete S.asks[ev.id]; renderTaskBar();
+    case 'ask_done': {
+      const a = S.asks[ev.id];
+      if (!a && !ev.answer) { delete S.asks[ev.id]; renderTaskBar(); break; }
+      (S.askDone[sid] = S.askDone[sid] || []).push({
+        question: (a && a.question) || ev.question || '',
+        answer: ev.answer || '',
+        skipped: !!ev.skipped || /略過/.test(ev.answer || ''),
+        at: Date.now(),
+      });
+      if (S.askDone[sid].length > 20) S.askDone[sid].shift();
+      delete S.asks[ev.id];
+      // 已回答的卡片只留一下下（看一下自己回了什麼），之後就讓它消失，不要一直黏在對話尾巴
+      setTimeout(() => { if (S.sid === sid) renderChat(); }, ASKDONE_TTL + 100);
+      if (sid === S.sid) renderChat();
+      renderTaskBar();
       break;
+    }
     case 'todos':
       S.todos[sid] = ev.items || []; if (sid === S.sid) renderTaskBar();
       break;
@@ -662,7 +819,7 @@ async function openSession(sid) {
 function newSession() {
   // 分頁已滿：新對話直接取代目前分頁（原本那個對話仍然存在側邊欄，不會被刪掉）
   const t = tab();
-  t.sid = null; t.msgs = []; t.loaded = true; t.top = 0; t.follow = true; t.attach = []; t.draft = {}; t.liveThink = null;
+  t.sid = null; t.msgs = []; t.loaded = true; t.top = 0; t.follow = true; t.attach = []; t.files = []; t.draft = {}; t.liveThink = null;
   localStorage.setItem('woof.sid', '');
   showView('chat');
   renderAll();
@@ -690,6 +847,25 @@ function descIds(sid) {
   return out;
 }
 function grpById(gid) { return (S.groups || []).find((g) => g.id === gid); }
+// 子代理的種類：審核／拓展模型歸一疊，其他是一般子代理（舊資料沒有標記，看標題）
+function subKind(s) {
+  const k = ((s.engine_state || {}).sub || {}).kind;
+  if (k) return k;
+  return /^(審核模型|拓展模型|對抗檢查|方案審核)/.test(s.title || '') ? 'review' : 'task';
+}
+// 同一次 delegate_task 派出的算一批；舊資料沒有批次 id，就把 20 秒內接連建立的算同一批
+function subBatches(list) {
+  const arr = list.slice().sort((a, b) => (a.created || 0) - (b.created || 0));
+  const out = [];
+  for (const s of arr) {
+    const b = ((s.engine_state || {}).sub || {}).batch || '';
+    const last = out[out.length - 1];
+    if (last && (b ? last.key === b : (!last.tagged && (s.created || 0) - last.end < 20))) {
+      last.items.push(s); last.end = s.created || last.end;
+    } else out.push({ key: b || 't' + Math.round(s.created || 0), tagged: !!b, items: [s], at: s.created || 0, end: s.created || 0 });
+  }
+  return out;
+}
 
 function renderSessions() {
   renderTabbar();
@@ -701,7 +877,8 @@ function renderSessions() {
   const cur = S.sessions.find((x) => x.id === S.sid);
   const groups = S.groups || [];
 
-  // 一則對話連同它的子代理，可能長出好幾列
+  // 一則對話連同它的子代理，可能長出好幾列：
+  // 子代理分兩疊——一般子代理（依「同一次派出」分批）、審核／拓展模型；兩疊各自收合、可整疊刪
   const nodesOf = (s) => {
     const out = [];
     const all = kids[s.id] || [];
@@ -709,23 +886,59 @@ function renderSessions() {
     if (!(match(s) || ks.length)) return out;
     out.push(s);
     if (!all.length) return out;
-    // 子代理預設收合；搜尋時、或目前正在看其中一個子代理時自動展開
-    const open = !!q || S.subOpen.has(s.id) || (cur && cur.parent === s.id);
-    out.push({ _tog: true, parent: s.id, n: all.length, open });
-    if (open) for (const k of ks.reverse()) out.push(k);
+    const viewing = cur && cur.parent === s.id ? cur : null;
+    const tasks = all.filter((k) => subKind(k) !== 'review');
+    const revs = all.filter((k) => subKind(k) === 'review');
+    if (tasks.length) {
+      const key = s.id;
+      const open = !!q || S.subOpen.has(key) || (viewing && subKind(viewing) !== 'review');
+      out.push({ _tog: true, key, parent: s.id, kind: 'task', label: '子代理', n: tasks.length, open, ids: tasks.map((k) => k.id) });
+      if (open) {
+        const batches = subBatches(tasks);
+        if (batches.length === 1) for (const k of batches[0].items.filter(match)) out.push(k);
+        else batches.forEach((b, i) => {
+          const bk = `${s.id}|${b.key}`;
+          const bopen = !!q || S.subOpen.has(bk) || (!S.subShut.has(bk) && i === batches.length - 1)
+            || (viewing && b.items.includes(viewing));
+          out.push({ _batch: true, key: bk, no: i + 1, n: b.items.length, at: b.at, open: bopen, ids: b.items.map((k) => k.id) });
+          if (bopen) for (const k of b.items.filter(match)) out.push(Object.assign(k, { _deep: true }));
+        });
+      }
+    }
+    if (revs.length) {
+      const key = 'rev:' + s.id;
+      const open = !!q || S.subOpen.has(key) || (viewing && subKind(viewing) === 'review');
+      out.push({ _tog: true, key, parent: s.id, kind: 'review', label: '審核', n: revs.length, open, ids: revs.map((k) => k.id) });
+      if (open) for (const k of revs.filter(match).sort((a, b) => (a.created || 0) - (b.created || 0))) out.push(k);
+    }
     return out;
   };
   const row = (s) => {
     const child = s.parent && ids.has(s.parent);
     const m = modelOf(s.model);
     const wait = Object.values(S.approvals).some((a) => a.session_id === s.id);
-    return `<div class="item${s.id === S.sid ? ' on' : ''}${child ? ' child' : ''}" data-sid="${s.id}"${child ? '' : ' draggable="true"'}>`
-      + `<span class="t">${S.running.has(s.id) ? '<i class="run"></i>' : ''}${s.pinned ? `<span class="pin">${ico('pin')}</span>` : ''}${esc(s.title || '新對話')}</span>`
+    const deep = child && s._deep;
+    delete s._deep;
+    return `<div class="item${s.id === S.sid ? ' on' : ''}${child ? ' child' : ''}${deep ? ' deep' : ''}" data-sid="${s.id}" draggable="true"${child ? ' title="拖到群組或日期標題上＝拆出來變成獨立對話"' : ''}>`
+      + `<span class="t"${child ? ` title="${esc(s.title || '')}"` : ''}>${S.running.has(s.id) || s.busy || (kids[s.id] || []).some((k) => S.running.has(k.id) || k.busy) ? '<i class="run"></i>' : ''}${s.pinned ? `<span class="pin">${ico('pin')}</span>` : ''}${esc(child ? (s.title || '子代理').replace(/^(子代理|審核模型|拓展模型)[:：]\s*/, '') : (s.title || '新對話'))}</span>`
       + `<small>${wait ? '等你確認 · ' : ''}${(s.engine_state || {}).forked_from ? '分支 · ' : ''}${esc(m ? m.label : s.model || '')}</small><span class="del" title="刪除">${ico('x')}</span></div>`;
   };
-  const flat = (arr) => arr.flatMap(nodesOf).map((s) => (s._tog
-    ? `<div class="subtog" data-subtog="${esc(s.parent)}">${s.open ? '▾' : '▸'} 子代理 ${s.n} 個</div>`
-    : row(s))).join('');
+  const live = (idList) => idList.filter((id) => S.running.has(id) || (S.sessions.find((x) => x.id === id) || {}).busy).length;
+  const flat = (arr) => arr.flatMap(nodesOf).map((s) => {
+    if (s._tog) {
+      const run = live(s.ids);
+      return `<div class="subtog${s.kind === 'review' ? ' rev' : ''}" data-subtog="${esc(s.key)}"><span class="car">${s.open ? '▾' : '▸'}</span>`
+        + `<span class="lab">${s.label} ${s.n} 個</span>${run ? `<span class="srun"><i class="run"></i>${run} 個在跑</span>` : ''}`
+        + `<span class="sdel" data-delsubs="${esc(s.ids.join(','))}" data-dlab="${esc(s.label)}" title="整疊刪除">${ico('x')}</span></div>`;
+    }
+    if (s._batch) {
+      const run = live(s.ids);
+      return `<div class="subbatch" data-subbatch="${esc(s.key)}"><span class="car">${s.open ? '▾' : '▸'}</span>`
+        + `<span class="lab">第 ${s.no} 批 · ${s.n} 個</span><span class="when">${esc(fmtTime(s.at))}</span>${run ? '<i class="run"></i>' : ''}`
+        + `<span class="sdel" data-delsubs="${esc(s.ids.join(','))}" data-dlab="第 ${s.no} 批子代理" title="刪除這一批">${ico('x')}</span></div>`;
+    }
+    return row(s);
+  }).join('');
 
   const roots = S.sessions.filter((s) => !(s.parent && ids.has(s.parent)));
   const pinned = roots.filter((s) => !s.archived && s.pinned);
@@ -754,7 +967,7 @@ function renderSessions() {
     let last = '';
     for (const s of loose) {
       const g = dayGroup(s.updated || s.created);
-      if (g !== last) { html += `<div class="grp">${g}</div>`; last = g; }
+      if (g !== last) { html += `<div class="grp" data-drop="">${g}</div>`; last = g; }
       html += flat([s]);
     }
   }
@@ -801,14 +1014,37 @@ $('#sessionList').addEventListener('click', async (e) => {
   if (at) { S.showArchived = !S.showArchived; renderSessions(); return; }
   const fh = e.target.closest('.fts');
   if (fh) { gotoHit(fh.dataset.fsid, +fh.dataset.fmid, $('#search').value.trim()); return; }
+  const ds = e.target.closest('[data-delsubs]');
+  if (ds) { e.stopPropagation(); deleteSubs(ds.dataset.delsubs.split(',').filter(Boolean), ds.dataset.dlab || '子代理'); return; }
   const tg = e.target.closest('.subtog');
   if (tg) { const id = tg.dataset.subtog; S.subOpen.has(id) ? S.subOpen.delete(id) : S.subOpen.add(id); renderSessions(); return; }
+  const sb = e.target.closest('.subbatch');
+  if (sb) {
+    const id = sb.dataset.subbatch;
+    const open = sb.querySelector('.car').textContent === '▾';
+    if (open) { S.subOpen.delete(id); S.subShut.add(id); } else { S.subOpen.add(id); S.subShut.delete(id); }
+    renderSessions(); return;
+  }
   const it = e.target.closest('.item'); if (!it) return;
   const sid = it.dataset.sid;
   if (e.target.closest('.del')) return deleteSession(sid);
   if (e.ctrlKey || e.metaKey) return openInTab(sid);
   openSession(sid);
 });
+// 整疊／整批刪子代理：一次確認、一次刪完（後端會連它們底下的一起清）
+async function deleteSubs(idList, label) {
+  if (!idList.length) return;
+  if (!await confirmBox('刪除子代理', `${label}共 ${idList.length} 個對話會永久刪除，無法復原。主對話不受影響。`, { ok: '刪除', danger: true })) return;
+  let bad = 0;
+  for (const id of idList) { try { await api('DELETE', `/api/sessions/${id}`); } catch (e) { bad++; } }
+  const gone = new Set(idList);
+  S.sessions = S.sessions.filter((x) => !gone.has(x.id));
+  for (const id of gone) { delete S.todos[id]; delete S.live[id]; delete S.usage[id]; delete S.errors[id]; delete S.queue[id]; S.running.delete(id); }
+  dropTabsOf(gone);
+  if (bad) notify('error', '有幾個沒刪掉', `${bad} 個刪除失敗`);
+  const t = tab();
+  if (t.sid && !t.loaded) loadTab(t).then(renderAll); else renderAll();
+}
 async function deleteSession(sid) {
   const s = S.sessions.find((x) => x.id === sid);
   const kids = descIds(sid);
@@ -823,8 +1059,10 @@ async function deleteSession(sid) {
   for (const [k, a] of Object.entries(S.approvals)) if (gone.has(a.session_id)) delete S.approvals[k];
   dropTabsOf(gone);
   refreshTasks();
-  if (!S.tabs.some((t) => t.sid === S.sid)) { const t = tab(); if (t.sid && !t.loaded) loadTab(t).then(renderAll); else renderAll(); }
-  else renderSessions();
+  // 一律整組重畫：以前只在「目前這個分頁也被刪掉」時才重畫，刪掉的剛好是開著的分頁時
+  // 分頁變成新的空白頁、但對話區與標題還是舊的（看起來像沒刪掉）
+  const t = tab();
+  if (t.sid && !t.loaded) loadTab(t).then(renderAll); else renderAll();
 }
 async function exportSession(sid) {
   try {
@@ -983,15 +1221,18 @@ function renderModelSelect() {
   if ($('#modelMenu').classList.contains('on')) renderModelMenu();
 }
 // 思考強度：記的是「想要的強度」（每個對話各自的 effort；還沒送出的新對話記在 S.draft），送出時依模型檔位向下兼容（後端 woof/effort.py 同規則）
-function effortIsToggle(m) { return !!m && m.efforts.length > 0 && m.efforts.every((x) => x === 'off' || x === 'on'); }
+function effortIsToggle(m) { return !!m && m.efforts.length > 0 && m.efforts.map(effNorm).every((x) => x === 'off' || x === 'on'); }
+// 檔位一律用小寫比對（送 API 的值就是這組小寫）；介面顯示才用 EFFORT_LABEL 的中文標籤
+const effNorm = (v) => (typeof v === 'string' ? v.trim().toLowerCase() : v);
 function effortWant() {
   const s = cur();
-  return s ? (s.effort || 'high') : (S.draft.effort || 'high');   // 每個對話各自記；新對話預設高
+  return effNorm(s ? (s.effort || 'high') : (S.draft.effort || 'high'));   // 每個對話各自記；新對話預設高
 }
 function resolveEffort(m, want) {
-  const es = (m && m.efforts) || [];
+  const es = ((m && m.efforts) || []).map(effNorm);
   if (!es.length) return null;
-  const dflt = es.includes(m.default_effort) ? m.default_effort : es[es.length - 1];
+  want = effNorm(want);
+  const dflt = es.includes(effNorm(m.default_effort)) ? effNorm(m.default_effort) : es[es.length - 1];
   if (!want) return dflt;
   if (es.includes(want)) return want;
   if (effortIsToggle(m)) return (want === 'off' || want === 'none') ? (es.includes('off') ? 'off' : 'on') : (es.includes('on') ? 'on' : 'off');
@@ -1224,8 +1465,9 @@ $('#modelEdit').onclick = () => openModelEdit();
 // 思考選單：上面「思考」開關，下面「推理強度」整條檔位；模型沒有的檔位標「下兼容到 X」
 function effortMenuHtml(m) {
   const want = effortWant(), got = resolveEffort(m, want);
+  const effs = (m.efforts || []).map(effNorm);
   const thinkOn = want !== 'off' && want !== 'none';
-  const canOff = m.efforts.includes('off');
+  const canOff = effs.includes('off');
   let h = `<div class="phd">${esc(m.label)}</div>`
     + `<div class="mi etog" data-etog="${thinkOn ? 'off' : 'on'}">思考<small>${!thinkOn && !canOff ? `不能關，下兼容到 ${EFFORT_LABEL[got]}` : ''}</small><span class="sw sm${thinkOn ? ' on' : ''}"></span></div>`;
   if (effortIsToggle(m)) return h + '<div class="ehint">這個模型只有開／關，不分強度。</div>';
@@ -1301,13 +1543,38 @@ function renderMeter() {
 }
 
 // ------------------------------------------------------------------ 對話內容
+// `cd <工作目錄> && 指令` 是每一條都一樣的樣板，卡片上不顯示；
+// 真的換到別的目錄才在前面標一個 [資料夾] 提醒
+function splitCd(cmd) {
+  const raw = String(cmd || '');
+  const m = raw.match(/^\s*cd\s+(?:"([^"]+)"|'([^']+)'|(\S+))\s*(?:&&|;|\n)\s*([\s\S]*)$/);
+  if (!m) return { body: raw, dir: '' };
+  const dir = m[1] || m[2] || m[3] || '';
+  return { body: m[4], dir };
+}
+function normPath(p) {
+  return String(p || '').replace(/\\/g, '/').replace(/^\/([A-Za-z])\//, '$1:/').replace(/^\/?([A-Za-z]):\//, (x, d) => d.toLowerCase() + ':/')
+    .replace(/\/+$/, '').toLowerCase();
+}
 function toolArgSummary(name, a) {
   if (!a) return '';
   // 工具延遲載入的橋接：直接顯示真正要用的工具
   if (name === 'tool_call' && Array.isArray(a.calls)) return '→ ' + a.calls.map((c) => (c && c.name) || '?').join('、');
   if (name === 'tool_search' && Array.isArray(a.queries)) return a.queries.join('、').slice(0, 160);
   if (name === 'tool_describe' && Array.isArray(a.names)) return a.names.join('、').slice(0, 160);
-  if (name === 'process') return [a.action, a.task_id, a.timeout ? `最多 ${a.timeout} 秒` : ''].filter(Boolean).join(' ');
+  if (name === 'process') {
+    const { body, dir } = splitCd(a.command || '');
+    const same = !dir || !S.workdir || normPath(dir) === normPath(S.workdir);
+    const bits = [a.action, a.task_id, a.timeout ? `最多 ${a.timeout} 秒` : ''].filter(Boolean);
+    if (a.command) bits.push((same ? '' : `[${dir.split(/[\\/]/).filter(Boolean).pop() || dir}] `) + body.split(NL)[0].slice(0, 140));
+    return bits.join(' ');
+  }
+  if (name === 'terminal' && a.command) {
+    const { body, dir } = splitCd(a.command);
+    const same = !dir || !S.workdir || normPath(dir) === normPath(S.workdir);
+    const tag = same ? '' : `[${dir.split(/[\\/]/).filter(Boolean).pop() || dir}] `;
+    return tag + body.trim().split(NL).join(' ').slice(0, 300);
+  }
   const v = a.command || a.path || a.file_path || a.pattern || a.query || a.prompt || a.goal || a.name || a.url || a.description || '';
   return typeof v === 'string' ? v.split(NL)[0].slice(0, 160) : JSON.stringify(a).slice(0, 160);
 }
@@ -1323,6 +1590,19 @@ function fmtArgs(a) {
   }
   return lines.join(NL);
 }
+// 失敗的工具要一眼看到原因，不然只有「失敗 · 7ms」，得點開才知道為什麼
+function errPreview(name, out) {
+  const t = String(out || '').trim();
+  if (!t) return '（沒有錯誤訊息）';
+  const lines = t.split(NL).map((s) => s.trim()).filter(Boolean);
+  // terminal／process 的錯誤在結尾（traceback 最後一行、curl 的失敗原因），前面都是命令回顯
+  // 先挑看起來像錯誤的那幾行（KeyError、curl: (6)、Permission denied…），沒有就取結尾
+  const ERR_RE = /error|exception|traceback|refused|denied|not found|no such|cannot|failed|fatal|exit [1-9]|退出碼 [1-9]/i;
+  const bad = lines.filter((l) => ERR_RE.test(l));
+  const pick = bad.length ? bad.slice(-2) : ((name === 'terminal' || name === 'process') ? lines.slice(-2) : lines.slice(0, 3));
+  return pick.join(' · ').slice(0, 300);
+}
+
 function toolCard(call, result) {
   const live = S.tools[call.id] || {};
   const running = !result && live.running;
@@ -1339,7 +1619,15 @@ function toolCard(call, result) {
   el.className = `tool${running ? ' open' : ''}${isErr ? ' err' : ''}`;
   el.dataset.id = call.id;
   const args = fmtArgs(call.args);
-  el.innerHTML = `<div class="th"><span class="ti">${TOOL_ICON[call.name] || '🔧'}</span><code>${esc(call.name)}</code><span class="arg">${esc(toolArgSummary(call.name, call.args))}</span><span class="st">${st}</span>${ico('right', 'chev')}</div><pre></pre>`;
+  el.innerHTML = `<div class="th"><span class="ti">${TOOL_ICON[call.name] || '🔧'}</span><code>${esc(call.name)}</code><span class="arg" title="${esc(toolArgSummary(call.name, call.args))}">${esc(toolArgSummary(call.name, call.args))}</span><span class="st">${st}</span>${ico('right', 'chev')}</div><pre></pre>`;
+  if (isErr && !running) {
+    const eb = document.createElement('div');
+    eb.className = 'terr';
+    eb.textContent = errPreview(call.name, out);
+    eb.title = '點開看完整輸出';
+    eb.onclick = (ev) => { ev.stopPropagation(); el.classList.toggle('open'); };
+    el.insertBefore(eb, $('pre', el));
+  }
   // 執行中還沒有輸出：先顯示參數，不要一片空白
   const raw = running ? (out || args + NL + '────────' + NL + '（等待輸出…）') : args + NL + '────────' + NL + (out || '');
   const parts = raw.split(NL);
@@ -1362,12 +1650,23 @@ function toolCard(call, result) {
   if (S.openTools && S.openTools.has(call.id)) el.classList.add('open');
   if (call.name === 'delegate_task') {
     const sids = [...String(out || '').matchAll(/對話 ([0-9a-f]{12})）/g)].map((x) => x[1]);
-    const kids = S.sessions.filter((s) => s.parent === S.sid && (sids.includes(s.id) || running));
+    // 執行中還沒有輸出：只列「這次派出的」一般子代理（審核另外一疊，不混進來）
+    const t0 = Number(call.started || 0) || 0;
+    const kids = S.sessions.filter((s) => s.parent === S.sid && subKind(s) !== 'review'
+      && (sids.includes(s.id) || (running && (!t0 || (s.created || 0) >= t0 - 2))));
     const list = sids.length ? sids.map((id) => S.sessions.find((s) => s.id === id) || { id, title: '子代理' }) : kids;
     if (list.length) {
       const bar = document.createElement('details');
       bar.className = 'subfold';
-      bar.innerHTML = `<summary>${ico('agent')}子代理 ${list.length} 個（點開看）</summary><div class="sublinks">${list.map((s) => `<span data-opensub="${esc(s.id)}">${ico('agent')}${esc(s.title || '子代理')}</span>`).join('')}</div>`;
+      bar.dataset.tk = 'subfold-' + (call.id || S.sid || '');
+      bar.open = THINK_OPEN.has(bar.dataset.tk);
+      const rows = list.map((s) => {
+        const live = S.running.has(s.id) || s.busy;
+        return `<div class="subrow"><span class="sl" data-opensub="${esc(s.id)}">${ico('agent')}${esc(s.title || '子代理')}</span>`
+          + (live ? `<span class="sb stop" data-stopsub="${esc(s.id)}">停止</span>` : '')
+          + `<span class="sb" data-closesub="${esc(s.id)}">關閉</span></div>`;
+      }).join('');
+      bar.innerHTML = `<summary>${ico('agent')}子代理 ${list.length} 個（點開看）</summary><div class="sublinks">${rows}</div>`;
       el.appendChild(bar);
     }
   }
@@ -1387,6 +1686,10 @@ function toolCard(call, result) {
 $('#chat').addEventListener('click', (e) => {
   const os = e.target.closest('[data-opensub]');
   if (os) { e.stopPropagation(); openSession(os.dataset.opensub); return; }
+  const ss = e.target.closest('[data-stopsub]');
+  if (ss) { e.stopPropagation(); stopSub(ss.dataset.stopsub); return; }
+  const cs = e.target.closest('[data-closesub]');
+  if (cs) { e.stopPropagation(); closeSub(cs.dataset.closesub); return; }
   if (e.target.closest('[data-backparent]')) { const s = cur(); if (s && s.parent) openSession(s.parent); return; }
   const ap = e.target.closest('[data-approve]');
   if (ap) {
@@ -1404,6 +1707,8 @@ $('#chat').addEventListener('click', (e) => {
   const img = e.target.closest('.thumbs img, .md img, .bubble img');
   if (img) { e.preventDefault(); e.stopPropagation(); openViewer(img); return; }
   // 回覆裡指向圖片的連結（本機檔或網路圖片）也在 WOOF 裡看，不開瀏覽器
+  const fl = e.target.closest('a.flink');
+  if (fl) { e.preventDefault(); e.stopPropagation(); openFileLink(flinkPath(fl)); return; }
   const lk = e.target.closest('.md a[href]');
   if (lk && IMG_EXT.test((lk.getAttribute('href') || '').split(/[?#]/)[0])) { e.preventDefault(); openViewer({ src: lk.href }); return; }
   const sug = e.target.closest('[data-suggest]');
@@ -1514,7 +1819,8 @@ function emptyState() {
 
 // 上一回合沒做完：後端記的 interrupted（出錯、停止、步數上限），或最後一則是工具結果／使用者訊息卻沒有回覆（程式被關掉）
 function resumeInfo() {
-  if (!S.sid || S.running.has(S.sid)) return null;
+  // 回合、方案／目標、對抗審核子代理、待答提問都算「還在跑」：那時顯示「沒做完」會讓人以為卡死
+  if (!S.sid || S.running.has(S.sid) || (cur() || {}).busy) return null;
   const es = ((cur() || {}).engine_state) || {};
   let r = null;
   if (es.interrupted) r = { reason: es.interrupted.reason || '中途停下', kind: es.interrupted.kind || '', key: 'i' + es.interrupted.at };
@@ -1540,13 +1846,9 @@ function renderTaskBar() {
   const rs = resumeInfo();
   const ICON = { pending: '○', doing: '◐', done: '●', skipped: '–', failed: '✕' };
   const todos = S.todos[S.sid] || [];
-  const asks = Object.values(S.asks).filter((a) => a.session_id === S.sid);
+  // ask_user 的卡片不放這裡：它是「對話的一部分」，放在對話串尾端跟著捲（見 renderChat），
+  // 放輸入區上方會固定佔版面，把對話區壓到看不見上下文。
   let h = '';
-  for (const a of asks) {
-    h += `<div class="askcard"><div class="q">${esc(a.question)}</div>`
-      + `<div class="opts">${(a.options || []).map((o) => `<button class="btn" data-ask="${esc(a.id)}" data-val="${esc(o)}">${esc(o)}</button>`).join('')}</div>`
-      + `<div class="ansrow"><input data-askin="${esc(a.id)}" placeholder="或自己輸入…"><button class="btn primary" data-asksend="${esc(a.id)}">送出</button></div></div>`;
-  }
   if (todos.length) {
     const done = todos.filter((t) => t.status === 'done').length;
     // 收合狀態每個對話各自記住，進度更新重畫時照舊，不會自己彈開
@@ -1559,27 +1861,33 @@ function renderTaskBar() {
       + `<span title="${esc(rs.reason)}">${esc(rs.reason)}</span></div>`
       + `<button class="btn" data-resume-x>略過</button><button class="btn primary" data-resume>繼續</button></div>`;
   }
-  bar.innerHTML = h; bar.hidden = !h;
+  if (bar._h === h) return;   // 內容沒變就不要重建：重建會讓使用者選好的字被清掉、也一直在閃
+  bar._h = h; bar.innerHTML = h; bar.hidden = !h;
 }
-function todoFoldSet() { try { return new Set(JSON.parse(localStorage.getItem('woof.todoFold') || '[]')); } catch { return new Set(); } }
-function todoFolded(sid) { return todoFoldSet().has(sid); }
+function todoOpenSet() { try { return new Set(JSON.parse(localStorage.getItem('woof.todoOpen') || '[]')); } catch { return new Set(); } }
+// 預設收合：TODO 一大串會把輸入區整個往下推，看不到對話。使用者自己點開才展開，狀態照對話記住
+function todoFolded(sid) { return !todoOpenSet().has(sid); }
 $('#taskBar').addEventListener('toggle', (e) => {
   if (!e.target.matches('details.todos') || !S.sid) return;
-  const s = todoFoldSet();
-  if (e.target.open) s.delete(S.sid); else s.add(S.sid);
-  localStorage.setItem('woof.todoFold', JSON.stringify([...s].slice(-200)));
+  const s = todoOpenSet();
+  if (e.target.open) s.add(S.sid); else s.delete(S.sid);
+  localStorage.setItem('woof.todoOpen', JSON.stringify([...s].slice(-200)));
 }, true);
 $('#taskBar').addEventListener('click', (e) => {
   if (e.target.closest('[data-resume]')) continueRun();
   else if (e.target.closest('[data-resume-x]')) { const r = resumeInfo(); if (r) S.resumeHide[S.sid] = r.key; renderTaskBar(); }
 });
+const ASK_SKIP = '（略過這題，你自己判斷決定）';
 async function answerAsk(id, text) {
   try { await api('POST', `/api/asks/${id}`, { answer: text }); } catch (e) { notify('error', '回答送出失敗', e.message); return; }
-  delete S.asks[id]; renderTaskBar();
+  // 先標記已送出、讓卡片收起來，但不要刪掉那個 ask：後端回的 ask_done 要靠它才知道題目是什麼
+  const a = S.asks[id];
+  if (a) a._sent = text;
+  renderChat(); renderTaskBar();
 }
 function goalPrompt() {
   if (!S.sid) { notify('warn', '先開一個對話'); return; }
-  promptBox('設定目標', '要達成什麼？', '', { desc: '會先拆成步驟，每一步都要子代理審核通過才算完成。輸入 stop 可以停止目前的目標。' }).then(async (raw) => {
+  promptBox('設定目標', '要達成什麼？', '', { desc: '會先拆成 1～5 步，照做完之後由審核模型驗一次。輸入 stop 可以停止目前的目標。' }).then(async (raw) => {
     const obj = (raw || '').trim(); if (!obj) return;
     if (obj.toLowerCase() === 'stop') {
       const r = await api('POST', `/api/sessions/${S.sid}/goal/stop`);
@@ -1590,18 +1898,23 @@ function goalPrompt() {
   });
 }
 const INTERNAL_LABEL = {
-  goal_step: '目標・執行步驟', review_feedback: '審核回饋', review_request: '審核請求',
+  goal_step: '目標・執行步驟', review_feedback: '審核回饋', review_request: '審核請求', expand_request: '思維拓展',
   plan_request: '方案請求', plan_feedback: '方案回饋', subagent_task: '子代理任務',
   steps_low: '步數快用完', nudge: '空回覆補問', truncated: '截斷接續', stall: '停下補推', todo_left: '待辦未完成',
   resume: '中斷後接續', bg_done: '背景指令結束',
 };
-const GATE_LABEL = { off: '一般', human: '方案・人工核准', model: '方案・對抗審核' };
-const GATE_HINT = { off: '照常對話，工具直接執行。', human: '模型先提步驟，你按「核准執行」才照做；每步仍由子代理審核。', model: '模型先提步驟，子代理審核方案，通過才執行；打回會帶理由重提（最多 3 版）。' };
+const GATE_LABEL = { off: '一般', human: '方案・人工核准', model: '方案・對抗審核', expand: '方案・思維拓展' };
+const GATE_HINT = {
+  off: '照常對話，工具直接執行。',
+  human: '先給你一份短方案（1～5 步），你按「照做」才動手；做完由審核模型（子代理）驗一次，它的意見會貼在對話裡。',
+  model: '先提短方案，審核模型（子代理）只擋「漏步驟、順序錯、不可逆損害」；做完再由它驗一次，有缺口補一輪。',
+  expand: '先由拓展模型（子代理）把你的一句話補成完整的一套（A→A/B/C/D，並點名哪些該先查、不要瞎試），再照做；做完一樣驗收。',
+};
 function gateNow() { return S.sid ? (S.gate[S.sid] || 'off') : (localStorage.getItem('woof.gate') || 'off'); }
 function renderModePill() {
   const g = gateNow(), pill = $('#modePill');
   if (!pill) return;
-  $('#modePillTxt').textContent = { off: '一般', human: '方案・人工', model: '方案・對抗' }[g] || '一般';
+  $('#modePillTxt').textContent = { off: '一般', human: '方案・人工', model: '方案・對抗', expand: '方案・拓展' }[g] || '一般';
   pill.classList.toggle('hot', g !== 'off');
   pill.title = '對話模式：' + (GATE_LABEL[g] || '一般');
 }
@@ -1621,6 +1934,7 @@ const MODE_ITEMS = [
   { v: 'off', label: GATE_LABEL.off, sub: GATE_HINT.off },
   { v: 'human', label: GATE_LABEL.human, sub: GATE_HINT.human },
   { v: 'model', label: GATE_LABEL.model, sub: GATE_HINT.model },
+  { v: 'expand', label: GATE_LABEL.expand, sub: GATE_HINT.expand },
 ];
 $('#modePill').onclick = () => openSpick($('#modePill'), MODE_ITEMS, gateNow(), (v) => setGate(v));
 async function togglePlan() {
@@ -1640,12 +1954,21 @@ function renderChat(scrollBottom) {
   renderTaskBar();
   const chat = $('#chat');
   if (scrollBottom) S.follow = true;
+  // ask 卡片在對話串裡，重畫時把還沒送出的答案跟焦點留著，不要打一半被清掉
+  const askFocus = document.activeElement && document.activeElement.closest && document.activeElement.closest('[data-askin]');
+  const askFocusId = askFocus ? askFocus.dataset.askin : null;
+  const askCaret = askFocus ? askFocus.selectionStart : null;
+  for (const el of chat.querySelectorAll('[data-askin]')) if (el.value) S.askDraft[el.dataset.askin] = el.value;
   const keep = chat.scrollTop;
+  const anchor = S.follow === false ? chatAnchor(chat) : null;
+  const inner = innerScrolls(chat);
   chat.innerHTML = '';
   const results = {};
   for (const m of S.msgs) if (m.role === 'tool') for (const b of m.content) if (b.type === 'tool_result') results[b.id] = b;
   const running = S.running.has(S.sid);
-  if (!S.msgs.length && !running && !(S.errors[S.sid] || []).length) {
+  const asksHere = Object.values(S.asks).filter((a) => a.session_id === S.sid);
+  const doneHere = (S.askDone[S.sid] || []).filter((x) => Date.now() - (x.at || 0) < ASKDONE_TTL);
+  if (!S.msgs.length && !running && !(S.errors[S.sid] || []).length && !asksHere.length && !doneHere.length) {
     chat.innerHTML = emptyState();
     renderTerm();
     return;
@@ -1656,6 +1979,8 @@ function renderChat(scrollBottom) {
     chat.insertAdjacentHTML('beforeend', `<div class="subbar"><div>${ico('agent')}<span>這是子代理的對話${par ? `，由「${esc(par.title)}」派出` : ''}。子代理做完會把最後一則回覆交回主對話。</span>${par ? '<a data-backparent>回到主對話</a>' : ''}</div></div>`);
   }
   let group = null, lastUser = null;
+  // 剛從「思考中」變成正式訊息的那一則：沿用使用者原本的展開狀態，不要一 commit 就收起來
+  const carry = S.thinkCarry; S.thinkCarry = null;
   const groups = [];
   // 壓縮分隔線：畫在「被摘要的最後一則」之後；點開看摘要內容（原始訊息照樣顯示，只是送模型時改用摘要）
   const sum = ((curS && curS.engine_state) || {}).summary;
@@ -1664,7 +1989,9 @@ function renderChat(scrollBottom) {
   const putSummary = () => {
     sumDone = true; group = null;
     const det = document.createElement('details'); det.className = 'cmpmark';
+    det.dataset.tk = 'cmp-' + (S.sid || '');
     const n = ((curS.engine_state || {}).compress_count) || 1;
+    det.open = THINK_OPEN.has(det.dataset.tk);
     det.innerHTML = `<summary><span class="cm-line"></span><span class="cm-lab">已壓縮上面的對話${n > 1 ? `（第 ${n} 次）` : ''} · 摘要 ${sum.text.length} 字 · ${fmtTime(Number(sum.at) || 0)}</span><span class="cm-line"></span></summary>`
       + `<div class="cm-body"><div class="cm-note">模型之後看到的是這段摘要＋分隔線以下的訊息；上面的原文仍保留在這裡和資料庫。</div></div>`;
     $('.cm-body', det).appendChild(md(sum.text));
@@ -1684,6 +2011,10 @@ function renderChat(scrollBottom) {
       group = null;
       const det = document.createElement('details'); det.className = 'internal msg';
       det.dataset.mid = m.id;
+      // 手動打開的內部指令不要在重畫時被收起來（跟思考框同一套 open 記錄）
+      const itk = 'internal-' + m.id;
+      det.dataset.tk = itk;
+      det.open = THINK_OPEN.has(itk);
       const text = m.content.filter((b) => b.type === 'text').map((b) => b.text).join(NL);
       const first = (text.split(NL).find((l) => l.trim()) || '').replace(/^【[^】]*】/, '').slice(0, 60);
       det.innerHTML = `<summary><span class="itag">內部指令</span><span class="ilabel">${esc(INTERNAL_LABEL[m.meta.internal] || m.meta.internal)}</span>`
@@ -1695,7 +2026,13 @@ function renderChat(scrollBottom) {
       const div = document.createElement('div'); div.className = 'msg user' + (m.pending ? ' pending' : '');
       div.dataset.mid = m.id;
       const imgs = m.content.filter((b) => b.type === 'image');
-      if (imgs.length) div.innerHTML = `<div class="thumbs">${imgs.map((b) => `<img src="${fileUrl(b.path)}">`).join('')}</div>`;
+      if (imgs.length) div.innerHTML = `<div class="thumbs">${imgs.map((b) => `<img data-img="${esc(b.path)}" src="${fileUrl(b.path)}">`).join('')}</div>`;
+      const atts = m.content.filter((b) => b.type === 'file');
+      if (atts.length) {
+        const box = document.createElement('div'); box.className = 'thumbs files';
+        box.innerHTML = atts.map((b) => `<span class="fchip" title="${esc(b.path)}" data-path="${esc(b.path)}">${ico('folder')}${esc(b.name)} <small>${fmtBytes(b.bytes || 0)}</small></span>`).join('');
+        div.appendChild(box);
+      }
       const text = m.content.filter((b) => b.type === 'text').map((b) => b.text).join(NL);
       if (text) { const bb = document.createElement('div'); bb.className = 'bubble'; bb.textContent = text; div.appendChild(bb); }
       if (m.meta && m.meta.note) div.insertAdjacentHTML('beforeend', `<div class="unote" title="${esc(m.meta.note)}">已附上設定變更${esc((m.meta.note.match(/#\d+/) || [''])[0])}給模型：${esc(m.meta.note.replace(/^[^\n]*\n/, '').replace(/(^|\n)-\s*/g, ' ').trim().slice(0, 90))}</div>`);
@@ -1712,14 +2049,24 @@ function renderChat(scrollBottom) {
       if (m.meta && m.meta.model) gi.model = m.meta.model;
       for (const b of m.content) if (b.type === 'text' && b.text) gi.texts.push(b.text);
       if (m.meta && m.meta.hidden_reasoning) group.insertAdjacentHTML('beforeend', `<div class="think hidden" title="服務商有算思考 token，但沒有把思考內容傳回來，所以看不到過程">思考了 ${m.meta.hidden_reasoning.toLocaleString()} tokens <small>服務商沒回傳內容</small></div>`);
-      for (const b of m.content) {
+      for (let bi = 0; bi < m.content.length; bi++) {
+        const b = m.content[bi];
         if (b.type === 'thinking' && b.text) {
+          const tk = 'm' + m.id + ':' + bi;
           const d = document.createElement('details'); d.className = 'think';
+          d.dataset.tk = tk;
+          // 使用者自己點開過的思考框，重畫後要維持展開（不然模型下一步就自己收起來）；
+          // 剛從「思考中」commit 過來的那一個也要記進展開名單，否則下一次重畫又縮回去
+          if (m.id === carry && bi === 0) THINK_OPEN.add(tk);
+          d.open = THINK_OPEN.has(tk);
           d.innerHTML = `<summary>思考過程 <small>${b.text.length} 字</small></summary><div class="tx"></div>`;
-          $('.tx', d).textContent = b.text; group.appendChild(d);
+          // 收起來的思考框不建文字節點：一則一萬多字的思考 × 十幾個，光塞 DOM 就會讓整段對話卡住
+          d._th = b.text;
+          if (d.open) $('.tx', d).textContent = b.text;
+          group.appendChild(d);
         } else if (b.type === 'text' && b.text) group.appendChild(md(b.text));
         else if (b.type === 'tool_call') group.appendChild(toolCard(b, results[b.id]));
-        else if (b.type === 'image') { const p = document.createElement('div'); p.className = 'thumbs'; p.style.justifyContent = 'flex-start'; p.innerHTML = `<img src="${fileUrl(b.path)}">`; group.appendChild(p); }
+        else if (b.type === 'image') { const p = document.createElement('div'); p.className = 'thumbs'; p.style.justifyContent = 'flex-start'; p.innerHTML = `<img data-img="${esc(b.path)}" src="${fileUrl(b.path)}">`; group.appendChild(p); }
       }
       if (m.meta && m.meta.stopped) group.insertAdjacentHTML('beforeend', '<div class="stopped">已停止</div>');
     }
@@ -1733,7 +2080,17 @@ function renderChat(scrollBottom) {
     }
     for (const e of S.errors[S.sid] || []) {
       const d = document.createElement('div');
-      if (e && e.stopped) { d.className = 'stopped'; d.textContent = '已停止'; } else { d.className = 'errbox'; d.textContent = e; }
+      if (e && e.stopped) { d.className = 'stopped'; d.textContent = '已停止'; } else {
+        // 紅框要能自己關掉：不然出一次錯就留在對話裡，還擋住下面的內容
+        d.className = 'errbox closable';
+        d.innerHTML = `<span class="ebtx"></span><span class="ebx" title="關掉這個提示">✕</span>`;
+        $('.ebtx', d).textContent = e;
+        $('.ebx', d).addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          S.errors[S.sid] = (S.errors[S.sid] || []).filter((x) => x !== e);
+          renderChat();
+        });
+      }
       group.appendChild(d);
     }
     // 子代理的工具確認：卡片不在這個對話裡，單獨列出
@@ -1744,6 +2101,36 @@ function renderChat(scrollBottom) {
       group.appendChild(card);
     }
   }
+  // ask_user 的卡片：接在對話串最後，跟著內容一起捲；不固定在輸入區上方
+  for (const a of Object.values(S.asks)) {
+    if (a.session_id !== S.sid || a._sent) continue;
+    const div = document.createElement('div');
+    div.className = 'msg bot askmsg';
+    div.innerHTML = `<div class="who">${esc(whoLine({ model: (cur() || {}).model }))}</div>`
+      + `<div class="askcard"><div class="q">${esc(a.question)}</div>`
+      + `<div class="opts">${(a.options || []).map((o) => `<button class="btn" data-ask="${esc(a.id)}" data-val="${esc(o)}">${esc(o)}</button>`).join('')}</div>`
+      + `<div class="ansrow"><input data-askin="${esc(a.id)}" placeholder="或自己輸入…">`
+      + `<button class="btn primary" data-asksend="${esc(a.id)}">送出</button>`
+      + `<button class="btn ghost ask-skip" data-askskip="${esc(a.id)}" title="不回答這題，讓模型自己判斷">略過</button></div></div>`;
+    chat.appendChild(div);
+    const inp = $('[data-askin]', div);
+    if (inp && S.askDraft[a.id]) inp.value = S.askDraft[a.id];
+    if (inp && a.id === askFocusId) {
+      inp.focus();
+      const p = Math.min(askCaret == null ? inp.value.length : askCaret, inp.value.length);
+      inp.setSelectionRange(p, p);
+    }
+  }
+  // 已經回答過的提問：留在原處，顯示「已回答：…」或「已略過」，不要一答完就消失
+  for (const d of doneHere) {
+    const div = document.createElement('div');
+    div.className = 'msg bot askmsg';
+    div.innerHTML = `<div class="who">${esc(whoLine({ model: (cur() || {}).model }))}</div>`
+      + `<div class="askcard askdone"><div class="q">${esc(d.question)}</div>`
+      + `<div class="a">${d.skipped ? '已略過' : d.answer ? '已回答：' + esc(d.answer) : '已回答'}</div></div>`;
+    chat.appendChild(div);
+  }
+  for (const id of Object.keys(S.askDraft)) if (!S.asks[id]) delete S.askDraft[id];
   groups.forEach((g, i) => {
     const gi = g._info;
     if (!gi.lastId || (running && i === groups.length - 1)) return;
@@ -1758,9 +2145,47 @@ function renderChat(scrollBottom) {
       + `<span class="meta">${esc([m ? m.label : gi.model, fmtTime(gi.created)].filter(Boolean).join(' · '))}</span></div>`);
     if (i === groups.length - 1 && !running) g.classList.add('last');
   });
-  if (S.follow !== false) stickBottom(); else if (chat.scrollTop !== keep) chat.scrollTop = keep;
+  for (const g of chat.querySelectorAll('.msg.bot')) foldTools(g);
+  restoreInnerScrolls(chat, inner);
+  if (S.follow !== false) stickBottom(); else chatRestore(chat, anchor, keep);
   updateToBottom();
   renderTerm();
+}
+
+// 連續同一種工具（≥3 個、都跑完了）收成一列：十幾條 terminal 各占 34px 會把對話擠掉。
+// 點開才看每一條；展開狀態記在 S.openGrp（以第一個工具 id 當 key），重畫不會自己收起來。
+function foldTools(root) {
+  let kids = [...root.children].filter((k) => k.classList && k.classList.contains('tool'));
+  let guard = 0;
+  for (let i = 0; i < kids.length && guard++ < 200;) {
+    const name = (kids[i].querySelector('.th code') || {}).textContent || '';
+    let j = i;
+    while (j + 1 < kids.length && ((kids[j + 1].querySelector('.th code') || {}).textContent || '') === name) j++;
+    const run = kids.slice(i, j + 1);
+    const busy = run.some((k) => k.querySelector('.th .st .spin'));
+    if (!name || run.length < 3 || busy) { i = j + 1; continue; }
+    const key = run[0].dataset.id || name;
+    const open = !!(S.openGrp && S.openGrp.has(key));
+    const errs = run.filter((k) => k.classList.contains('err')).length;
+    const cmd = (run[0].querySelector('.th .arg') || {}).textContent || '';
+    const d = document.createElement('details');
+    d.className = 'toolfold';
+    d.dataset.grp = key;
+    d.innerHTML = `<summary><span class="ti">${TOOL_ICON[name] || '🔧'}</span><b>${esc(name)}</b>`
+      + `<span class="n">×${run.length}</span><span class="arg">${esc(cmd)}</span>`
+      + `<span class="st">${errs ? `<span class="st-bad">${errs} 個失敗</span>` : `<span class="st-ok">${ico('check')}${run.length}</span>`}</span>`
+      + `${ico('right', 'chev')}</summary><div class="tbody"></div>`;
+    d.open = open;
+    root.insertBefore(d, run[0]);
+    const body = d.querySelector('.tbody');
+    for (const k of run) body.appendChild(k);
+    d.addEventListener('toggle', () => {
+      S.openGrp = S.openGrp || new Set();
+      if (d.open) S.openGrp.add(key); else S.openGrp.delete(key);
+    });
+    kids = [...root.children].filter((k) => k.classList && k.classList.contains('tool'));
+    i = 0;
+  }
 }
 function fmtTime(ts) {
   if (!ts) return '';
@@ -1812,6 +2237,54 @@ async function msgAction(act, el) {
     };
   }
 }
+// 使用者往上看東西時，重畫後把「畫面最上面那一塊」放回原本的位置：
+// 只記 scrollTop 不夠，上面的內容高度一變（展開狀態、補上的內容），畫面就會跳到別處
+function chatAnchor(chat) {
+  const top = chat.getBoundingClientRect().top;
+  for (const el of chat.querySelectorAll('[data-mid], .tool[data-id], [data-tk]')) {
+    const r = el.getBoundingClientRect();
+    if (r.bottom > top + 4) {
+      const sel = el.dataset.mid ? `[data-mid="${CSS.escape(el.dataset.mid)}"]`
+        : el.dataset.tk ? `[data-tk="${CSS.escape(el.dataset.tk)}"]` : `.tool[data-id="${CSS.escape(el.dataset.id)}"]`;
+      return { sel, off: r.top - top };
+    }
+  }
+  return null;
+}
+// 內層自己會捲的框（內部指令全文、思考、工具輸出）：重畫前記下捲到哪，重畫後放回去，不然一回話就跳回框頂
+function innerScrolls(chat) {
+  const out = [];
+  for (const el of chat.querySelectorAll('pre, .tx, .ibody, .out')) {
+    if (el.scrollTop < 1 && el.scrollLeft < 1) continue;
+    const own = el.closest('[data-tk], .tool[data-id], [data-mid]');
+    if (!own) continue;
+    const sel = own.dataset.tk ? `[data-tk="${CSS.escape(own.dataset.tk)}"]`
+      : own.matches('.tool[data-id]') ? `.tool[data-id="${CSS.escape(own.dataset.id)}"]` : `[data-mid="${CSS.escape(own.dataset.mid)}"]`;
+    const idx = [...own.querySelectorAll('pre, .tx, .ibody, .out')].indexOf(el);
+    out.push({ sel, idx, top: el.scrollTop, left: el.scrollLeft });
+  }
+  return out;
+}
+function restoreInnerScrolls(chat, list) {
+  for (const x of list) {
+    const own = chat.querySelector(x.sel); if (!own) continue;
+    const el = own.querySelectorAll('pre, .tx, .ibody, .out')[x.idx]; if (!el) continue;
+    el.scrollTop = x.top; el.scrollLeft = x.left;
+  }
+}
+function chatRestore(chat, anchor, keep) {
+  const put = () => {
+    const el = anchor && chat.querySelector(anchor.sel);
+    if (!el) { if (chat.scrollTop !== keep) chat.scrollTop = keep; S.lastTop = chat.scrollTop; return; }
+    const d = (el.getBoundingClientRect().top - chat.getBoundingClientRect().top) - anchor.off;
+    if (Math.abs(d) > 1) { chat.scrollTop += d; S.progTop = chat.scrollTop; }
+    S.lastTop = chat.scrollTop;
+  };
+  put();
+  // 展開中的思考框是點開時才補內容（toggle 事件），補完高度會變，再對一次
+  requestAnimationFrame(() => { if (S.follow === false) put(); });
+  setTimeout(() => { if (S.follow === false) put(); }, 60);
+}
 // 自動跟到最底：只有使用者人在底部時才跟；往上滑（滾輪、拖捲軸、鍵盤）就停，自己滑回底部或按「到最底」再恢復
 function stickBottom() {
   const c = $('#chat'), want = c.scrollHeight - c.clientHeight;
@@ -1824,9 +2297,11 @@ function updateToBottom() {
 }
 $('#chat').addEventListener('scroll', () => {
   const c = $('#chat'), gap = c.scrollHeight - c.scrollTop - c.clientHeight;
-  if (S.progTop != null && Math.abs(c.scrollTop - S.progTop) <= 2) S.progTop = null;   // 程式自己捲的
-  else if (c.scrollTop < (S.lastTop ?? c.scrollTop) - 2) S.follow = false;            // 使用者往上
-  if (gap < 8) S.follow = true;                                                  // 回到底部
+  if (S.progTop != null && Math.abs(c.scrollTop - S.progTop) <= 2) S.progTop = null;   // 程式自己捲的：不改跟隨狀態
+  else {
+    if (c.scrollTop < (S.lastTop ?? c.scrollTop) - 2) S.follow = false;            // 使用者往上
+    if (gap < 8) S.follow = true;                                                // 使用者自己捲回底部
+  }
   S.lastTop = c.scrollTop;
   updateToBottom();
 }, { passive: true });
@@ -1838,6 +2313,10 @@ $('#chat').addEventListener('wheel', (e) => {
   S.follow = false;
 }, { passive: true });
 $('#chat').addEventListener('keydown', (e) => { if (['PageUp', 'ArrowUp', 'Home'].includes(e.key)) S.follow = false; });
+// 點開內部指令、思考、工具輸出、壓縮摘要＝正在看那一塊：不再自動跟到底，免得模型一回話就被捲走
+$('#chat').addEventListener('click', (e) => {
+  if (e.target.closest('summary, .tool .th, .toolfold > summary')) S.follow = false;
+}, true);
 $('#toBottom').onclick = () => { S.follow = true; const c = $('#chat'); c.scrollTo({ top: c.scrollHeight, behavior: 'smooth' }); };
 // 直播區只更新有變的部分：整塊清掉重建時，中途量高度會讓瀏覽器把聊天區的捲動位置往上夾，看起來像卡住滑不下去
 // 思考框：使用者自己往上捲就不再強制捲到底，捲回底部才恢復；使用者自己展開／收合過就照他的
@@ -1854,7 +2333,7 @@ function fillLive(lv) {
     if (!d) {
       d = document.createElement('details'); d.className = 'think';
       d.innerHTML = '<summary>思考中… <small></small></summary><div class="tx"></div>';
-      d.open = LT.open ?? !l.text;
+      d.open = LT.open ?? true;   // 預設展開：下面開始輸出文字時不要把思考收起來，會看不到
       $('summary', d).addEventListener('click', () => { LT.open = !d.open; });
       const tx0 = $('.tx', d);
       // 程式捲的位置記在 _progTop；捲動事件的位置不是那裡＝使用者自己捲的（事件會合併，不能用旗標判斷）
@@ -1865,10 +2344,16 @@ function fillLive(lv) {
       }, { passive: true });
       tx0.addEventListener('wheel', (e) => { if (e.deltaY < 0) { LT.pinned = false; tx0._progTop = null; } }, { passive: true });
       lv.prepend(d);
-    } else if (LT.open == null && l.text && d.open) d.open = false;
+    }
     $('summary small', d).textContent = `${l.thinking.length} 字`;
     const tx = $('.tx', d);
-    if (tx.textContent.length !== l.thinking.length) tx.textContent = l.thinking;
+    // 思考文字一次可能是上萬字，每格都整段重設會把主執行緒吃光（打字、按鈕都會卡）
+    if (tx._len !== l.thinking.length) {
+      const now = performance.now();
+      if (!tx._len || now - (tx._at || 0) > 100 || l.thinking.length - tx._len > 600) {
+        tx.textContent = l.thinking; tx._len = l.thinking.length; tx._at = now;
+      }
+    }
     if (d.open) {
       const want = LT.pinned ? tx.scrollHeight : LT.top;
       if (Math.abs(tx.scrollTop - want) > 1) { tx.scrollTop = want; tx._progTop = tx.scrollTop; }
@@ -1876,9 +2361,16 @@ function fillLive(lv) {
   } else if (d) d.remove();
   const old = $(':scope > .live-md', lv);
   if (l.text) {
-    const box = md(l.text); box.classList.add('live-md');
-    box.insertAdjacentHTML('beforeend', '<span class="cursor"></span>');
-    if (old) old.replaceWith(box); else lv.appendChild(box);
+    const now = performance.now();
+    // 串流時每一格都整段重新 parse markdown，字一多就會把主執行緒吃滿（打字、按送出都會卡）。
+    // 有變才重畫，而且最多每 120ms 一次；定稿那次由 renderChat 重畫，不會漏字。
+    if (!old || (old._len !== l.text.length
+      && (now - (old._at || 0) > 120 || l.text.length - old._len > 500))) {
+      const box = md(l.text, true); box.classList.add('live-md');
+      box._len = l.text.length; box._at = now;
+      box.insertAdjacentHTML('beforeend', '<span class="cursor"></span>');
+      if (old) { box._len = l.text.length; box._at = now; old.replaceWith(box); } else lv.appendChild(box);
+    }
   } else if (old) old.remove();
 }
 let liveRaf = 0;
@@ -1897,18 +2389,39 @@ function scheduleLive() {
 
 // ------------------------------------------------------------------ 輸入區
 const input = $('#input');
-function autosize() { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 260) + 'px'; renderSendState(); }
+// 每敲一個字就量 scrollHeight 會逼整頁重排（對話越長越慢）；合併成每格最多量一次
+let autoRaf = 0;
+function autosize() {
+  if (autoRaf) return;
+  autoRaf = requestAnimationFrame(() => {
+    autoRaf = 0;
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+    renderSendState();
+  });
+}
 input.addEventListener('input', autosize);
+// 每敲一個字都重設 innerHTML 會讓整顆按鈕重建（含 SVG），打字就會頓。狀態沒變就不碰 DOM。
+let sendSig = '';
 function renderSendState() {
   const run = S.running.has(S.sid);
   const b = $('#sendBtn');
-  const has = !!(input.value.trim() || S.attach.length);
-  b.className = 'send' + (run && !has ? ' stop' : has ? ' go' : '');
-  b.innerHTML = run && !has ? ico('stop') : ico('up');
+  const has = !!(input.value.trim() || S.attach.length || (S.files || []).length);
   const act = run && has ? busyAction() : null;
-  b.title = run && !has ? '停止（Esc）' : act ? BUSY_SEND[act] + '（Enter）' : '送出（Enter）';
-  $('#steerBtn').hidden = !(act && act !== 'steer' && !S.attach.length);
-  $('#queueBtn').hidden = !(act && act !== 'queue');
+  const cls = 'send' + (run && !has ? ' stop' : has ? ' go' : '');
+  const icon = run && !has ? 'stop' : 'up';
+  const title = run && !has ? '停止（Esc）' : act ? BUSY_SEND[act] + '（Enter）' : '送出（Enter）';
+  const sig = cls + '|' + icon + '|' + title;
+  if (sig !== sendSig) {
+    sendSig = sig;
+    b.className = cls;
+    if (b.dataset.icon !== icon) { b.dataset.icon = icon; b.innerHTML = ico(icon); }
+    b.title = title;
+  }
+  const steerOn = !!(act && act !== 'steer' && !S.attach.length);
+  const queueOn = !!(act && act !== 'queue');
+  if ($('#steerBtn').hidden !== !steerOn) $('#steerBtn').hidden = !steerOn;
+  if ($('#queueBtn').hidden !== !queueOn) $('#queueBtn').hidden = !queueOn;
 }
 function renderComposer() {
   renderQueue(); applyLang(); renderScopePill();
@@ -1918,15 +2431,36 @@ function renderComposer() {
   renderSendState();
 }
 function renderAttach() {
-  $('#attach').innerHTML = S.attach.map((a, i) => `<div class="a"><img src="data:${a.media_type};base64,${a.data}"><span data-i="${i}">${ico('x')}</span></div>`).join('');
+  const pics = S.attach.map((a, i) => `<div class="a"><img src="data:${a.media_type};base64,${a.data}"><span data-i="${i}">${ico('x')}</span></div>`).join('');
+  const docs = (S.files || []).map((f, i) => {
+    const label = f.path ? `貼上內容 (${fmtBytes(f.bytes)})` : `附件：${f.name} (${fmtBytes(f.bytes)})`;
+    const sub = f.path ? f.path : '送出後存成檔案，模型需要時自己讀';
+    return `<div class="a f"><b>${esc(label)}</b><small>${esc(sub)}</small><span data-f="${i}">${ico('x')}</span></div>`;
+  }).join('');
+  $('#attach').innerHTML = pics + docs;
   renderSendState();
 }
-$('#attach').onclick = (e) => { const x = e.target.closest('[data-i]'); if (x) { S.attach.splice(+x.dataset.i, 1); renderAttach(); } };
+$('#attach').onclick = (e) => {
+  const x = e.target.closest('[data-i]'); if (x) { S.attach.splice(+x.dataset.i, 1); renderAttach(); return; }
+  const f = e.target.closest('[data-f]'); if (f) { S.files.splice(+f.dataset.f, 1); renderAttach(); }
+};
+const FILE_MAX = 25 * 1024 * 1024;   // 單檔上限；base64 塞在 WebSocket 裡，太大會拖垮畫面
 function addFiles(files) {
   for (const f of files) {
-    if (!f.type.startsWith('image/')) { toast(`目前只能附加圖片：${f.name}`); continue; }
+    if (f.size > FILE_MAX) { toast(`${f.name} 太大（${fmtBytes(f.size)}），單檔上限 ${fmtBytes(FILE_MAX)}`); continue; }
+    if (f.type.startsWith('image/')) {
+      const r = new FileReader();
+      r.onload = () => { S.attach.push({ media_type: f.type, data: String(r.result).split(',')[1] }); renderAttach(); };
+      r.readAsDataURL(f);
+      continue;
+    }
+    // 其他檔案（xlsx、pdf、程式碼…）：存進 data/files，訊息裡留位置，模型要讀再讀
     const r = new FileReader();
-    r.onload = () => { S.attach.push({ media_type: f.type, data: String(r.result).split(',')[1] }); renderAttach(); };
+    r.onload = () => {
+      S.files.push({ name: f.name, bytes: f.size, media_type: f.type || 'application/octet-stream',
+                     data: String(r.result).split(',')[1] });
+      renderAttach();
+    };
     r.readAsDataURL(f);
   }
 }
@@ -1938,9 +2472,19 @@ $('#plusMenu').onclick = (e) => {
   if (it.dataset.act === 'image') $('#fileIn').click();
   if (it.dataset.act === 'compact') compactNow();
 };
-input.addEventListener('paste', (e) => {
+const PASTE_TO_FILE = 4000;   // 超過這個字數就存成檔案，不塞進對話
+input.addEventListener('paste', async (e) => {
   const files = [...(e.clipboardData || {}).items || []].filter((i) => i.kind === 'file').map((i) => i.getAsFile()).filter(Boolean);
-  if (files.length) { e.preventDefault(); addFiles(files); }
+  if (files.length) { e.preventDefault(); addFiles(files); return; }
+  const txt = (e.clipboardData || {}).getData ? e.clipboardData.getData('text/plain') : '';
+  if (txt.length < PASTE_TO_FILE) return;
+  e.preventDefault();
+  try {
+    const r = await api('POST', '/api/paste', { text: txt });
+    S.files.push({ path: r.path, name: r.name, bytes: r.bytes });
+    renderAttach();
+    notify('ok', `貼上內容存成檔案（${fmtBytes(r.bytes)}）`, '送出後模型需要時會用 read_file 讀');
+  } catch (err) { input.value += txt; toast('存檔失敗，改成直接貼進輸入框：' + err.message); }
 });
 const cbox = $('#cbox');
 ['dragenter', 'dragover'].forEach((t) => document.addEventListener(t, (e) => { e.preventDefault(); cbox.classList.add('drag'); }));
@@ -1949,9 +2493,15 @@ document.addEventListener('drop', (e) => { if (e.dataTransfer && e.dataTransfer.
 input.addEventListener('focus', () => cbox.classList.add('focus'));
 input.addEventListener('blur', () => cbox.classList.remove('focus'));
 
+// 貼上的長文已經存成檔案：訊息裡只帶位置，模型需要完整內容時自己 read_file
+function withFileRefs(text) {
+  const refs = (S.files || []).filter((f) => f.path)
+    .map((f) => `（貼上內容 ${fmtBytes(f.bytes)}，已存成檔案：${f.path}；需要完整內容時用 read_file 讀）`).join(NL);
+  return [text, refs].filter((x) => x && x.trim()).join(NL + NL);
+}
 async function send() {
   const text = input.value;
-  if (!text.trim() && !S.attach.length) return;
+  if (!text.trim() && !S.attach.length && !(S.files || []).length) return;
   const m = selectedModel();
   if (!m) {
     const s0 = cur();
@@ -1970,11 +2520,29 @@ async function send() {
     renderSessions(); renderTitle();
   }
   S.follow = true;
-  if (!wsSend({ type: 'send', session_id: S.sid, text, images: S.attach })) return;
-  input.value = ''; S.attach = []; renderAttach(); autosize();
+  const body = withFileRefs(text);
+  const upFiles = (S.files || []).filter((f) => f.data).map((f) => ({ name: f.name, data: f.data, media_type: f.media_type }));
+  if (!wsSend({ type: 'send', session_id: S.sid, text: body, images: S.attach, files: upFiles })) return;
+  input.value = ''; S.attach = []; S.files = []; renderAttach(); autosize();
 }
 function stop() { if (S.sid && S.running.has(S.sid)) wsSend({ type: 'stop', session_id: S.sid }); }
-$('#sendBtn').onclick = () => ((S.running.has(S.sid) && !input.value.trim() && !S.attach.length) ? stop() : busySubmit(false));
+// 子代理：只停那一條，不影響主對話
+function stopSub(sid) {
+  wsSend({ type: 'stop', session_id: sid });
+  notify('info', '已叫停那條子代理', '它這一步跑完就停；主對話不受影響');
+}
+async function closeSub(sid) {
+  const s = S.sessions.find((x) => x.id === sid);
+  const running = s && (S.running.has(sid) || s.busy);
+  if (!await confirmBox('關閉子代理',
+    `「${(s && s.title) || '子代理'}」會從側欄消失（對話紀錄一起刪${running ? '，還在跑會先叫停' : ''}）。`,
+    { ok: '關閉', danger: true })) return;
+  if (running) wsSend({ type: 'stop', session_id: sid });
+  const i = S.tabs.findIndex((t) => t.sid === sid);
+  if (i >= 0) closeTab(i);
+  await deleteSession(sid);
+}
+$('#sendBtn').onclick = () => ((S.running.has(S.sid) && !input.value.trim() && !S.attach.length && !(S.files || []).length) ? stop() : busySubmit(false));
 input.addEventListener('keydown', (e) => {
   if ($('#slashMenu').classList.contains('on') && !e.isComposing) {
     const items = $$('#slashMenu .mi');
@@ -2086,12 +2654,23 @@ const I18N = {
 const BUSY_LABEL = { interrupt: '重新導向', steer: '插話', queue: '排隊' };
 const BUSY_SEND = { interrupt: '重新導向目前的執行', steer: '插話：送進目前回合', queue: '排隊訊息' };
 const BUSY_HINT = { interrupt: '停掉目前的回合，改送這一則', steer: '下一次工具呼叫後送進去，不中斷', queue: '這一回合結束後自動送出' };
-function busyMode() { const v = localStorage.getItem('woof.busy'); return ['queue', 'steer', 'interrupt'].includes(v) ? v : 'interrupt'; }
+// 預設排隊：執行中送訊息不要再「停掉再送」，也不要直接插進目前回合
+function busyMode() { const v = localStorage.getItem('woof.busy'); return ['queue', 'steer', 'interrupt'].includes(v) ? v : 'steer'; }
 function busyAction() { const m = busyMode(); return m === 'steer' && S.attach.length ? 'queue' : m; }
 function redirectMsg() { S.interrupting[S.sid] = true; wsSend({ type: 'stop', session_id: S.sid }); queueMsg(); }
+function pendingAsk() { return Object.values(S.asks).find((a) => a.session_id === S.sid) || null; }
 function busySubmit(ctrl) {
-  const busy = S.sid && S.running.has(S.sid);
+  // 有待答的提問也算忙碌：方案／目標流程在等回答時不會進 S.running
+  const ask = pendingAsk();
+  const busy = !!(S.sid && (S.running.has(S.sid) || ask));
   if (!busy) return send();
+  // 有 ask_user 在等：這一則就是那一題的回答。不用先點選項、也不會卡在排隊等一個永遠不會結束的回合
+  const typed = input.value.trim();
+  if (ask && typed) {
+    input.value = ''; autosize();
+    answerAsk(ask.id, typed);
+    return;
+  }
   if (ctrl) return queueMsg();
   const a = busyAction();
   if (a === 'steer') return send();
@@ -2232,9 +2811,12 @@ function i18nApply() {
 function queueMsg() {
   if (!S.sid) return;
   const text = input.value.trim();
-  if (!text && !S.attach.length) return;
-  (S.queue[S.sid] = S.queue[S.sid] || []).push({ text, images: S.attach.slice() });
-  input.value = ''; S.attach = []; renderAttach(); autosize(); renderQueue();
+  if (!text && !S.attach.length && !(S.files || []).length) return;
+  (S.queue[S.sid] = S.queue[S.sid] || []).push({
+    text: withFileRefs(text), images: S.attach.slice(),
+    files: (S.files || []).filter((f) => f.data).map((f) => ({ name: f.name, data: f.data, media_type: f.media_type })),
+  });
+  input.value = ''; S.attach = []; S.files = []; renderAttach(); autosize(); renderQueue();
 }
 function renderQueue() {
   const box = $('#queueBox'); if (!box) return;
@@ -2264,7 +2846,7 @@ function drainQueue(sid) {
   const q = S.queue[sid]; if (!q || !q.length) return;
   const it = q.shift();
   if (sid === S.sid) renderQueue();
-  setTimeout(() => wsSend({ type: 'send', session_id: sid, text: it.text, images: it.images || [] }), 300);
+  setTimeout(() => wsSend({ type: 'send', session_id: sid, text: it.text, images: it.images || [], files: it.files || [] }), 300);
 }
 
 // ---- 用量（今天／7 天／30 天／此對話）
@@ -2400,6 +2982,7 @@ async function renderToolsSet(box) {
   const onTok = tools.filter((t) => t.enabled).reduce((a, t) => a + (t.tokens_est || 0), 0);
   box.innerHTML = `<div class="sk-top" data-f="tAll"><span>共 ${tools.length} 個工具，已啟用 ${onCount} 個，啟用中約 ${onTok.toLocaleString()} tokens</span>`
     + `<span class="grow"></span><button class="btn sm" data-tools="allon">全部啟用</button><button class="btn sm" data-tools="alloff">全部停用</button></div>`
+    + `<div class="pf-meta"><small>關掉一個工具只是模型不能呼叫它；系統提示裡的內容（記憶檔、使用者偏好等）照樣在，不會因此消失。</small></div>`
     + Object.keys(byP).sort().map((pl) => {
       const list = byP[pl];
       const n = list.filter((t) => t.enabled).length;
@@ -2605,7 +3188,7 @@ function renderCtxPanel() {
     </div>
     <div class="cp-sec">
       <div class="cp-sh"><b>重點便條</b><span class="pr-badge">${d.focus ? '最近一次：第 ' + d.focus.step + ' 步' : '還沒附過'}</span></div>
-      <small class="cp-note">多步工作時（預設從第 3 步起），每次送模型前在最後面附一小段目前狀態：這回合的要求、步數、待辦進度、權限、最近出錯、改過的檔。只在那次請求裡，不存進對話，前面的快取不受影響。上限 300 tokens，在插件「focus」可調。</small>
+      <small class="cp-note">預設關閉（插件「focus」）。打開後只在上下文剛壓縮完的下一次請求，於最後面補一次待辦進度、權限、最近出錯、改過的檔；不存進對話。有些模型看到它會把同一件事重想一遍，長任務原地打轉時請保持關閉。</small>
       ${d.focus ? `<pre class="pr-pre">${esc(d.focus.text)}</pre>` : ''}
       ${d.told && d.told.seq ? `<small class="cp-note">這個對話已附過 ${d.told.seq} 次設定變更，最近一次在 ${new Date(d.told.at * 1000).toLocaleString()}。</small>` : ''}
     </div>
@@ -3384,7 +3967,7 @@ async function openPreview(path) {
     if (k === 'open') D.openPath(path);
   });
   const url = fileUrl(path);
-  if (IMG_EXT.test(name) || ext === 'svg') { bd.innerHTML = `<div class="pv-img"><img src="${url}"></div>`; $('img', bd).onerror = () => { bd.innerHTML = '<div class="blank">讀不到這張圖（檔案不存在或不在允許的資料夾）</div>'; }; return; }
+  if (IMG_EXT.test(name) || ext === 'svg') { bd.innerHTML = `<div class="pv-img"><img data-img="${esc(path)}" src="${url}"></div>`; $('img', bd).onerror = () => { bd.innerHTML = '<div class="blank">讀不到這張圖（檔案不存在或不在允許的資料夾）</div>'; }; return; }
   if (VID_EXT.test(name)) { bd.innerHTML = `<div class="pv-img"><video src="${url}" controls></video></div>`; return; }
   if (AUD_EXT.test(name)) { bd.innerHTML = `<div class="pv-aud"><audio src="${url}" controls></audio></div>`; return; }
   if (ext === 'pdf') { bd.innerHTML = `<div class="blank">PDF 用預設程式開比較完整<span class="btn sm" data-pv="open">用預設程式開</span></div>`; return; }
@@ -3469,7 +4052,120 @@ $('#paneArts').addEventListener('contextmenu', (e) => {
     '-',
     { label: '插入到輸入框', run: () => insertToInput(quotePath(p)) },
     { label: '複製路徑', run: () => copyText(p) },
+    '-',
+    { label: '複製圖片', disabled: gone || !D || !D.readImage, run: () => copyImageFile(p) },
+    { label: '圖片另存為…', disabled: gone || !D, run: async () => { const f = await D.saveImage(p); if (f) notify('ok', '已另存', f); } },
   ]);
+});
+// 複製圖片到剪貼簿：主行程把圖轉成 PNG 位元組，這裡用 ClipboardItem 寫進去
+async function copyImageFile(p, name) {
+  try {
+    const r = await D.readImage(p);
+    if (!r || !r.ok) return notify('error', '複製失敗', '檔案不存在或讀不到這張圖');
+    const bytes = r.bytes instanceof Uint8Array ? r.bytes : new Uint8Array(r.bytes);
+    const blob = new Blob([bytes], { type: r.mime || 'image/png' });
+    await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+    notify('ok', '已複製圖片', name || '');
+  } catch (e) { notify('error', '複製失敗', e.message); }
+}
+// 圖片右鍵：複製圖片、複製位址、另存新檔（畫面在 woof:// 底下，複製圖片要交給主行程處理）
+function imgMenuItems(p, src) {
+  const name = (p || '').split(/[\\/]/).pop() || 'image.png';
+  return [
+    { label: '複製圖片', disabled: !D || !D.readImage, run: () => copyImageFile(p, name) },
+    { label: '複製圖片位址', run: () => copyText(p) },
+    '-',
+    { label: '圖片另存為…', run: async () => {
+        if (D && D.saveImage) { const f = await D.saveImage(p); if (f) notify('ok', '已另存', f); return; }
+        const a = document.createElement('a'); a.href = src; a.download = name; a.click();
+      } },
+  ];
+}
+// 對話區以外（預覽視窗、寵物欄）的本機檔案連結也能點
+document.addEventListener('click', (e) => {
+  const fl = e.target.closest('a.flink');
+  if (!fl || fl.closest('#chat')) return;
+  e.preventDefault(); e.stopPropagation(); openFileLink(flinkPath(fl));
+}, true);
+// 點本機檔案連結：圖片在看圖器開，其他在右側預覽開；預覽不了的（例如 exe）交給系統
+function openFileLink(p) {
+  if (IMG_EXT.test(p)) { openViewer({ src: fileUrl(p) }); return; }
+  if (/\.(html?|md|txt|json|toml|ya?ml|csv|log|py|js|ts|css|svg|pdf|xml|ini|bat|sh|ps1)$/i.test(p) || !/\.[a-z0-9]{1,5}$/i.test(p)) {
+    if (typeof openPreview === 'function') { openPreview(p); return; }
+  }
+  if (D && D.openPath) D.openPath(p); else window.open(fileUrl(p), '_blank');
+}
+// 圖片複製：桌面版新外殼走主行程；舊外殼或網路圖，就自己抓下來轉 PNG 放剪貼簿
+async function copyImageSrc(src, name) {
+  try {
+    const r = await fetch(src);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const bmp = await createImageBitmap(await r.blob());
+    const cv = document.createElement('canvas'); cv.width = bmp.width; cv.height = bmp.height;
+    cv.getContext('2d').drawImage(bmp, 0, 0);
+    const blob = await new Promise((ok) => cv.toBlob(ok, 'image/png'));
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+    notify('ok', '已複製圖片', name || '');
+  } catch (e) { notify('error', '複製失敗', e.message); }
+}
+// 對話區右鍵：有選字＝複製選取；在連結上＝開啟／複製連結；在圖片上＝複製圖片；其他＝複製整則
+function chatCtxItems(e) {
+  const items = [];
+  const sel = String(window.getSelection() || '');
+  const inBox = e.target.closest('#chat, #petHist, #petStage, .pv-body, #taskBar');
+  if (sel.trim()) items.push({ icon: 'copy', label: '複製', hint: 'Ctrl+C', run: () => copyText(sel) });
+  const fl = e.target.closest('a.flink');
+  if (fl) {
+    const p = flinkPath(fl);
+    items.push({ label: '預覽', run: () => openFileLink(p) });
+    if (D && D.openPath) items.push({ label: '用預設程式開啟', run: () => D.openPath(p) });
+    if (D && D.showItem) items.push({ label: '在資料夾中顯示', run: () => D.showItem(p.replace(/\//g, '\\')) });
+    items.push({ icon: 'copy', label: '複製路徑', run: () => copyText(p) });
+  }
+  const a = !fl && e.target.closest('a[href]');
+  if (a) {
+    items.push({ label: '開啟連結', run: () => window.open(a.href, '_blank') });
+    items.push({ icon: 'copy', label: '複製連結', run: () => copyText(a.href) });
+  }
+  const im = e.target.closest('img');
+  if (im && im.src && !im.closest('.charc')) {
+    const p = im.dataset.img || viewerPath(im.src);
+    const name = (p || im.alt || 'image.png').split(/[\\/]/).pop();
+    if (items.length) items.push('-');
+    items.push({ icon: 'copy', label: '複製圖片', run: () => (p && D && D.readImage ? copyImageFile(p, name) : copyImageSrc(im.src, name)) });
+    items.push({ label: '看大圖', run: () => openViewer(im) });
+    if (p) {
+      items.push({ label: '圖片另存為…', run: async () => {
+        if (D && D.saveImage) { const f = await D.saveImage(p); if (f) notify('ok', '已另存', f); return; }
+        const x = document.createElement('a'); x.href = im.src; x.download = name; x.click();
+      } });
+      items.push({ label: '複製圖片路徑', run: () => copyText(p) });
+    }
+  }
+  const msg = inBox && e.target.closest('#chat .msg');
+  if (msg && !im) {
+    const text = msg.classList.contains('user') ? (($('.bubble', msg) || {}).innerText || '') : (msg._text || ($('.md', msg) || msg).innerText || '');
+    if (text.trim()) { if (items.length) items.push('-'); items.push({ icon: 'copy', label: '複製這則訊息', run: () => copyText(text) }); }
+  }
+  const pr = e.target.closest('pre');
+  if (pr && !sel.trim()) items.push({ icon: 'copy', label: '複製程式碼', run: () => copyText((pr.querySelector('code') || pr).innerText) });
+  if (sel.trim() && e.target.closest('#chat') && $('#input')) items.push({ label: '引用到輸入框', run: () => insertToInput(sel.split('\n').map((l) => '> ' + l).join('\n') + '\n') });
+  return items;
+}
+document.addEventListener('contextmenu', (e) => {
+  if (e.target.closest('input, textarea, [contenteditable]')) return;
+  if (e.target.closest('#chat, #petHist, #petStage, .pv-body, #viewer') && !e.target.closest('.pop')) {
+    const items = chatCtxItems(e);
+    if (items.length) { e.preventDefault(); ctxMenu(e.clientX, e.clientY, items); }
+    return;
+  }
+});
+document.addEventListener('contextmenu', (e) => {
+  if (e.defaultPrevented) return;
+  const im = e.target.closest('img[data-img]');
+  if (!im || e.target.closest('#paneArts')) return;
+  e.preventDefault();
+  ctxMenu(e.clientX, e.clientY, imgMenuItems(im.dataset.img, im.src));
 });
 $('#paneArts').addEventListener('dragstart', (e) => {
   const a = e.target.closest('[data-ap]'); if (!a) return;
@@ -3886,7 +4582,7 @@ const SECTIONS = [
   ['keys', 'API 金鑰', '同一個金鑰池可以放多把 key，一把用完自動換下一把。'],
   ['prompts', '提示詞與記憶', 'WOOF 寫給模型的內部提示詞，以及設定檔、人物檔、使用者檔、記憶檔。'],
   ['styles', '輸出風格', '每個對話可以選一種風格，內容會放進系統提示。'],
-  ['pet', '寵物', '住在旁邊的小狗。自己的對話窗、自己的檔、自己的壓縮；對你的對話唯讀——看得到，但不會插話、不會動工具、不會改任何東西。'],
+  ['pet', '寵物', '陪你聊天的小角色。牠有自己的對話、記憶和角色檔，跟主對話分開；對你的對話只看不改——不會插話、不會用工具、不會動任何檔案。'],
   ['compress', '上下文壓縮', '對話變長時把較早的內容摘要起來，全文仍留在資料庫。'],
   ['perms', '權限', '模型要用工具時，依類別決定直接執行、先問你、或不允許。'],
   ['tools', '工具', '每個工具一個開關，依插件分組。停用後模型看不到該工具。'],
@@ -4380,6 +5076,11 @@ async function renderPermsSec(box) {
 const PF = { key: 'instructions', files: null, drafts: {} };
 async function pfLoad() { const r = await api('GET', '/api/prompt-files'); PF.files = r.files; }
 function pfStash() { const ta = $('#pfText'); if (ta && PF.files) PF.drafts[PF.key] = ta.value; }
+function memOn(key) {
+  const p = (S.plugins || []).find((x) => x.name === 'memory') || {};
+  const v = (p.settings || {})[key];
+  return v === undefined || v === null ? true : !!v;
+}
 function renderPromptsSec(box) {
   const mode = (S.cfg.prompts && S.cfg.prompts.mode) || 'normal';
   const seg = (v, n) => `<b data-pmode="${v}" class="${mode === v ? 'on' : ''}">${n}</b>`;
@@ -4396,6 +5097,8 @@ function renderPromptsSec(box) {
   </div>
   <div class="card pf-card" data-f="pfBox">
     <div class="card-hd"><b>設定檔・人物檔・使用者檔・記憶檔</b><small>存在 data/prompts/，每個對話都會把它們放進系統提示。</small></div>
+    <div class="frow pf-memsw"><div><b>記憶放進提示詞（讀）</b><small>記憶檔、使用者檔會放進系統提示。關掉只是模型看不到內容——檔案不會被刪，你在下面照樣改得動。</small></div><div class="fctl"><span class="sw${memOn('allow_read') ? ' on' : ''}" data-memsw="allow_read"></span></div></div>
+    <div class="frow pf-memsw"><div><b>讓模型自己寫記憶</b><small>add／replace／remove。關掉後模型只能讀、不能改，改由你在下面這個框手動編——記憶不會消失。</small></div><div class="fctl"><span class="sw${memOn('allow_write') ? ' on' : ''}" data-memsw="allow_write"></span></div></div>
     <div id="pfBox"><div class="blank">讀取中…</div></div>
   </div>`;
   box.oninput = (e) => {
@@ -4406,7 +5109,22 @@ function renderPromptsSec(box) {
     const d = $('#pfDirty'); if (d) d.textContent = '尚未儲存…';
     clearTimeout(PF.timer); PF.timer = setTimeout(() => pfSave(true), 900);
   };
-  box.onclick = (e) => {
+  box.onclick = async (e) => {
+    const ms = e.target.closest('[data-memsw]');
+    if (ms) {
+      const key = ms.dataset.memsw, on = !ms.classList.contains('on');
+      ms.classList.toggle('on', on);
+      try {
+        const row = await api('POST', '/api/plugins/memory', { settings: { [key]: on } });
+        const p = (S.plugins || []).find((x) => x.name === 'memory');
+        if (p && row) p.settings = row.settings || p.settings;
+        notify('ok', on ? '已允許' : '已關掉');
+      } catch (err) {
+        ms.classList.toggle('on', !on);
+        notify('error', '儲存失敗', err.message);
+      }
+      return;
+    }
     const b = e.target.closest('[data-pmode]');
     if (b) { pfStash(); S.cfg.prompts = { mode: b.dataset.pmode }; setDirty(true); renderPromptsSec(box); return; }
     const t = e.target.closest('[data-pf]');
@@ -4415,6 +5133,20 @@ function renderPromptsSec(box) {
     if (ipr && !e.target.closest('.ip-body')) { const k = ipr.dataset.iprow; IP.open.has(k) ? IP.open.delete(k) : IP.open.add(k); ipRender(); return; }
     const rs = e.target.closest('[data-ipreset]');
     if (rs) { ipReset(rs.dataset.ipreset); return; }
+  };
+  box.onchange = async (e) => {
+    const ipt = e.target.closest('[data-pflim]');
+    if (!ipt) return;
+    const v = Math.round(Number(ipt.value) || 0);
+    const f = PF.files.find((x) => x.key === PF.key);
+    try {
+      const r = await api('PUT', `/api/prompt-files/${PF.key}/limit`, { limit: v });
+      if (f && r) Object.assign(f, r);
+      notify('ok', `${f ? f.label : '上限'}改成 ${v} 字`);
+    } catch (err) {
+      notify('error', '上限沒存到', err.message);
+    }
+    pfRender();
   };
   pfLoad().then(pfRender).catch((e) => { const x = $('#pfBox'); if (x) x.innerHTML = `<div class="errbox">${esc(e.message)}</div>`; });
   ipLoad();
@@ -4479,7 +5211,7 @@ function pfRender() {
   const txt = PF.drafts[f.key] ?? f.text;
   const cnt = f.entries === null || f.entries === undefined ? '' : `共 ${f.entries} 條（條目之間用一行 § 分隔）・`;
   const over = f.limit && (f.chars || 0) > f.limit;
-  const count = cnt + (f.limit ? `<span class="${over ? 'qerr' : ''}">${f.chars || 0} / ${f.limit} 字${over ? '（超過上限，模型可能讀不完整）' : ''}</span>・` : '');
+  const count = cnt + (f.limit ? `<span class="${over ? 'qerr' : ''}">${f.chars || 0} 字${over ? '（超過上限，模型可能讀不完整）' : ''}</span>・上限 <input class="pf-lim mono" type="number" min="200" max="200000" step="100" value="${f.limit}" data-pflim title="這個檔的字數上限；模型用工具寫入時超過會被拒絕，手動編輯只提示"> 字・` : '');
   box.innerHTML = `<div class="seg pf-tabs">${PF.files.map((x) => `<b data-pf="${x.key}" class="${x.key === f.key ? 'on' : ''}">${esc(x.label)}</b>`).join('')}</div>
     <div class="pf-meta"><small>${esc(f.hint)}</small><small class="mono">${esc(f.path)}</small></div>
     <textarea id="pfText" class="mono pf-ta" rows="16" spellcheck="false">${esc(txt)}</textarea>
@@ -5366,7 +6098,7 @@ $('#setList').addEventListener('input', (e) => {
   if (tr && el.dataset.mf && el.tagName === 'INPUT') {
     const m = S.cfg.models[+tr.dataset.mi];
     const f = el.dataset.mf;
-    if (f === 'efforts') m.efforts = el.value.split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean);
+    if (f === 'efforts') m.efforts = el.value.split(/[,，\s]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
     else if (f === 'context_window') m.context_window = el.value.trim() ? Number(el.value.replace(/[^0-9]/g, '')) : undefined;
     else if (f === 'price') {
       const nums = el.value.split(/[\/,，\s]+/).map((s) => s.trim()).filter(Boolean).map(Number).filter((n) => Number.isFinite(n) && n >= 0).slice(0, 3);
@@ -5785,11 +6517,29 @@ if (D) {
   connect();
 })();
 
-$('#taskBar').addEventListener('click', (e) => {
+// ask_user 卡片現在畫在對話串裡（見 renderChat），事件一併掛在對話區
+function askClick(e) {
   const o = e.target.closest('[data-ask]');
-  if (o) { answerAsk(o.dataset.ask, o.dataset.val); return; }
+  if (o) { answerAsk(o.dataset.ask, o.dataset.val); return true; }
   const s = e.target.closest('[data-asksend]');
-  if (s) { const id = s.dataset.asksend; const v = $(`[data-askin="${id}"]`).value.trim(); if (v) answerAsk(id, v); }
+  if (s) {
+    const id = s.dataset.asksend; const el = $(`[data-askin="${id}"]`); const v = el ? el.value.trim() : '';
+    // 空白按送出＝略過這一題，不是當成沒按
+    answerAsk(id, v || ASK_SKIP, !v);
+    return true;
+  }
+  const k = e.target.closest('[data-askskip]');
+  if (k) { answerAsk(k.dataset.askskip, ASK_SKIP, true); return true; }
+  return false;
+}
+$('#taskBar').addEventListener('click', askClick);
+$('#chat').addEventListener('click', askClick);
+$('#chat').addEventListener('keydown', (e) => {
+  const el = e.target.closest && e.target.closest('[data-askin]');
+  if (!el || e.key !== 'Enter' || e.isComposing) return;
+  e.preventDefault();
+  const v = el.value.trim();
+  if (v) answerAsk(el.dataset.askin, v);
 });
 
 i18nApply();   // 介面語言：開啟時套用一次，之後新出現的畫面由 MutationObserver 接手
@@ -5875,7 +6625,18 @@ async function toggleGroup(gid) {
 
 function moveSessionToGroup(sid, gid) {
   const s = S.sessions.find((x) => x.id === sid);
-  if (!s || (s.grp || '') === gid) return;
+  if (!s) return;
+  if (s.parent) {
+    // 子代理拖出來：拆成獨立對話，順便放進目標群組
+    const before = { parent: s.parent, grp: s.grp };
+    s.parent = ''; s.grp = gid;
+    renderSessions();
+    api('PATCH', `/api/sessions/${sid}`, { parent: '', grp: gid })
+      .then(() => { loadGroups(); notify('ok', '已拆成獨立對話', s.title || ''); })
+      .catch((e) => { Object.assign(s, before); renderSessions(); notify('error', '拆不出來', e.message); });
+    return;
+  }
+  if ((s.grp || '') === gid) return;
   const before = s.grp || '';
   s.grp = gid;
   renderSessions();
@@ -6013,7 +6774,14 @@ function petRx(m) {
   }
   return m.react ? `<span class="rx">${esc(m.react)}</span>` : '';
 }
+function petPokeLabel(m) {
+  const pname = (PET.st && PET.st.name) || '沃夫';
+  const n = Number((String(m.text || '').match(/(\d+)\s*下/) || [])[1] || 1);
+  if (uiLang() === 'en') return n > 1 ? `You patted ${pname} ${n} times` : `You patted ${pname}`;
+  return n > 1 ? `你摸了${pname} ${n} 下` : `你摸了摸${pname}`;
+}
 function petRow(m) {
+  if (m.role !== 'pet' && m.kind === 'poke') return `<div class="pnote">${esc(petPokeLabel(m))}</div>`;
   if (m.role !== 'pet') {
     return `<div class="pmsg u"><div class="petline">${esc(m.text)}</div>${petRx(m)}</div>`;
   }
@@ -6021,6 +6789,10 @@ function petRow(m) {
   if (!lines.length) return '';
   return `<div class="pmsg p" data-mid="${esc(m.id || '')}">${lines.map((x) => `<div class="petline">${esc(x)}</div>`).join('')}`
     + `<span class="rxadd" data-pet="rxpick" data-mid="${esc(m.id || '')}" title="按表情">☺</span>${petRx(m)}</div>`;
+}
+function petPara(x) {
+  const aside = /^[（(].*[）)]$/.test(x);
+  return `<p${aside ? ' class="aside"' : ''}>${esc(x)}</p>`;
 }
 function petPaintStage() {
   const img = $('#petImg');
@@ -6033,17 +6805,26 @@ function petPaintStage() {
   if (!bub) return;
   const { top } = petSplit();
   let html = '';
-  if (top) {
+  let size = 0;
+  if (PET.busy) {
+    html = `<div class="pmsg p top"><div class="bub typing">${PET_DOTS}</div></div>`;
+  } else if (top) {
     const lines = petLines(top);
     const n = PET.reveal && PET.reveal.id === top.id ? PET.reveal.shown : lines.length;
-    html = lines.slice(0, n).map((x) => `<div class="bub">${esc(x)}</div>`).join('');
-    if (n < lines.length) html += `<div class="bub typing">${PET_DOTS}</div>`;
-    html = `<div class="pmsg p top" data-mid="${esc(top.id || '')}">${html}`
+    const shown = lines.slice(0, n);
+    size = shown.join('').length;
+    const multi = shown.length > 1 || size > 22;
+    html = `<div class="pmsg p top" data-mid="${esc(top.id || '')}"><div class="bub${multi ? ' multi' : ''}">`
+      + shown.map(petPara).join('') + (n < lines.length ? `<p class="more">${PET_DOTS}</p>` : '') + '</div>'
       + `<span class="rxadd" data-pet="rxpick" data-mid="${esc(top.id || '')}" title="按表情">☺</span>${petRx(top)}</div>`;
   }
-  if (PET.busy) html = `<div class="pmsg p top"><div class="bub typing">${PET_DOTS}</div></div>`;
   bub.innerHTML = html;
   bub.classList.toggle('on', !!html);
+  // 牠講很長時，圖縮小讓位給泡泡；泡泡本身有最大高度，超過就在裡面捲
+  const wrap = bub.closest('.petwrap');
+  if (wrap) wrap.classList.toggle('long', size > 70);
+  const b = bub.querySelector('.bub');
+  if (b) b.scrollTop = b.scrollHeight;
 }
 function petPaint() {
   if (!$('#petImg')) return;
@@ -6067,12 +6848,22 @@ function petPaint() {
     const { rows, top } = petSplit();
     h.innerHTML = rows.length || top || PET.busy
       ? rows.map(petRow).join('')
-      : '<div class="pethint">牠會看著你開著的對話，偶爾說一兩句。<br>想找牠說話，直接打字就好。</div>';
-    h.scrollTop = h.scrollHeight;
+      : (PET.cfg && PET.cfg.on === false
+        ? '<div class="pethint">主動說話關著：牠不會自己開口。<br>想找牠，直接打字或摸摸牠就好。</div>'
+        : '<div class="pethint">牠會看著你開著的對話，偶爾說一兩句。<br>想找牠說話，直接打字就好。</div>');
   }
   petPaintStage();
+  // 泡泡、建議鈕的高度會把紀錄區擠小：畫完上面再捲到底，最後一則才不會被泡泡蓋住
+  if (h) { h.scrollTop = h.scrollHeight; requestAnimationFrame(() => { h.scrollTop = h.scrollHeight; }); }
 }
 
+// 紀錄區被泡泡擠小（逐句冒出來時）也要黏在底部；使用者自己往上捲就不黏
+(function petHistStick() {
+  const h = $('#petHist'); if (!h || !window.ResizeObserver) return;
+  let stick = true;
+  h.addEventListener('scroll', () => { stick = h.scrollHeight - h.scrollTop - h.clientHeight < 24; }, { passive: true });
+  new ResizeObserver(() => { if (stick) h.scrollTop = h.scrollHeight; }).observe(h);
+})();
 async function petLoad() {
   try {
     const d = await api('GET', '/api/pet');
@@ -6095,8 +6886,8 @@ function petGrow() {
   const inp = $('#petIn');
   if (!inp) return;
   inp.style.height = 'auto';
-  inp.style.height = `${Math.min(inp.scrollHeight || 44, 132)}px`;
-  inp.style.overflowY = inp.scrollHeight > 132 ? 'auto' : 'hidden';
+  inp.style.height = `${Math.max(32, Math.min((inp.scrollHeight || 30) + 2, 120))}px`;
+  inp.style.overflowY = inp.scrollHeight > 120 ? 'auto' : 'hidden';
 }
 
 async function petSay(forced) {
@@ -6181,15 +6972,36 @@ function petRxPick(anchor, mid) {
   }, 0);
 }
 
-async function petPoke() {
-  if (!S.sid) { notify('warn', '先開一個對話', '牠才看得到東西。'); return; }
-  try {
-    const d = await api('POST', '/api/pet/glance', { session_id: S.sid });
-    PET.st = d.state || PET.st;
-    if (d.history) { PET.hist = d.history; petMaybeReveal(true); }
+// 點牠的圖＝摸頭：先動一下給回饋，連點會合併成「摸了 n 下」，停手 0.7 秒後才送
+const PET_BOOP = { n: 0, t: 0 };
+function petBoop() {
+  const img = $('#petImg');
+  if (!img || PET.busy) return;
+  img.classList.remove('boop');
+  void img.offsetWidth;
+  img.classList.add('boop');
+  PET_BOOP.n += 1;
+  clearTimeout(PET_BOOP.t);
+  PET_BOOP.t = setTimeout(async () => {
+    const n = PET_BOOP.n;
+    PET_BOOP.n = 0;
+    petRxClose();
+    PET.busy = true;
+    PET.hist.push({ role: 'user', kind: 'poke', text: n > 1 ? `（連摸了你 ${n} 下）` : '（摸了摸你的頭）', id: '' });
     petPaint();
-    if (!d.spoke) notify('info', '牠看了一眼', '這次沒什麼想說的。');
-  } catch (e) { notify('error', '失敗', e.message); }
+    try {
+      const d = await api('POST', '/api/pet/poke', { n, session_id: S.sid || '' });
+      PET.st = d; PET.hist = d.history || PET.hist;
+      PET.busy = false;
+      petMaybeReveal(true);
+      petPaint();
+    } catch (e) {
+      PET.hist.pop();
+      PET.busy = false;
+      petPaint();
+      notify('error', '牠沒反應', e.message);
+    }
+  }, 700);
 }
 
 async function petSave(patch) {
@@ -6210,7 +7022,7 @@ function petMenu(anchor) {
   const m = document.createElement('div');
   m.id = 'petMenu';
   m.className = 'mi petmenu';
-  m.innerHTML = '<div data-pm="poke">看一眼</div><div data-pm="file">編輯寵物檔</div>'
+  m.innerHTML = '<div data-pm="file">編輯寵物檔</div>'
     + '<div data-pm="reset">清空牠的記憶</div><div data-pm="set">寵物設定</div>';
   document.body.appendChild(m);
   m.style.left = `${Math.max(8, r.right - 150)}px`;
@@ -6231,7 +7043,6 @@ function petMenu(anchor) {
     if (!it) return;
     close();
     const k = it.dataset.pm;
-    if (k === 'poke') petPoke();
     if (k === 'set' || k === 'file') openSettings('pet');
     if (k === 'reset') {
       confirmBox('清掉牠記得的事？', '牠自己的對話與摘要會清空。主對話完全不受影響。', { ok: '清空', danger: true })
@@ -6250,7 +7061,7 @@ $('#panePet').addEventListener('click', (e) => {
   if (k === 'say') petSay();
   if (k === 'sug') petSay(b.dataset.say || '');
   if (k === 'menu') petMenu(b);
-  if (k === 'poke') petPoke();
+  if (k === 'boop') petBoop();
   if (k === 'rxpick') petRxPick(b, b.dataset.mid || '');
   if (k === 'unrx') { const m = PET.hist.find((x) => x.id === b.dataset.mid); if (m) petReact(m.id, m.ureact); }
 });
@@ -6266,84 +7077,137 @@ $('#panePet').addEventListener('keydown', (e) => {
 });
 
 // ---- 設定 → 寵物
+// 數字設定都是「拉桿＋數字框」，兩邊同步；改值只存檔、只更新說明，不重畫整頁（不會跳回頂端）
+const PET_NUM = {
+  every_sec: { min: 3, max: 600, step: 1, unit: '秒', desc: (v) => `開著「主動說話」時，每 ${v} 秒瞄一眼你開著的對話。沒有新內容就不叫模型，放著不花錢。` },
+  peek: { min: 300, max: 20000, step: 100, unit: 'tk', desc: (v) => `從主對話抓最近約 ${Number(v).toLocaleString()} tokens 給牠看。越多越懂你在忙什麼，也越花錢。` },
+  max_out: { min: 40, max: 800, step: 20, unit: 'tk', desc: (v) => `單次最多 ${v} tokens。平常牠只講一兩句，用不到上限；只有你問想法、牠講長的時候才會碰到。太低會被截斷。` },
+  ctx: { min: 4000, max: 200000, step: 1000, unit: 'tk', desc: (v) => `${Number(v).toLocaleString()} tokens；超過八成牠會自己整理成筆記。` },
+  keep: { min: 2, max: 60, step: 1, unit: '則', desc: (v) => `整理筆記時保留最近 ${v} 則原文，更早的變成筆記。` },
+};
+function petNumRow(k, title, c) {
+  const o = PET_NUM[k];
+  return `<div class="frow"><div><b>${title}</b><small data-petd="${k}">${o.desc(c[k])}</small></div>
+    <div class="fctl numrng"><input type="range" min="${o.min}" max="${o.max}" step="${o.step}" value="${c[k]}" data-petn="${k}">
+      <label class="numbox"><input type="number" inputmode="numeric" min="${o.min}" max="${o.max}" step="${o.step}" value="${c[k]}" data-petn="${k}"><i>${o.unit}</i></label></div></div>`;
+}
 function renderPetSec(box) {
-  box.innerHTML = '<div class="blank">讀取中…</div>';
+  if (!box.innerHTML.trim()) box.innerHTML = '<div class="blank">讀取中…</div>';
   api('GET', '/api/pet').then((d) => {
     const c = d.cfg;
-    const models = (S.cfg.models || []);
-    const rows = [
-      ['on', '開著', '關掉就不會看對話、也不會講話；牠記得的事還留著。'],
-    ];
     const charCard = (x) => `<div class="charc${c.char === x.id ? ' on' : ''}" data-petchar="${esc(x.id)}">
         <img src="${BASE}/api/pet/sprite/happy?char=${encodeURIComponent(x.id)}&token=${encodeURIComponent(TOKEN)}" alt="">
-        <b>${esc(x.name)}</b><small>${esc(x.note || '')}</small></div>`;
-    box.innerHTML = `<div class="card"><div class="card-hd"><b>角色</b>
-        <small>每個角色有自己的檔、自己的記憶、自己的表情圖。切過去就是換一個人陪你，兩邊不共用。</small></div>
+        <div class="cc-tx"><b>${esc(x.name)}<span class="sig">${esc((x.reacts || []).slice(-1)[0] || '')}</span></b><small>${esc(x.note || '')}</small></div>
+        <span class="cc-ck">${ico('check')}</span></div>`;
+    const seg = (k, opts) => `<div class="seg">${opts.map(([v, n]) => `<b class="${c[k] === v ? 'on' : ''}" data-petseg="${k}" data-v="${v}">${n}</b>`).join('')}</div>`;
+    const sw = (k) => `<span class="sw${c[k] ? ' on' : ''}" data-petf="${k}"></span>`;
+    const row = (f, title, desc, ctl) => `<div class="frow" data-f="${f}"><div><b>${title}</b><small>${desc}</small></div><div class="fctl">${ctl}</div></div>`;
+    const okModel = (m) => m.provider !== 'claude_cli' && m.kind !== 'image' && m.kind !== 'video';
+    box.innerHTML = `<div class="petset">
+    <div class="card"><div class="card-hd"><b>角色</b><small>每個角色有自己的角色檔、記憶與表情圖，切換不會共用。右上角的表情是牠的招牌。</small></div>
       <div class="chargrid">${(d.chars || []).map(charCard).join('')}</div>
-      <div class="frow"><div><b>開著</b><small>關掉就不會看對話、也不會講話；牠記得的事還留著。</small></div>
-        <div class="fctl"><span class="sw${c.on ? ' on' : ''}" data-petf="on"></span></div></div>
     </div>
-    <div class="card"><div class="card-hd"><b>陪伴</b><small>牠多久瞄一眼、看多少、能不能留言。</small></div>
-      <div class="frow"><div><b>多久看一次</b><small>每 ${c.every_sec} 秒瞄一眼你開著的對話。沒有新內容不會叫模型，所以放著不會一直花錢。</small></div>
-        <div class="fctl"><input type="number" min="3" max="600" value="${c.every_sec}" data-petf="every_sec"></div></div>
-      <div class="frow"><div><b>每次看多少</b><small>從主對話抓最近約 ${Number(c.peek).toLocaleString()} tokens 的片段給牠看。</small></div>
-        <div class="fctl"><input type="number" min="300" max="20000" step="100" value="${c.peek}" data-petf="peek"></div></div>
-      <div class="frow"><div><b>允許牠在主對話留一句</b><small>預設關，也就是完全唯讀：牠只看得到你的對話，不能寫進去。打開後牠講的話會以牠的招牌表情開頭，出現在對話裡。</small></div>
-        <div class="fctl"><span class="sw${c.speak_up ? ' on' : ''}" data-petf="speak_up"></span></div></div>
-      <div class="frow"><div><b>固定回覆</b><small>永遠在輸入框上方的通用回覆，用 | 分隔（最多四個）。上面那一顆會變的是模型給的建議。</small></div>
-        <div class="fctl wide"><input data-petf="quick" value="${esc((c.quick || []).join('|'))}" placeholder="怎麼了？|繼續說"></div></div>
+    <div class="card"><div class="card-hd"><b>互動</b><small>點寵物欄裡牠的圖＝摸摸牠，牠會回應；你說話、摸牠，牠一定會回。下面管的是牠「自己開口」與按表情。</small></div>
+      ${row('pet_on', '主動說話', '開著：牠會定時瞄你的對話，有新東西時自己說一句。關掉：牠只在你跟牠說話或摸牠時回，不會自己開口，也不會偷看。', sw('on'))}
+      ${petNumRow('every_sec', '多久瞄一次', c)}
+      ${petNumRow('peek', '每次看多少', c)}
+      ${row('pet_rx', '按表情', '牠一邊說話一邊對你的訊息按表情的頻率。你只回「好」「哈哈」時，牠只按表情不說話，這種不受限。', seg('react_rate', [['off', '不按'], ['low', '偶爾'], ['high', '常常']]))}
+      ${row('pet_quick', '固定回覆', '輸入框上方固定的幾顆，用 | 分隔，最多四個。上面那顆會變的是模型猜你想回的。', `<input data-petf="quick" value="${esc((c.quick || []).join('|'))}" placeholder="怎麼了？|繼續說">`)}
+      ${row('pet_speak', '在主對話留言', '預設關＝完全唯讀：看得到你的對話但寫不進去。打開後，牠主動說的話也會以招牌表情開頭出現在主對話。', sw('speak_up'))}
     </div>
-    <div class="card"><div class="card-hd"><b>模型與額度</b><small>牠用自己的模型，不跟主對話共用。</small></div>
-      <div class="frow"><div><b>模型</b><small>DS 這種便宜的就夠；寵物不需要最強的。</small></div>
-        <div class="fctl wide"><select data-petf="model">${models.map((m) => `<option value="${esc(m.id)}"${c.model === m.id ? ' selected' : ''}>${esc(m.label || m.id)}</option>`).join('')}</select></div></div>
-      <div class="frow"><div><b>思考</b><small>先想一想再開口。寵物通常不用，會慢一點。</small></div>
-        <div class="seg">${[['off', '不用'], ['on', '想一下']].map(([v, n]) => `<b class="${c.effort === v ? ' on' : ''}" data-petseg="${v}">${n}</b>`).join('')}</div></div>
-      <div class="frow"><div><b>一次講多少</b><small>最多 ${c.max_out} tokens。想讓牠能講長一點就往上拉；小寵物欄拉太高會變成在演講。</small></div>
-        <div class="fctl wide"><input type="range" min="60" max="800" step="20" value="${c.max_out}" data-petf="max_out"></div></div>
+    <div class="card"><div class="card-hd"><b>模型</b><small>牠用自己的模型，跟主對話分開算錢。聊天用便宜快速的就夠，例如 DeepSeek Flash。</small></div>
+      <div class="frow" data-f="pet_model"><div><b>服務商 → 模型</b><small>先選服務商，再選模型。不選就自動挑一個便宜的。</small></div>
+        <div class="fctl">${mpPairHtml('pet:model', c.model || '', { filter: okModel, blank: '自動挑', set: (v) => petSave({ model: v }).then((r) => { if (r && r.cfg) c.model = r.cfg.model; }) })}</div></div>
+      ${row('pet_effort', '思考', '先想再開口，回得比較慢。聊天通常不用。', seg('effort', [['off', '不用'], ['on', '想一下']]))}
+      ${petNumRow('max_out', '一次最多講多少', c)}
     </div>
-    <div class="card"><div class="card-hd"><b>牠自己的記憶</b><small>跟主對話的壓縮完全分開，不會互相影響。</small></div>
-      <div class="frow"><div><b>上限</b><small>${Number(c.ctx).toLocaleString()} tokens；超過八成牠會自己壓縮成筆記。</small></div>
-        <div class="fctl"><input type="number" min="4000" max="200000" step="1000" value="${c.ctx}" data-petf="ctx"></div></div>
-      <div class="frow"><div><b>壓縮後留幾則</b><small>壓縮時保留最近 ${c.keep} 則原文，其餘變成摘要。</small></div>
-        <div class="fctl"><input type="number" min="2" max="60" value="${c.keep}" data-petf="keep"></div></div>
-      <div class="frow"><div><b>現在有 ${d.state.msgs} 則訊息</b><small>清掉不影響主對話，只是牠會忘記你們聊過什麼。</small></div>
-        <div class="fctl"><button class="btn" data-petf="reset">清空牠的記憶</button></div></div>
+    <div class="card"><div class="card-hd"><b>記憶</b><small>牠自己的對話紀錄與筆記，跟主對話的壓縮完全分開。</small></div>
+      ${petNumRow('ctx', '記憶上限', c)}
+      ${petNumRow('keep', '整理後留幾則', c)}
+      ${row('pet_reset', `現在有 <span data-petcount>${d.state.msgs}</span> 則訊息`, '清掉不影響主對話，只是牠會忘記你們聊過什麼。', '<button class="btn" data-petf="reset">清空牠的記憶</button>')}
     </div>
-    <div class="card"><div class="card-hd"><b>寵物檔</b><small>只有牠看得到。主對話的人格檔、記憶檔跟這份完全分開。</small></div>
-      <textarea id="petFile" rows="16" class="mono" spellcheck="false" placeholder="讀取中…"></textarea>
-      <div class="frow"><div><b>存檔</b><small>下一次牠講話就用新版。</small></div>
-        <div class="fctl"><button class="btn" data-petf="saveFile">儲存寵物檔</button></div></div>
-    </div>`;
+    <div class="card"><div class="card-hd"><b>角色檔</b><small>只寫「牠是誰」：檔案、喜歡、討厭、小毛病、口頭禪、語氣、示範。怎麼聊（長度、按表情、輸出格式）是共用規則，不用寫在這裡。</small></div>
+      <div class="petfile"><textarea id="petFile" rows="14" class="mono" spellcheck="false" placeholder="讀取中…"></textarea>
+      <div class="petfile-ft"><small>存檔後，牠下一句就用新的。</small><button class="btn primary" data-petf="saveFile">儲存角色檔</button></div></div>
+    </div></div>`;
     api('GET', '/api/pet/file').then((f) => { const t = $('#petFile'); if (t) t.value = f.text; });
-    box.onclick = (e) => {
-      const ch = e.target.closest('[data-petchar]');
-      if (ch && ch.dataset.petchar !== c.char) {
-        petSave({ char: ch.dataset.petchar }).then(() => { renderPetSec(box); petLoad(); });
+    const saveQuiet = (patch) => petSave(patch).then((r) => {
+      if (r && r.cfg) Object.assign(c, r.cfg);
+      return r;
+    });
+    const setNum = (k, v) => {
+      box.querySelectorAll(`[data-petn="${k}"]`).forEach((x) => { if (Number(x.value) !== v) x.value = v; });
+      const dsc = box.querySelector(`[data-petd="${k}"]`);
+      if (dsc) dsc.textContent = PET_NUM[k].desc(v);
+    };
+    let numTimer = 0;
+    box.oninput = (e) => {
+      const el = e.target.closest('[data-petn]');
+      if (!el) return;
+      const k = el.dataset.petn;
+      const o = PET_NUM[k];
+      const v = Number(el.value);
+      if (!Number.isFinite(v) || v < o.min || v > o.max) return;   // 數字框打到一半先不動拉桿
+      setNum(k, v);
+      clearTimeout(numTimer);
+      numTimer = setTimeout(() => saveQuiet({ [k]: v }), el.type === 'range' ? 300 : 700);
+    };
+    box.onchange = (e) => {
+      const n = e.target.closest('[data-petn]');
+      if (n) {
+        const k = n.dataset.petn;
+        const o = PET_NUM[k];
+        let v = Number(n.value);
+        if (!Number.isFinite(v)) v = c[k];
+        v = Math.max(o.min, Math.min(o.max, Math.round(v / o.step) * o.step));
+        setNum(k, v);
+        n.value = v;
+        clearTimeout(numTimer);
+        if (v !== c[k]) saveQuiet({ [k]: v });
         return;
       }
-      const seg = e.target.closest('[data-petseg]');
-      if (seg) { petSave({ effort: seg.dataset.petseg }).then(() => renderPetSec(box)); return; }
+      const el = e.target.closest('[data-petf]');
+      if (el && el.dataset.petf === 'quick') {
+        saveQuiet({ quick: el.value }).then((r) => { if (r && r.cfg) el.value = (r.cfg.quick || []).join('|'); });
+      }
+    };
+    box.onclick = (e) => {
+      const ch = e.target.closest('[data-petchar]');
+      if (ch) {
+        if (ch.dataset.petchar !== c.char) {
+          box.querySelectorAll('.charc').forEach((x) => x.classList.toggle('on', x === ch));
+          saveQuiet({ char: ch.dataset.petchar }).then((r) => {
+            api('GET', '/api/pet/file').then((f) => { const t = $('#petFile'); if (t) t.value = f.text; });
+            const cnt = box.querySelector('[data-petcount]');
+            if (cnt && r && r.state) cnt.textContent = r.state.msgs;
+          });
+        }
+        return;
+      }
+      const sg = e.target.closest('[data-petseg]');
+      if (sg) {
+        sg.parentElement.querySelectorAll('b').forEach((x) => x.classList.toggle('on', x === sg));
+        saveQuiet({ [sg.dataset.petseg]: sg.dataset.v });
+        return;
+      }
       const el = e.target.closest('[data-petf]');
       if (!el) return;
       const k = el.dataset.petf;
       if (k === 'on' || k === 'speak_up') {
-        petSave({ [k]: !el.classList.contains('on') }).then(() => renderPetSec(box));
+        const on = !el.classList.contains('on');
+        el.classList.toggle('on', on);
+        saveQuiet({ [k]: on });
       } else if (k === 'saveFile') {
         api('PUT', '/api/pet/file', { text: $('#petFile').value })
-          .then(() => notify('ok', '寵物檔存好了', '下一次牠講話就用新的。'))
+          .then(() => notify('ok', '角色檔存好了', '牠下一句就用新的。'))
           .catch((err) => notify('error', '存不起來', err.message));
       } else if (k === 'reset') {
-        confirmBox('清掉牠記得的事？', '牠自己的對話與摘要會清空，主對話不受影響。', { ok: '清空', danger: true })
-          .then((ok) => ok && api('POST', '/api/pet/reset', {}).then(() => renderPetSec(box)));
-      }
-    };
-    box.onchange = (e) => {
-      const el = e.target.closest('[data-petf]');
-      if (!el) return;
-      const k = el.dataset.petf;
-      if (k === 'quick') { petSave({ quick: el.value }).then(() => renderPetSec(box)); return; }
-      if (['model', 'max_out', 'every_sec', 'peek', 'ctx', 'keep'].includes(k)) {
-        petSave({ [k]: el.value }).then(() => renderPetSec(box));
+        confirmBox('清掉牠記得的事？', '牠自己的對話與筆記會清空，主對話不受影響。', { ok: '清空', danger: true })
+          .then((ok) => ok && api('POST', '/api/pet/reset', {}).then(() => {
+            PET.hist = []; PET.lastPetId = ''; petLoad();
+            const cnt = box.querySelector('[data-petcount]');
+            if (cnt) cnt.textContent = '0';
+          }));
       }
     };
   }).catch((err) => { box.innerHTML = `<div class="errbox">讀取失敗：${esc(err.message)}</div>`; });

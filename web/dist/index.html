@@ -7,7 +7,7 @@
 <script src="theme.js?v=15"></script>
 <link rel="icon" type="image/png" href="brand/favicon.png">
 <link rel="stylesheet" href="vendor/hljs.css">
-<link rel="stylesheet" href="app.css?v=103">
+<link rel="stylesheet" href="app.css?v=118">
 </head>
 <body>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
@@ -92,14 +92,15 @@
       <div class="composer">
         <div class="cwrap">
           <div class="taskbar" id="taskBar" hidden></div>
+          <div class="bgrun" id="bgRun" hidden></div>
           <div class="queuebox" id="queueBox" hidden></div>
-          <div class="inject" id="runHint"><span class="spin"></span>執行中 · 輸入後按 Enter 插入下一步 · Esc 停止</div>
+          <div class="inject" id="runHint"><span class="spin"></span>執行中 · Enter 排隊 · Esc 停止</div>
           <span class="tobottom" id="toBottom" title="回到最新"><svg><use href="#i-down"/></svg></span>
           <div class="attach" id="attach"></div>
           <div class="cbox" id="cbox">
             <textarea id="input" rows="1" placeholder="輸入訊息，Enter 送出，Shift+Enter 換行"></textarea>
             <div class="cbar">
-              <span class="ic" id="plusBtn" title="附加圖片、壓縮上下文"><svg><use href="#i-plus"/></svg></span>
+              <span class="ic" id="plusBtn" title="附加檔案或圖片、壓縮上下文"><svg><use href="#i-plus"/></svg></span>
               <span class="pill" id="modePill" data-spick="mode" title="對話模式"><span id="modePillTxt">一般</span><svg><use href="#i-down"/></svg></span>
               <span class="pill" id="permPill" title="工具執行權限"><svg><use href="#i-shield"/></svg><span id="permPillTxt">自動執行</span></span>
               <span class="cgap"></span>
@@ -109,10 +110,10 @@
               <span class="ic tipc" id="steerBtn" hidden data-tip="插話：在下一次工具呼叫後送進目前回合，不中斷"><svg><use href="#i-steer"/></svg></span><span class="ic tipc" id="queueBtn" hidden data-tip="排隊訊息　Ctrl+Enter"><svg><use href="#i-layers"/></svg></span>
               <button class="send" id="sendBtn" title="送出"><svg><use href="#i-up"/></svg></button>
             </div>
-            <input type="file" id="fileIn" accept="image/*" multiple hidden>
+            <input type="file" id="fileIn" multiple hidden>
           </div>
           <div class="pop" id="plusMenu">
-            <div class="mi" data-act="image"><svg><use href="#i-image"/></svg>附加圖片<small>也可以直接貼上或拖進來</small></div>
+            <div class="mi" data-act="image"><svg><use href="#i-image"/></svg>附加檔案或圖片<small>什麼檔都可以：xlsx、pdf、程式碼；也可以直接貼上或拖進來</small></div>
             <div class="mi" data-act="compact"><svg><use href="#i-compress"/></svg>壓縮上下文<small>把較早的訊息摘要起來</small></div>
           </div>
           <div class="pop wide" id="modelMenu">
@@ -176,11 +177,11 @@
           <div class="pethist" id="petHist"></div>
           <div class="petstage">
             <div class="petbubs" id="petBub"></div>
-            <img id="petImg" alt="" draggable="false">
+            <img id="petImg" alt="" draggable="false" data-pet="boop" title="摸摸牠">
             <div class="petname"><b id="petName" class="noi18n">沃夫</b><span id="petMood"></span></div>
           </div>
           <div class="petsug" id="petSug"></div>
-          <div class="petin"><textarea id="petIn" rows="1" placeholder="跟沃夫說話…"></textarea><button class="petSend" data-pet="say" title="送出"><svg viewBox="0 0 24 24"><path d="M12 19V5M5.5 11.5 12 5l6.5 6.5"/></svg></button></div>
+          <div class="petin"><textarea id="petIn" rows="1" placeholder="跟沃夫說話…"></textarea><button class="send go petSend" data-pet="say" title="送出"><svg><use href="#i-up"/></svg></button></div>
         </div>
       </div>
       <div class="pane on" id="paneTasks"></div>
@@ -200,6 +201,6 @@
 <script src="vendor/purify.min.js"></script>
 <script src="vendor/highlight.min.js"></script>
 <script src="i18n_en.js?v=32"></script>
-<script src="app.js?v=163"></script>
+<script src="app.js?v=178"></script>
 </body>
 </html>

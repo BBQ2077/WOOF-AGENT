@@ -70,11 +70,12 @@ def register(woof):
     used: dict[str, int] = {}  # 每個使用者回合已派出的子代理數（擋住模型反覆派工燒錢）
 
     async def delegate_task(args: dict, tctx) -> dict:
-        from woof.agent.loop import run_subagent
+        from woof.agent.loop import run_subagent_bg
 
         parent = getattr(tctx, "turn", None)
         if parent is None:
             return {"output": "這個環境不能開子代理", "is_error": True}
+        follow = str(args.get("session_id") or "").strip()
         tasks = args.get("tasks") or []
         if args.get("goal"):
             tasks = [{"goal": args["goal"], "context": args.get("context", "")}] + list(tasks)
@@ -104,47 +105,68 @@ def register(woof):
 
         async def one(i: int, t: dict):
             label = f"[{i + 1}] " if len(tasks) > 1 else ""
-            await progress(f"{label}開始：{str(t['goal']).strip()[:80]}")
             try:
                 ctx_text = (_rules(t) + "\n" + str(t.get("context") or "")).strip()
-                if t.get("mode") == "write":
-                    await progress(f"{label}寫入模式：排隊等待（同一時間只跑一個寫入子代理）")
-                    async with _WRITE_LOCK:
-                        r = await run_subagent(parent, str(t["goal"]), ctx_text, str(t.get("model") or ""), progress, label, **_kw(t, parent))
-                else:
-                    r = await run_subagent(parent, str(t["goal"]), ctx_text, str(t.get("model") or ""), progress, label, **_kw(t, parent))
-                await progress(f"{label}完成（{r['steps']} 次工具）")
-                return r
+                kw = _kw(t, parent)
+                sid = follow if (follow and i == 0) else ""
+                if sid:
+                    # 它還在跑：這句話是插話（催進度／追加要求），不要再開一輪
+                    from woof.agent.loop import AGENT_RUNS, push_steer
+                    if sid in AGENT_RUNS:
+                        from woof.agent import internal as _internal
+                        push_steer(sid, [{"type": "text", "text": str(t["goal"])}],
+                                   _internal.meta("subagent_followup"))
+                        from woof.agent import tasks as _t
+                        last = (_t.last_text(sid, "assistant") or "").strip().replace("\n", " ")[:160]
+                        return {"steered": True, "session_id": sid, "last": last}
+                write = t.get("mode") == "write"
+                if write:
+                    await progress(f"{label}寫入模式：排隊（同一時間只跑一個寫入子代理，主對話不用等）")
+                return await run_subagent_bg(
+                    parent, str(t["goal"]), ctx_text, str(t.get("model") or ""), None, label,
+                    read_only=not write, write_scope=kw.get("write_scope"), session_id=sid,
+                    kind="subagent_followup" if sid else "subagent_task",
+                    lock=_WRITE_LOCK if write else None)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 await progress(f"{label}失敗：{e}")
                 return {"error": f"{type(e).__name__}: {e}", "goal": t["goal"]}
 
+        from woof.agent.loop import SUB_BATCH
+        import uuid as _uuid
+        SUB_BATCH.set(_uuid.uuid4().hex[:8])   # 這一次派出的算同一批；gather 會把這個值帶進每個子任務
         results = await asyncio.gather(*[one(i, t) for i, t in enumerate(tasks)])
         parts, bad = [], 0
         for i, r in enumerate(results):
-            head = f"## 子任務 {i + 1}" if len(results) > 1 else "## 子代理結果"
+            head = f"## 子任務 {i + 1}" if len(results) > 1 else "## 子代理"
             if "error" in r:
                 bad += 1
-                parts.append(f"{head}（失敗）\n{r['error']}")
+                parts.append(f"{head}（派不出去）\n{r['error']}")
+            elif r.get("steered"):
+                parts.append(f"{head}它還在跑，這句話已經送進去了（對話 {r.get('session_id')}）："
+                             "它這一步跑完就會看到，不用重派、也不用再催。要它的結論就等它自己回報。"
+                             + (f"\n它最後在做的：{r['last']}" if r.get("last") else ""))
+            elif r.get("background") or r.get("pending"):
+                sid = r.get("session_id") or ""
+                parts.append(f"{head}已派出，不用等它。\n"
+                             f"對話 {sid}（{r.get('model') or '子代理模型'}）在背景跑，跑完會自己把報告送回來。"
+                             f"你可以先用一句話跟使用者說「派出去了，我在這裡陪你等」，或繼續別的動作；"
+                             f"不要停下來等它，也不要反覆呼叫 delegate_task 去催。"
+                             f"使用者也可以直接在那條子對話裡打字跟它講話。")
             else:
-                facts = []
-                if r.get("files_touched"):
-                    facts.append("改過的檔：" + "、".join(r["files_touched"]))
-                if r.get("commands_run"):
-                    facts.append("跑過的指令：" + "；".join(r["commands_run"]))
-                if r.get("errors"):
-                    facts.append("出錯的工具：" + "；".join(r["errors"]))
-                tail = ("\n\n［實際紀錄］\n" + "\n".join(facts)) if facts else ""
-                parts.append(f"{head}（{r['model']}，{r['steps']} 次工具，對話 {r['session_id']}）\n{r['answer']}{tail}")
+                parts.append(f"{head}\n{r}")
         return {"output": "\n\n".join(parts), "is_error": bad == len(results)}
 
     woof.add_tool(
         "delegate_task",
         "把獨立、可以分開做的子任務交給子代理。子代理有自己乾淨的上下文和全部工具，做完只回傳報告，"
         "適合：大量搜尋或讀檔、互不相關的平行工作、會塞爆上下文的調查。"
-        "子代理看不到目前的對話，goal 和 context 要寫清楚完整需求、路徑和限制。",
+        "子代理看不到目前的對話，goal 和 context 要寫清楚完整需求、路徑和限制。"
+        "派出後不會等你：主對話可以繼續跟使用者說話，它跑完會自己把報告送回來。"
+        "要知道它在幹嘛、催進度、追加要求：帶同一個 session_id 再呼叫一次——它還在跑就是插話，不會重開一輪；跑完過再接續就是接著同一份上下文繼續。不用等它，也不要一直問同一句。\n"
+        "要接續同一個子代理（同一個對話、同一份上下文）就填 session_id，不要重開一個。"
+        "它跑的時候會出現在側欄（子代理那條），使用者可以直接在那條對話裡追加要求，它下一步就看得到。",
         {"type": "object", "properties": {
             "goal": {"type": "string", "description": "單一子任務：要達成什麼、完成標準"},
             "context": {"type": "string", "description": "子代理需要知道的背景：路徑、已知事實、限制"},
@@ -153,6 +175,8 @@ def register(woof):
             "scope": {"type": "string", "description": "write 模式才需要：允許修改的路徑（例如 data/report/）。範圍外不准動"},
             "model": {"type": "string", "description": "選填。換別的模型做：只能用使用者在設定裡開放的模型（填錯會告訴你可用的）；"
                                                           "簡單、量大的工作挑便宜的。不填＝預設子代理模型"},
+            "session_id": {"type": "string",
+                           "description": "接續既有的子代理對話（之前 delegate_task 回傳的 id）：同一個對話、同一份上下文繼續講，不要重開"},
             "tasks": {"type": "array", "description": "多個子任務，每個可以是 {goal, context, mode, scope}",
                       "items": {"type": "object", "properties": {
                           "goal": {"type": "string"}, "context": {"type": "string"},

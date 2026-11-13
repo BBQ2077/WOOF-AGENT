@@ -21,8 +21,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import cron, keypool, procs, remote, store
-from .agent.loop import (flush_steer, mark_interrupted, peek_steer, pending_approvals, pop_steer, push_steer,
-                         requeue_steer, reset_allow_all,
+from .agent.loop import (AGENT_RUNS, flush_steer, mark_interrupted, peek_steer, pending_approvals, pop_steer,
+                         push_steer, requeue_steer, reset_allow_all,
                          resolve_approval, resume_session, run_turn)
 from . import config
 from .config import DATA, PLUGINS, WEB_DIST, load_config, load_keys, save_config, save_keys
@@ -32,6 +32,8 @@ from .prompts import get as _prompt_get
 log = logging.getLogger("woof.server")
 UPLOADS = DATA / "uploads"
 UPLOADS.mkdir(exist_ok=True)
+FILES = DATA / "files"   # 使用者附加的檔案（xlsx、pdf、程式碼…），跟貼圖一樣跟對話一起刪
+FILES.mkdir(exist_ok=True)
 
 app = FastAPI(title="WOOF")
 TOKEN: str = ""
@@ -82,7 +84,29 @@ async def _watch_bg_tasks() -> None:
                                  "ms": int((t.ended - t.started) * 1000)})
 
 
+def _busy(sid: str | None) -> bool:
+    """這個對話是不是「還有事在跑」：回合、目標／方案、對抗審核子代理、等人回答的提問。
+    前端用它決定要不要顯示「上一回合沒做完」——還在跑就不該顯示，會讓人以為卡死。"""
+    if not sid:
+        return False
+    from woof.agent import tasks as _tasks
+
+    if sid in RUNS and not RUNS[sid].done():
+        return True
+    if sid in AGENT_RUNS:
+        return True
+    try:
+        if _tasks.is_running(sid) or _tasks.has_ask(sid):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 async def broadcast(ev: dict) -> None:
+    sid = ev.get("session_id")
+    if sid and "busy" not in ev:
+        ev["busy"] = _busy(sid)   # 每個事件都順便告訴前端「這個對話還在不在跑」
     dead = []
     for ws in list(CLIENTS):
         try:
@@ -287,7 +311,7 @@ async def quota_api(force: int = 0):
 @app.get("/api/prompt-files")
 async def prompt_files_list():
     from woof import promptfiles
-    return {"files": [promptfiles.info(k) for k in promptfiles.ORDER], "order": promptfiles.ORDER}
+    return {"files": [promptfiles.info(k) for k in promptfiles.TABS], "order": promptfiles.TABS}
 
 
 @app.put("/api/prompt-files/{key}")
@@ -296,6 +320,19 @@ async def prompt_file_save(key: str, body: dict):
     if key not in promptfiles.KEYS:
         raise HTTPException(404)
     promptfiles.write(key, str(body.get("text") or ""))
+    return promptfiles.info(key)
+
+
+@app.put("/api/prompt-files/{key}/limit")
+async def prompt_file_limit(key: str, body: dict):
+    """改字數上限（存在 data/prompt_limits.json，預設值在 woof/promptfiles.py）。"""
+    from woof import promptfiles
+    if key not in promptfiles.KEYS:
+        raise HTTPException(404)
+    try:
+        promptfiles.set_limit(key, body.get("limit"))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     return promptfiles.info(key)
 
 
@@ -754,6 +791,19 @@ async def pet_glance(body: dict):
     return {"state": pet.state(), "spoke": bool(r), "history": pet.history()[-40:]}
 
 
+@app.post("/api/pet/poke")
+async def pet_poke(body: dict):
+    """使用者點了牠的圖（摸頭）；連點幾下算一次，帶次數。"""
+    from . import pet
+
+    n = int((body or {}).get("n") or 1)
+    sid = (body or {}).get("session_id") or None
+    r = await pet.talk(pet.poke_text(n), sid, broadcast, kind="poke")
+    if r.get("error"):
+        raise HTTPException(400, r["error"])
+    return {**r, "history": pet.history()[-40:]}
+
+
 @app.post("/api/pet/react")
 async def pet_react(body: dict):
     """使用者對牠的某一則按表情；同一個再按一次就收回。"""
@@ -857,7 +907,10 @@ async def groups_delete(gid: str, sessions: int = 0):
 
 @app.get("/api/sessions")
 async def sessions():
-    return store.list_sessions()
+    rows = store.list_sessions()
+    for r in rows:
+        r["busy"] = _busy(r.get("id"))
+    return rows
 
 
 @app.post("/api/sessions")
@@ -880,6 +933,8 @@ async def create_session(body: dict):
 @app.patch("/api/sessions/{sid}")
 async def patch_session(sid: str, body: dict):
     allowed = {k: v for k, v in body.items() if k in ("title", "model", "effort", "pinned", "perm", "archived", "grp")}
+    if "parent" in body and not body.get("parent"):
+        allowed["parent"] = None   # 把子代理拖出來變成獨立對話（只能拆開，不能掛到別人底下）
     if "grp" in allowed:
         gid = str(allowed["grp"] or "")
         allowed["grp"] = gid if gid and any(g["id"] == gid for g in store.list_groups()) else None
@@ -916,9 +971,12 @@ async def _purge_sessions(ids: list[str]) -> int:
     from . import pty, snapshot
     for x in ids:
         pty.close_session(x)
+    from . import uploads
     for x in ids:
         s = store.get_session(x)
+        pics = uploads.files_of(x)      # 要在刪訊息之前問，刪完就查不到誰在用
         store.delete_session(x)
+        uploads.remove(pics)
         snapshot.drop(x)
         if s:
             await REG.events.emit("on_session", "delete", s)
@@ -1412,6 +1470,11 @@ async def _snapshot_housekeeping():
         try:
             live = {s["id"] for s in store.list_sessions()}
             await asyncio.to_thread(snapshot.prune, live)
+            from . import uploads
+
+            n, size = await asyncio.to_thread(uploads.gc)
+            if n:
+                logging.getLogger("woof").info("回收沒人用的貼圖 %d 張（%.1f MB）", n, size / 1e6)
         except Exception:
             logging.getLogger("woof").exception("整理快照失敗")
         await asyncio.sleep(6 * 3600)
@@ -1890,7 +1953,53 @@ async def get_file(path: str):
     return FileResponse(p, media_type=mimetypes.guess_type(p.name)[0] or "application/octet-stream")
 
 
+@app.post("/api/paste")
+async def save_paste(body: dict):
+    """貼上的長文存成檔案（跟貼圖同一條生命週期：對話刪掉一起刪）。"""
+    from . import uploads
+
+    text = str(body.get("text") or "")
+    if not text:
+        raise HTTPException(400, "沒有內容")
+    p = await asyncio.to_thread(uploads.save_paste, text)
+    return {"path": str(p), "name": p.name, "bytes": len(text.encode("utf-8"))}
+
+
 # ---------------------------------------------------------------- WebSocket
+def _save_files(items: list[dict]) -> list[dict]:
+    """附加檔案（不是圖）：原檔存進 data/files，訊息裡留位置給模型自己讀。"""
+    blocks = []
+    for it in items or []:
+        raw = it.get("data") or ""
+        if not raw:
+            continue
+        name = str(it.get("name") or "附件")
+        ext = Path(name).suffix[:10] or mimetypes.guess_extension(it.get("media_type") or "") or ".bin"
+        if not re.fullmatch(r"\.[A-Za-z0-9]{1,9}", ext):
+            ext = ".bin"
+        try:
+            data = base64.b64decode(raw)
+        except Exception:
+            continue
+        path = FILES / f"{uuid.uuid4().hex[:12]}{ext}"
+        path.write_bytes(data)
+        blocks.append({"type": "file", "path": str(path), "name": name, "bytes": len(data)})
+    return blocks
+
+
+def _file_notes(blocks: list[dict]) -> list[dict]:
+    """把檔案位置寫成一行人看得懂、模型也讀得懂的說明。"""
+    out = []
+    for b in blocks:
+        if b.get("type") != "file":
+            continue
+        kb = b.get("bytes") or 0
+        size = f"{kb / 1048576:.1f} MB" if kb >= 1048576 else f"{max(1, round(kb / 1024))} KB"
+        out.append({"type": "text", "text": f"（附件：{b['name']}（{size}），已存成檔案：{b['path']}；"
+                                            "需要內容時用 read_file 讀，二進位檔用 terminal 轉文字）"})
+    return out
+
+
 def _save_images(images: list[dict]) -> list[dict]:
     blocks = []
     for im in images or []:
@@ -1957,8 +2066,18 @@ async def _note_interrupted(sid: str, reason: str, kind: str) -> None:
 
 
 async def _continue_session(sid: str, reason: str) -> None:
+    from .agent import tasks as _tasks
     from .agent.internal import meta as _imeta
-    m = store.add_message(sid, "user", [{"type": "text", "text": _prompt_get("resume", reason=reason)}], _imeta("resume"))
+
+    text = _prompt_get("resume", reason=reason)
+    try:
+        digest = _tasks.resume_digest(sid)
+    except Exception:
+        log.exception("組接續摘要失敗")
+        digest = ""
+    if digest:
+        text = text.rstrip() + "\n\n" + digest
+    m = store.add_message(sid, "user", [{"type": "text", "text": text}], _imeta("resume"))
     await broadcast({"type": "message", "session_id": sid, "message": m})
     await resume_session(sid, broadcast)
     await asyncio.sleep(0)
@@ -2154,13 +2273,13 @@ async def start_goal_ep(sid: str, body: dict):
 
 @app.post("/api/sessions/{sid}/gate")
 async def set_gate(sid: str, body: dict):
-    """先提方案模式：off 關閉；human 方案由人工審核；model 方案由子代理審核。"""
+    """先提方案模式：off 關閉；human 人工核准；model 子代理審核；expand 先思維拓展再驗收。"""
     s = store.get_session(sid)
     if not s:
         raise HTTPException(404)
     mode = str(body.get("mode") or "off")
-    if mode not in ("off", "human", "model"):
-        raise HTTPException(400, "mode 只能是 off、human、model")
+    if mode not in ("off", "human", "model", "expand"):
+        raise HTTPException(400, "mode 只能是 off、human、model、expand")
     st = dict(s.get("engine_state") or {})
     st["gate"] = mode
     store.update_session(sid, engine_state=st)
@@ -2239,6 +2358,9 @@ async def ws_endpoint(ws: WebSocket):
             sid = msg.get("session_id")
             if t == "send" and sid:
                 blocks = _save_images(msg.get("images") or [])
+                fblocks = _save_files(msg.get("files") or [])
+                blocks += fblocks
+                blocks += _file_notes(fblocks)
                 if (msg.get("text") or "").strip():
                     blocks.append({"type": "text", "text": msg["text"]})
                 if not blocks:
@@ -2249,17 +2371,41 @@ async def ws_endpoint(ws: WebSocket):
                     await ws.send_json({"type": "error", "session_id": sid,
                                         "text": f"這個對話的模型「{_sm}」已經不在模型清單裡（被刪除或改名），請在右下角重選一個模型再送"})
                     continue
+                # 有提問卡在等（一般回合、方案、目標流程都一樣）：這一則訊息就是那一題的回答。
+                # 不先結掉的話會走到「已有目標或方案在執行」被擋下，兩邊一起卡住。
+                from woof.agent import tasks as _tasksq
+
+                if _tasksq.has_ask(sid):
+                    _tasksq.skip_ask(sid, (msg.get("text") or "").strip() or "（使用者直接回話，沒有文字內容）")
+                    await broadcast({"type": "notice", "session_id": sid, "text": "已用你這則訊息回答剛才的提問"})
+                    continue
                 async with TURN_LOCK:
                     running = sid in RUNS and not RUNS[sid].done()
-                    if running:
+                    agent_running = (not running) and sid in AGENT_RUNS
+                    if running or agent_running:
+                        # 有提問卡在等：使用者這次送訊息就當成回答，先把它結掉，
+                        # 否則回合會卡在等那張卡（插話也要等這一步結束才送得進去）
+                        from woof.agent import tasks as _tasksx
+
+                        if _tasksx.skip_ask(sid):
+                            await broadcast({"type": "notice", "session_id": sid, "text": "已用你這則訊息回答剛才的提問"})
                         push_steer(sid, blocks)
                         steered = True
+                        if agent_running:
+                            # 子代理還在自己那條對話裡跑：這一步跑完就會看到追加要求，不用重開
+                            await broadcast({"type": "notice", "session_id": sid,
+                                             "text": "已把追加要求送給子代理，它這一步跑完就會看到"})
                     else:
                         steered = False
                         gate = ((store.get_session(sid) or {}).get("engine_state") or {}).get("gate") or "off"
                         if gate in ("human", "model") and (msg.get("text") or "").strip():
                             from woof.agent import tasks as _tasks
 
+                            if _tasks.is_running(sid):
+                                # 已經有方案在跑：不要存這則也不要開新的（原本會存進去再被擋下，看起來像沒反應）
+                                await ws.send_json({"type": "notice", "session_id": sid,
+                                                    "text": "方案／目標還在跑：要回答它的提問直接打字送，要中止按停止。這則沒有送出去"})
+                                continue
                             m = store.add_message(sid, "user", blocks)
                             await broadcast({"type": "message", "session_id": sid, "message": m})
                             s_new = store.auto_title(sid, msg["text"].strip())
@@ -2321,8 +2467,11 @@ async def _stop_session(sid: str) -> None:
     if task and not task.done():
         task.cancel()
     procs.stop_session_tasks(sid)
+    from woof.agent import loop as _loop
     from woof.agent import tasks as _tasks
+
     _tasks.stop_goal(sid)
+    _loop.stop_agent(sid)   # 子代理對話：停掉它自己的背景任務
     for eng in REG.engines.values():
         stop = getattr(eng, "stop", None)
         if stop:

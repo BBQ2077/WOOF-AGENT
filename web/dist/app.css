@@ -102,18 +102,19 @@ kbd{font-family:var(--mono);font-size:10px;color:var(--faint);border:1px solid v
 .tab .wait{width:7px;height:7px;border-radius:50%;background:var(--warn);flex:none}
 .tabnew{width:26px;height:30px;display:grid;place-items:center;color:var(--dim);cursor:pointer;flex:none;font-size:15px}
 .tabnew:hover{color:var(--text)}
-.chat{flex:1;overflow-y:auto;padding:28px 0 12px;font-size:var(--chat-fs)}
-.msg{max-width:820px;margin:0 auto 16px;padding:0 32px}
+.chat{flex:1;overflow-y:auto;padding:14px 0 8px;font-size:var(--chat-fs)}
+/* 對話串走緊湊路線：同樣一屏塞得下更多資訊，行距縮、區塊間距縮 */
+.msg{max-width:820px;margin:0 auto 10px;padding:0 28px}
 .msg.user{display:flex;flex-direction:column;align-items:flex-end;gap:6px}
 .bubble{background:var(--bubble);padding:9px 14px;border-radius:16px 16px 4px 16px;max-width:80%;white-space:pre-wrap;word-break:break-word;line-height:1.6}
 .msg.user.pending .bubble{opacity:.55;border:1px dashed var(--line2)}
 .thumbs{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
 .thumbs img{max-width:220px;max-height:160px;border-radius:var(--r);cursor:zoom-in;border:1px solid var(--line)}
-.who{font-size:12px;color:var(--faint);margin-bottom:6px;font-weight:600}
-.md{line-height:1.7;word-break:break-word}
+.who{font-size:11.5px;color:var(--faint);margin-bottom:3px;font-weight:600}
+.md{line-height:1.6;word-break:break-word}
 .md>*:first-child{margin-top:0}
-.md p{margin:7px 0}.md ul,.md ol{margin:7px 0 7px 22px}.md li{margin:3px 0}
-.md h1,.md h2,.md h3,.md h4{margin:16px 0 6px;line-height:1.4}.md h1{font-size:1.4em}.md h2{font-size:1.2em}.md h3{font-size:1.05em}
+.md p{margin:4px 0}.md ul,.md ol{margin:4px 0 4px 20px}.md li{margin:2px 0}
+.md h1,.md h2,.md h3,.md h4{margin:11px 0 4px;line-height:1.35}.md h1{font-size:1.32em}.md h2{font-size:1.16em}.md h3{font-size:1.04em}
 .md code{background:var(--code-inline);padding:1px 5px;border-radius:4px;font-family:var(--mono);font-size:.88em}
 .md pre{background:var(--code);border:1px solid var(--line);border-radius:var(--r);padding:12px 14px;margin:10px 0;overflow:auto;position:relative}
 .md pre code{background:none;padding:0;color:var(--code-text);font-size:12.5px;line-height:1.55}
@@ -126,15 +127,15 @@ kbd{font-family:var(--mono);font-size:10px;color:var(--faint);border:1px solid v
 .md img{max-width:100%;border-radius:var(--r)}
 .md hr{border:0;border-top:1px solid var(--line);margin:14px 0}
 .cursor{display:inline-block;width:7px;height:1.05em;background:var(--text);vertical-align:text-bottom;margin-left:2px;animation:pulse 1s infinite;border-radius:1px}
-.think{margin:6px 0 10px;border-left:2px solid var(--line2);padding-left:12px}
-.think summary{cursor:pointer;color:var(--dim);font-size:12px;list-style:none;user-select:none}
+.think{margin:2px 0 5px;border-left:2px solid var(--line2);padding-left:10px}
+.think summary{cursor:pointer;color:var(--dim);font-size:11.5px;line-height:1.5;list-style:none;user-select:none}
 .think summary::-webkit-details-marker{display:none}
 .think summary::before{content:"▸ ";color:var(--faint)}
 .think[open] summary::before{content:"▾ "}
 .think summary small{color:var(--faint)}
-.think .tx{white-space:pre-wrap;color:var(--dim);font-size:12.5px;line-height:1.6;margin-top:6px;max-height:300px;overflow:auto}
-.tool{border:1px solid var(--line);border-radius:var(--r);margin:8px 0;background:var(--panel2);overflow:hidden}
-.tool .th{display:flex;align-items:center;gap:8px;padding:0 10px;height:34px;cursor:pointer;font-size:12.5px}
+.think .tx{white-space:pre-wrap;color:var(--dim);font-size:11.5px;line-height:1.55;margin-top:4px;max-height:110px;overflow:auto}
+.tool{border:1px solid var(--line);border-radius:var(--r);margin:3px 0;background:var(--panel2);overflow:hidden}
+.tool .th{display:flex;align-items:center;gap:6px;padding:0 8px;height:26px;cursor:pointer;font-size:12px}
 .tool .th:hover{background:var(--hover)}
 .tool .ti{font-size:13px;width:18px;text-align:center}
 .tool .th code{color:var(--text);font-weight:600;font-family:var(--mono);flex:none;font-size:12px}
@@ -154,6 +155,11 @@ kbd{font-family:var(--mono);font-size:10px;color:var(--faint);border:1px solid v
 @keyframes s{to{transform:rotate(360deg)}}
 .stopped{color:var(--faint);font-size:12px;margin:6px 0}
 .errbox{background:var(--err-bg);color:var(--err-text);border:1px solid color-mix(in srgb,var(--bad) 22%,transparent);border-radius:var(--r);padding:9px 12px;margin:8px 0;white-space:pre-wrap;word-break:break-word;font-size:12.5px}
+/* 紅框可以自己關掉，不會一直卡在對話裡 */
+.errbox.closable{display:flex;gap:8px;align-items:flex-start;white-space:normal}
+.errbox.closable .ebtx{flex:1;min-width:0;white-space:pre-wrap;word-break:break-word}
+.errbox.closable .ebx{flex:none;cursor:pointer;opacity:.5;padding:0 2px;user-select:none;line-height:1.5;font-size:12px}
+.errbox.closable .ebx:hover{opacity:1}
 .waiting{display:flex;gap:4px;padding:8px 0}
 .waiting i{width:6px;height:6px;border-radius:50%;background:var(--faint);animation:pulse 1.2s infinite}
 .waiting i:nth-child(2){animation-delay:.2s}.waiting i:nth-child(3){animation-delay:.4s}
@@ -165,7 +171,7 @@ kbd{font-family:var(--mono);font-size:10px;color:var(--faint);border:1px solid v
 .empty .sugs span:hover{border-color:var(--line2);color:var(--text);background:var(--hover)}
 
 /* ---------- 輸入區 ---------- */
-.composer{padding:6px 32px 10px;flex:none}
+.composer{padding:6px 32px 8px;flex:none}
 .cwrap{max-width:820px;margin:0 auto;position:relative}
 .inject{display:none;align-items:center;gap:8px;font-size:11.5px;color:var(--dim);padding:0 4px 6px}
 .inject.on{display:flex}
@@ -178,7 +184,7 @@ kbd{font-family:var(--mono);font-size:10px;color:var(--faint);border:1px solid v
 .cbox{display:flex;align-items:flex-end;gap:4px;background:var(--panel2);border:1px solid var(--line2);border-radius:18px;padding:6px 6px 6px 6px;box-shadow:0 2px 10px rgb(20 30 60 / .05);transition:border-color .15s,box-shadow .15s}
 .cbox.focus{border-color:var(--focus);box-shadow:0 2px 14px rgb(15 23 42 / .07)}
 .cbox.drag{border-color:var(--acc);border-style:dashed;background:var(--acc-soft)}
-.cbox textarea{flex:1;border:0;outline:0;background:none;resize:none;padding:7px 6px;line-height:1.55;max-height:260px;min-height:34px;font-size:var(--chat-fs)}
+.cbox textarea{flex:1;border:0;outline:0;background:none;resize:none;padding:7px 6px;line-height:1.55;max-height:140px;min-height:34px;font-size:var(--chat-fs)}
 .cbox textarea::placeholder{color:var(--faint)}
 .ic{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;cursor:pointer;color:var(--dim);flex:none}
 .ic svg{width:19px;height:19px}
@@ -566,11 +572,11 @@ input[type=checkbox]{width:15px;height:15px;accent-color:var(--acc);flex:none;cu
 .dropzone.drag{border-color:var(--acc);background:var(--acc-soft);color:var(--text)}
 
 /* ---------- 訊息操作 ---------- */
-.acts{display:flex;align-items:center;gap:2px;margin-top:4px;opacity:0;transition:opacity .12s;color:var(--faint);font-size:11.5px;min-height:26px}
+.acts{display:flex;align-items:center;gap:2px;margin-top:1px;opacity:0;transition:opacity .12s;color:var(--faint);font-size:11px;min-height:18px}
 .msg:hover .acts{opacity:1}
 .msg.last .acts{opacity:1}
-.acts .ib{width:26px;height:26px}
-.acts .ib svg{width:14px;height:14px}
+.acts .ib{width:20px;height:20px}
+.acts .ib svg{width:13px;height:13px}
 .acts .meta{margin:0 6px;white-space:nowrap}
 .msg.user .acts{justify-content:flex-end}
 .editbox{width:min(100%,660px);display:flex;flex-direction:column;gap:8px;align-items:flex-end}
@@ -662,11 +668,15 @@ body.resizing iframe,body.resizing webview{pointer-events:none}
 .taskbar{padding:10px 18px 0;max-width:860px;margin:0 auto;width:100%;box-sizing:border-box}
 .taskbar[hidden]{display:none}
 .askcard{background:var(--panel);border:1px solid var(--acc);border-radius:12px;padding:12px 14px;margin-bottom:10px}
+/* ask_user 卡片放在對話串裡：跟著內容捲，不佔輸入區版面 */
+.askmsg .askcard{margin-bottom:16px}
+.askmsg .askcard .q{white-space:pre-wrap;word-break:break-word;line-height:1.6}
 .askcard .q{font-weight:600;margin-bottom:8px}
 .askcard .opts{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
 .askcard .ansrow{display:flex;gap:6px}
 .askcard .ansrow input{flex:1;border:1px solid var(--line2);border-radius:8px;padding:6px 8px;background:transparent;color:inherit;font:inherit}
-.todos{background:var(--panel);border:1px solid var(--line2);border-radius:12px;padding:8px 12px;margin-bottom:10px;font-size:13px}
+.todos{background:var(--panel);border:1px solid var(--line2);border-radius:12px;padding:6px 12px;margin-bottom:0;font-size:13px;max-height:150px;overflow:auto}
+.todos[open]{max-height:150px}
 .todos summary{cursor:pointer;font-weight:600}
 .todo{padding:3px 0}
 .todo .ti{display:inline-block;width:18px;opacity:.6}
@@ -674,8 +684,21 @@ body.resizing iframe,body.resizing webview{pointer-events:none}
 .todo.done{opacity:.55;text-decoration:line-through}
 .todo.failed{color:var(--warn)}
 
-.subtog{font-size:12px;opacity:.7;padding:4px 10px 4px 22px;cursor:pointer;user-select:none}
-.subtog:hover{opacity:1}
+.subtog,.subbatch{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dim);padding:3px 8px 3px 22px;margin:0 6px;
+  border-radius:7px;cursor:pointer;user-select:none;min-height:22px}
+.subbatch{padding-left:36px;font-size:11.5px;color:var(--faint)}
+.subtog:hover,.subbatch:hover{background:var(--hover);color:var(--text)}
+.subtog .car,.subbatch .car{width:10px;flex:none;font-size:10px;color:var(--faint)}
+.subtog .lab,.subbatch .lab{white-space:nowrap}
+.subtog.rev .lab::before{content:'✓ ';color:var(--acc)}
+.subtog .srun{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--acc)}
+.subbatch .when{font-size:10.5px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.subtog .sdel,.subbatch .sdel{margin-left:auto;width:18px;height:18px;display:grid;place-items:center;border-radius:5px;opacity:0;flex:none;color:var(--faint)}
+.subtog .sdel svg,.subbatch .sdel svg{width:11px;height:11px}
+.subtog:hover .sdel,.subbatch:hover .sdel{opacity:1}
+.subtog .sdel:hover,.subbatch .sdel:hover{background:var(--line);color:var(--red,#d33)}
+.item.child.deep{padding-left:40px}
+.grp[data-drop].drop{background:var(--acc-soft);color:var(--acc);border-radius:6px}
 .subfold{margin:6px 0}
 .subfold>summary{cursor:pointer;font-size:13px;opacity:.75;list-style:none}
 .subfold[open]>summary{opacity:1}
@@ -709,7 +732,7 @@ details.internal .ibody{white-space:pre-wrap;margin:6px 0 2px;font:12px/1.5 ui-m
 
 /* ---- v24 輸入區：文字框獨占一列，工具列在下方；統一下拉選單；內部指令標籤不換行 */
 .cbox{display:flex;flex-direction:column;align-items:stretch;gap:0;padding:10px 12px 8px 16px}
-.cbox textarea{width:100%;flex:none;box-sizing:border-box;min-height:40px;max-height:240px}
+.cbox textarea{width:100%;flex:none;box-sizing:border-box;min-height:40px;max-height:120px}
 .cbar{display:flex;align-items:center;gap:6px;min-width:0;margin-top:4px}
 .cbar .cgap{flex:1 1 auto;min-width:4px}
 .cbar .pill{max-width:200px;min-width:0;flex:0 1 auto;height:30px;font-size:12.5px}
@@ -743,7 +766,12 @@ details.internal .ifirst{flex:1 1 0;min-width:0}
 #modelPill{max-width:240px}
 
 /* ---- v30：TODO 與排隊列放在輸入框上方；用量卡；插件範圍 */
-.cwrap > .taskbar{padding:0 4px 6px;max-width:none;margin:0}
+.cwrap > .taskbar{padding:0 4px 0;max-width:none;margin:0}
+/* 便條／繼續卡貼著輸入框：只留 4px，不要三層 padding 疊成一大塊空白 */
+.cwrap > .taskbar > :last-child{margin-bottom:4px}
+.cwrap > .taskbar > :not(:last-child){margin-bottom:6px}
+/* ---- 輸入框精簡：高度 95px → 約 60px，留 WOOF 的圓角與 pill ---- */
+
 .queuebox{display:flex;flex-direction:column;gap:4px;padding:0 4px 6px}
 .queuebox[hidden]{display:none}
 .qitem{display:flex;align-items:center;gap:8px;background:var(--panel2);border:1px solid var(--line2);border-radius:10px;padding:5px 6px 5px 8px;font-size:12.5px;min-width:0}
@@ -1531,23 +1559,26 @@ body.pane2 .win{height:100%}
 body.pane2 #paneA{padding:0}
 
 /* ---- 寵物欄：紀錄 → 頭頂泡泡（最新一則）→ 牠 → 一顆建議 → 固定回覆 → 輸入 */
-.petwrap{display:flex;flex-direction:column;height:100%;padding:12px 14px 14px;gap:10px;overflow:hidden;box-sizing:border-box}
+.petwrap{display:flex;flex-direction:column;height:100%;padding:10px 12px 12px;gap:8px;overflow:hidden;box-sizing:border-box}
 .pethead{display:flex;align-items:center;gap:8px;flex:0 0 auto;padding:0 2px}
 .petttl{font-size:12px;font-weight:600;color:var(--dim);letter-spacing:.02em}
 .petro{font-size:10px;padding:1px 6px;border-radius:5px;background:var(--hover);color:var(--faint);letter-spacing:.02em}
 .petmore{margin-left:auto;cursor:pointer;color:var(--faint);padding:0 7px;border-radius:7px;line-height:22px;font-size:15px;user-select:none}
 .petmore:hover{background:var(--hover);color:var(--text)}
 
-.pethist{flex:1 1 0;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:10px;padding:4px 30px 6px 2px;scrollbar-width:thin;scrollbar-color:transparent transparent}
-.pethist:hover{scrollbar-color:var(--line2) transparent}
-.pethist>:first-child{margin-top:auto}
+/* 紀錄：捲軸兩邊都留位置，有沒有捲軸內容都置中；捲軸滑過才看得到 */
+.pethist{flex:1 1 0;min-height:56px;overflow-y:auto;scrollbar-gutter:stable both-edges;display:flex;flex-direction:column;gap:6px;padding:2px 0 4px}
+.pethist::-webkit-scrollbar{width:6px}
+.pethist::-webkit-scrollbar-thumb{background:transparent;border:0;border-radius:3px}
 .pethist:hover::-webkit-scrollbar-thumb{background:var(--line2)}
-.pethint{color:var(--faint);font-size:12px;line-height:1.9;text-align:center;padding:18px 10px;align-self:center}
+.pethist>:first-child{margin-top:auto}
+.pethint{color:var(--faint);font-size:12px;line-height:1.8;text-align:center;padding:14px 8px;align-self:center}
+.pnote{align-self:center;font-size:11px;color:var(--faint);padding:1px 0}
 
-.pmsg{position:relative;display:flex;flex-direction:column;gap:3px;max-width:88%}
+.pmsg{position:relative;display:flex;flex-direction:column;gap:2px;max-width:80%}
 .pmsg.u{align-self:flex-end;align-items:flex-end}
 .pmsg.p{align-self:flex-start;align-items:flex-start}
-.petline{padding:8px 12px;border-radius:17px;font-size:13px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}
+.petline{padding:6px 11px;border-radius:15px;font-size:12.5px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere}
 .pmsg.u .petline{background:var(--acc);color:var(--on-acc);border-bottom-right-radius:5px}
 .pmsg.p .petline{background:var(--bubble);color:var(--text)}
 .pmsg.p .petline:not(:last-of-type){border-bottom-left-radius:5px}
@@ -1555,75 +1586,81 @@ body.pane2 #paneA{padding:0}
 .pmsg.p:not(.top) .petline:last-of-type{border-bottom-left-radius:5px}
 
 /* 訊息上的表情：貼在泡泡下緣，像 iMessage／Telegram 的反應 */
-.rx{position:relative;z-index:1;display:inline-flex;align-items:center;justify-content:center;min-width:26px;height:24px;
-  padding:0 6px;margin-top:-12px;border-radius:999px;font-size:13px;line-height:1;background:var(--panel2);
-  border:1px solid var(--line2);box-shadow:0 2px 6px rgb(20 30 60 / .10);font-family:inherit;color:inherit}
-.pmsg.u .rx{align-self:flex-start;margin-left:-6px}
-.pmsg.p .rx{align-self:flex-end;margin-right:-6px}
+.rx{position:relative;z-index:1;display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:20px;
+  padding:0 5px;margin-top:-9px;border-radius:999px;font-size:11.5px;line-height:1;background:var(--panel2);
+  border:1px solid var(--line2);box-shadow:0 1px 4px rgb(20 30 60 / .10);font-family:inherit;color:inherit}
+.pmsg.u .rx{align-self:flex-start;margin-left:-5px}
+.pmsg.p .rx{align-self:flex-end;margin-right:-5px}
 .rx.mine{cursor:pointer;background:var(--acc-soft);border-color:var(--acc)}
-.rxadd{position:absolute;right:-28px;bottom:2px;width:24px;height:24px;display:grid;place-items:center;border-radius:50%;
-  font-size:14px;color:var(--faint);background:var(--panel2);border:1px solid var(--line2);cursor:pointer;opacity:0;
+.rxadd{position:absolute;right:-24px;bottom:1px;width:20px;height:20px;display:grid;place-items:center;border-radius:50%;
+  font-size:12px;color:var(--faint);background:var(--panel2);border:1px solid var(--line2);cursor:pointer;opacity:0;
   transition:opacity .12s;user-select:none}
 .pmsg.p:hover .rxadd{opacity:1}
 .rxadd:hover{color:var(--acc);border-color:var(--acc)}
-#petRxPick{position:fixed;z-index:9100;display:flex;gap:2px;padding:5px 6px;background:var(--panel2);
+#petRxPick{position:fixed;z-index:9100;display:flex;gap:1px;padding:4px 5px;background:var(--panel2);
   border:1px solid var(--line);border-radius:999px;box-shadow:var(--shadow);animation:petpop .14s ease-out}
-#petRxPick span{width:30px;height:30px;display:grid;place-items:center;font-size:18px;border-radius:50%;cursor:pointer;transition:transform .1s}
-#petRxPick span:hover{transform:scale(1.2);background:var(--hover)}
+#petRxPick span{width:27px;height:27px;display:grid;place-items:center;font-size:16px;border-radius:50%;cursor:pointer;transition:transform .1s}
+#petRxPick span:hover{transform:scale(1.18);background:var(--hover)}
 #petRxPick span.on{background:var(--acc-soft)}
 
-/* 頭頂泡泡：牠最新的一則，尾巴指向牠 */
-.petstage{flex:0 0 auto;display:flex;flex-direction:column;align-items:center;gap:8px}
+/* 頭頂泡泡：一個泡泡；連發的幾則是段落；太長就在泡泡裡捲 */
+.petstage{flex:0 0 auto;display:flex;flex-direction:column;align-items:center;gap:6px}
 .petbubs{display:none;align-self:stretch;justify-content:center}
 .petbubs.on{display:flex}
-.pmsg.top{max-width:100%;align-items:center;gap:4px}
-.bub{max-width:100%;box-sizing:border-box;padding:9px 15px;border-radius:18px;background:var(--panel2);color:var(--text);
-  border:1px solid var(--line);box-shadow:0 6px 18px rgb(20 30 60 / .08);font-size:13.5px;line-height:1.55;
-  text-align:center;overflow-wrap:anywhere;animation:petpop .18s ease-out}
-.pmsg.top .bub:last-of-type{position:relative}
-.pmsg.top .bub:last-of-type::after{content:'';position:absolute;left:50%;bottom:-7px;width:12px;height:12px;margin-left:-6px;
-  background:var(--panel2);border-right:1px solid var(--line);border-bottom:1px solid var(--line);transform:rotate(45deg)}
-.pmsg.top .rx{align-self:center;margin:2px 0 0}
-.pmsg.top .rxadd{right:-30px;bottom:auto;top:6px}
+.pmsg.top{max-width:100%;align-items:center;gap:0}
+.bub{position:relative;max-width:100%;box-sizing:border-box;padding:7px 13px;border-radius:15px;background:var(--panel2);color:var(--text);
+  border:1px solid var(--line);box-shadow:0 4px 14px rgb(20 30 60 / .07);font-size:13px;line-height:1.55;
+  text-align:center;overflow-wrap:anywhere;animation:petpop .18s ease-out;max-height:min(34vh,260px);overflow-y:auto;scrollbar-width:none}
+.bub::-webkit-scrollbar{display:none}
+.bub.multi{text-align:left}
+.bub p{margin:0}
+.bub p+p{margin-top:4px}
+.bub p.aside{color:var(--faint);font-size:12px;font-style:italic}
+.bub p.more{margin-top:2px}
+.petstage .pmsg.top::after{content:'';width:10px;height:10px;margin-top:-6px;background:var(--panel2);
+  border-right:1px solid var(--line);border-bottom:1px solid var(--line);transform:rotate(45deg)}
+.pmsg.top .rx{align-self:center;margin:-2px 0 0;order:3}
+.pmsg.top .rxadd{right:-24px;bottom:auto;top:4px}
 .pmsg.top:hover .rxadd{opacity:1}
-.bub.typing{padding:11px 16px}
+.bub.typing{padding:9px 14px}
 .dots{display:inline-flex;gap:4px;vertical-align:middle}
-.dots i{width:6px;height:6px;border-radius:50%;background:var(--faint);animation:petdot 1.1s infinite ease-in-out}
+.dots i{width:5px;height:5px;border-radius:50%;background:var(--faint);animation:petdot 1.1s infinite ease-in-out}
 .dots i:nth-child(2){animation-delay:.15s}
 .dots i:nth-child(3){animation-delay:.3s}
 @keyframes petdot{0%,60%,100%{opacity:.35;transform:none}30%{opacity:1;transform:translateY(-3px)}}
 @keyframes petpop{from{opacity:0;transform:translateY(4px) scale(.98)}to{opacity:1;transform:none}}
 
-#petImg{width:clamp(96px,19vh,168px);height:auto;aspect-ratio:1;border-radius:24px;object-fit:cover;background:#fdf6ea;
-  box-shadow:0 8px 22px rgb(20 30 60 / .14);transition:transform .18s}
-#petImg:hover{transform:translateY(-2px) scale(1.02)}
-.petname{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--faint)}
+/* 牠：點一下＝摸頭 */
+#petImg{width:clamp(88px,17vh,148px);height:auto;aspect-ratio:1;border-radius:20px;object-fit:cover;background:#fdf6ea;
+  box-shadow:0 6px 18px rgb(20 30 60 / .12);cursor:pointer;transition:width .2s,transform .15s;user-select:none}
+#petImg:hover{transform:translateY(-2px)}
+#petImg.boop{animation:petboop .4s ease-out}
+@keyframes petboop{0%{transform:none}30%{transform:scale(.93) rotate(-3deg)}65%{transform:scale(1.04) rotate(2deg)}100%{transform:none}}
+.petwrap.long #petImg{width:clamp(64px,10vh,88px);border-radius:16px}
+.petname{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--faint)}
 .petname b{color:var(--dim);font-weight:600}
 
-/* 一顆模型建議（佔滿、可換行）＋固定回覆（等寬兩顆） */
-.petsug{flex:0 0 auto;display:flex;flex-direction:column;gap:8px}
+/* 一顆模型建議（整排、可換行）＋固定回覆（等寬） */
+.petsug{flex:0 0 auto;display:flex;flex-direction:column;gap:6px}
 .petsug:empty{display:none}
 .sugbtn{font-family:inherit;cursor:pointer;border:1px solid var(--line2);background:var(--panel2);color:var(--text);
   transition:border-color .12s,color .12s,background .12s}
 .sugbtn:hover{border-color:var(--acc);color:var(--acc);background:var(--acc-soft)}
-.sugbtn.one{width:100%;min-height:44px;padding:10px 18px;border-radius:22px;font-size:13.5px;line-height:1.45;
+.sugbtn.one{width:100%;min-height:30px;padding:5px 14px;border-radius:15px;font-size:12.5px;line-height:1.45;
   text-align:center;overflow-wrap:anywhere}
-.sugrow{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);gap:8px}
-.sugbtn.fix{height:36px;padding:0 12px;border-radius:18px;font-size:12.5px;color:var(--dim);
+.sugrow{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);gap:6px}
+.sugbtn.fix{height:28px;padding:0 10px;border-radius:14px;font-size:12px;color:var(--dim);
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
-/* 輸入：多行可長高；送出是圓鈕 */
-.petin{flex:0 0 auto;display:flex;align-items:flex-end;gap:10px}
-.petin textarea{flex:1;min-width:0;height:44px;max-height:132px;padding:11px 16px;border-radius:22px;box-sizing:border-box;
-  border:1px solid var(--line2);background:var(--panel2);color:var(--text);font-family:inherit;font-size:13px;
-  line-height:1.55;resize:none;overflow-y:hidden}
-.petin textarea::placeholder{color:var(--dim)}
+/* 輸入：多行可長高；送出鈕跟主對話同一顆 */
+.petin{flex:0 0 auto;display:flex;align-items:flex-end;gap:8px}
+.petin textarea{flex:1;min-width:0;height:32px;max-height:120px;padding:6px 12px;border-radius:16px;box-sizing:border-box;
+  border:1px solid var(--line2);background:var(--panel2);color:var(--text);font-family:inherit;font-size:12.5px;
+  line-height:1.5;resize:none;overflow-y:hidden;scrollbar-width:thin}
+.petin textarea::placeholder{color:var(--faint)}
 .petin textarea:focus{outline:none;border-color:var(--acc);box-shadow:0 0 0 3px var(--acc-soft)}
-.petSend{flex:0 0 44px;width:44px;height:44px;padding:0;border:0;border-radius:50%;background:var(--acc);color:var(--on-acc);
-  display:grid;place-items:center;cursor:pointer;transition:filter .12s,transform .12s}
-.petSend svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2.3;stroke-linecap:round;stroke-linejoin:round}
-.petSend:hover{filter:brightness(1.08)}
-.petSend:active{transform:scale(.94)}
+.petin .send.petSend{width:26px;height:26px;margin-bottom:3px}
+.petin .send.petSend svg{width:15px;height:15px}
 
 #petMenu{position:fixed;z-index:9000;background:var(--panel2);border:1px solid var(--line);
   border-radius:10px;box-shadow:var(--shadow);padding:5px;min-width:152px;display:flex;flex-direction:column;gap:1px}
@@ -1631,21 +1668,143 @@ body.pane2 #paneA{padding:0}
 #petMenu div:hover{background:var(--hover)}
 #petFile{width:100%;font-size:12px;line-height:1.6}
 
-/* 設定→寵物：角色卡片與對齊 */
-.chargrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:6px 0 14px}
-.charc{display:flex;flex-direction:column;align-items:center;gap:6px;padding:12px 10px;border:1px solid var(--line2);
-  border-radius:14px;background:var(--panel2);cursor:pointer;transition:none}
-.charc img{width:74px;height:74px;border-radius:12px;object-fit:cover}
-.charc b{font-size:13px}
-.charc small{font-size:11px;color:var(--dim);text-align:center;line-height:1.45}
-.charc.on{border-color:var(--acc);box-shadow:0 0 0 3px var(--acc-soft)}
-.charc:hover{border-color:var(--acc)}
-.fctl.wide{width:min(320px,52%)}
-.fctl.wide input,.fctl.wide select{width:100%}
+/* 設定→寵物：角色卡（橫式，圖左字右）＋「拉桿＋數字框」 */
+.petset .chargrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px;padding:8px 18px 16px;margin:0}
+.petset .charc{position:relative;display:flex;flex-direction:row;align-items:center;gap:12px;padding:10px 12px;width:auto;
+  border:1px solid var(--line2);border-radius:14px;background:var(--panel2);cursor:pointer;transition:border-color .12s,box-shadow .12s}
+.petset .charc img{width:56px;height:56px;flex:none;border-radius:12px;object-fit:cover;background:#fdf6ea}
+.petset .cc-tx{display:flex;flex-direction:column;gap:3px;min-width:0}
+.petset .cc-tx b{font-size:13.5px;display:flex;align-items:center;gap:6px}
+.petset .cc-tx .sig{font-size:12px;font-weight:400}
+.petset .cc-tx small{font-size:11.5px;color:var(--dim);line-height:1.45;text-align:left}
+.petset .cc-ck{position:absolute;top:8px;right:8px;width:18px;height:18px;border-radius:50%;display:none;place-items:center;
+  background:var(--acc);color:var(--on-acc)}
+.petset .cc-ck svg{width:11px;height:11px}
+.petset .charc.on{border-color:var(--acc);box-shadow:0 0 0 3px var(--acc-soft)}
+.petset .charc.on .cc-ck{display:grid}
+.petset .charc:hover{border-color:var(--acc)}
+.petset .frow .fctl{justify-content:flex-end}
+.petset .frow .fctl input:not([type]){width:240px}
+.petset .numrng{flex-wrap:nowrap}
+.petset .numrng input[type=range]{flex:1 1 auto;width:auto;min-width:120px;max-width:260px;accent-color:var(--acc)}
+.numbox{display:inline-flex;align-items:center;height:30px;border:1px solid var(--line2);border-radius:8px;background:var(--panel2);
+  overflow:hidden;flex:none}
+.numbox:focus-within{border-color:var(--acc);box-shadow:0 0 0 3px var(--acc-soft)}
+.petset .numbox input[type=number]{width:72px;height:100%;border:0;background:transparent;padding:0 4px 0 9px;text-align:right;
+  font:inherit;font-size:12.5px;font-variant-numeric:tabular-nums;color:var(--text);box-shadow:none;outline:none;-moz-appearance:textfield}
+.numbox input::-webkit-outer-spin-button,.numbox input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+.numbox i{font-style:normal;font-size:11.5px;color:var(--faint);padding:0 9px 0 3px;min-width:14px}
+.petset .petfile{padding:6px 18px 16px;display:flex;flex-direction:column;gap:8px}
+.petset .petfile textarea{width:100%;box-sizing:border-box;min-height:260px;resize:vertical;border:1px solid var(--line2);border-radius:10px;
+  padding:10px 12px;background:var(--panel2);color:var(--text)}
+.petset .petfile-ft{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.petset .petfile-ft small{color:var(--faint);font-size:11.5px}
+.petset .mpick{flex-wrap:nowrap}
+#setList .petset .frow{grid-template-columns:minmax(0,1fr) minmax(240px,360px);gap:24px}
+#setList .petset .frow .fctl.numrng{flex-wrap:nowrap;justify-content:flex-end}
+#setList .petset .frow .fctl.numrng input[type=range]{flex:1 1 auto;width:auto;min-width:0;max-width:none}
+#setList .petset .frow .fctl .numbox input[type=number]{width:64px;height:100%;border:0;background:transparent;padding:0 2px 0 8px;
+  text-align:right;box-shadow:none;outline:none;font-size:12.5px;font-variant-numeric:tabular-nums}
+#setList .petset .frow .fctl input:not([type]){width:100%}
+#setList .petset .frow[data-f=pet_model]{grid-template-columns:minmax(0,1fr) minmax(300px,460px)}
+#setList .petset .frow[data-f=pet_model] .mpick{width:100%}
+#setList .petset .frow[data-f=pet_model] .pill2{flex:1 1 0;min-width:0}
 
-/* 設定列：控制欄不要撐滿整頁 */
-.frow .fctl:not(.wide) input[type=number],.frow .fctl:not(.wide) input[type=text],
-.frow .fctl:not(.wide) input:not([type]),.frow .fctl:not(.wide) select{width:200px}
-.frow .fctl input[type=range]{width:320px;max-width:100%}
-.petset .chargrid,.chargrid{display:flex;flex-wrap:wrap;gap:10px;margin:6px 0 6px}
-.chargrid .charc{width:168px}
+/* ---- 輸入框精簡：放在檔尾才蓋得過前面的 .cbox／.cbox textarea 規則 ---- */
+.cbox{padding:4px 6px 4px 12px;border-radius:15px}
+.cbox textarea,.cbox textarea:focus{min-height:20px;padding:2px 4px;line-height:1.4;font-size:13px}
+.cbar{margin-top:0;gap:1px}
+.cbar .pill{height:22px;padding:0 5px 0 7px;font-size:11.5px}
+.cbar .ic{width:24px;height:24px}
+.cbar .send{width:26px;height:26px}
+
+/* ---- ask 卡選項：等寬格線，長選項換行（原本 flex+nowrap 會排成參差的三排） ---- */
+.askcard .opts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-bottom:8px}
+.askcard .opts .btn{height:auto;min-height:34px;padding:7px 12px;white-space:normal;text-align:left;justify-content:flex-start;line-height:1.5;word-break:break-word}
+@media (max-width:760px){.askcard .opts{grid-template-columns:1fr}}
+
+/* ---- 連續工具收成一列（.toolfold，別跟設定頁既有的 .tgrp 撞名）---- */
+.toolfold{margin:3px 0;border:1px solid var(--line);border-radius:var(--r);background:var(--panel2);overflow:hidden}
+.toolfold>summary{display:flex;align-items:center;gap:6px;height:26px;padding:0 8px;cursor:pointer;font-size:12px;list-style:none;color:var(--text)}
+.toolfold>summary::-webkit-details-marker{display:none}
+.toolfold>summary:hover{background:var(--hover)}
+.toolfold>summary .ti{font-size:13px;width:18px;text-align:center}
+.toolfold>summary b{font-family:var(--mono);font-weight:600;flex:none}
+.toolfold>summary .n{color:var(--dim);flex:none}
+.toolfold>summary .arg{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;color:var(--faint);font-family:var(--mono);font-size:11.5px}
+.toolfold>summary .st{flex:none;font-size:11.5px}
+.toolfold>summary .st svg{width:13px;height:13px}
+.toolfold>summary .chev{color:var(--faint);transition:transform .15s;width:14px;height:14px;flex:none}
+.toolfold[open]>summary .chev{transform:rotate(90deg)}
+.toolfold .tbody>.tool{margin:0;border:0;border-radius:0;border-top:1px solid var(--line);background:transparent}
+.pf-lim{width:76px;padding:2px 6px;font-size:12px;text-align:right}
+/* ask 卡「略過」：不回答就走，讓模型自己決定 */
+.askcard .ansrow{display:flex;gap:6px;align-items:center}
+.askcard .ansrow input{flex:1;min-width:0}
+.askcard .ansrow .ask-skip{height:30px;padding:0 10px;font-size:12px;color:var(--dim);background:transparent;border:1px solid var(--line);white-space:nowrap}
+.askcard .ansrow .ask-skip:hover{color:var(--fg);border-color:var(--fg2)}
+/* 已回答／已略過的 ask：留在原處，字淡掉，不要一答完就消失 */
+.askcard.askdone{background:transparent;border-color:transparent;padding:2px 2px 4px}
+.askcard.askdone .q{color:var(--dim)}
+.askcard.askdone .a{color:var(--dim);font-size:12.5px;margin-top:6px}
+
+/* 用量分頁：時間範圍四格撐滿卡片（原本 width:max-content 會撐破卡片出現橫向捲軸） */
+.useg{width:100%;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:2px}
+.useg b{padding:5px 4px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* 貼上的長文：附在輸入框上方的小卡（不是圖片，所以用文字卡） */
+.attach .a.f{display:flex;align-items:center;gap:8px;max-width:420px;padding:6px 10px;border:1px solid var(--line);border-radius:var(--r);background:var(--panel2)}
+.attach .a.f b{font-size:12.5px;font-weight:600;white-space:nowrap}
+.attach .a.f small{color:var(--dim);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left;flex:1;min-width:0}
+
+/* 附加檔案（不是圖片）：對話裡顯示檔名與大小，點一下可看路徑 */
+.thumbs.files{display:flex;flex-wrap:wrap;gap:6px}
+.thumbs.files .fchip{display:inline-flex;align-items:center;gap:6px;max-width:340px;padding:5px 9px;border:1px solid var(--line);border-radius:10px;background:var(--panel2);font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.thumbs.files .fchip small{color:var(--dim);font-size:11.5px}
+.thumbs.files .fchip svg{width:14px;height:14px;flex:none;opacity:.75}
+
+/* 「上一回合沒做完」那行要能選取、能複製，也不要一行擠成省略號看不到全文 */
+.resumecard{user-select:text}
+.resumecard .rc-tx{align-items:flex-start}
+.resumecard .rc-tx span{white-space:normal;overflow:visible;text-overflow:clip;cursor:text;line-height:1.5;
+  display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+
+/* 失敗的工具：原因直接寫在卡片上（不必點開），最多兩行，點一下展開完整輸出 */
+.tool .terr{margin:0 12px 8px;padding:7px 10px;border-radius:8px;background:rgb(255 92 92 / .07);
+  border:1px solid rgb(255 92 92 / .22);color:#ff8f8f;font-family:ui-monospace,Consolas,monospace;
+  font-size:11.5px;line-height:1.5;cursor:pointer;white-space:pre-wrap;word-break:break-word;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;user-select:text}
+.tool .terr:hover{background:rgb(255 92 92 / .11)}
+
+/* 子代理清單：每一條可以單獨停止／關閉，不用切到那條對話去按 */
+.sublinks .subrow{display:flex;align-items:center;gap:8px;padding:3px 4px;border-radius:8px}
+.sublinks .subrow:hover{background:var(--panel2)}
+.sublinks .subrow .sl{flex:1;min-width:0;display:inline-flex;align-items:center;gap:6px;cursor:pointer;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sublinks .sb{flex:none;font-size:11.5px;padding:2px 9px;border-radius:999px;border:1px solid var(--line);
+  cursor:pointer;color:var(--dim);user-select:none}
+.sublinks .sb:hover{color:var(--fg);border-color:var(--line2)}
+.sublinks .sb.stop{color:#ff8f8f;border-color:rgb(255 92 92 / .3)}
+
+/* ---- 背景還在跑（子代理、審核）：主對話沒在閃時也看得出來沒卡住 ---- */
+.bgrun{display:flex;align-items:center;gap:8px;max-width:820px;margin:0 auto 4px;padding:3px 12px;box-sizing:border-box;
+  font-size:11.5px;color:var(--dim);min-width:0}
+.bgrun[hidden]{display:none}
+.bgrun .run,.subtog .run,.subbatch .run{width:7px;height:7px;border-radius:50%;background:var(--acc);flex:none;animation:pulse 1.2s infinite}
+.bgrun .bg-who{flex:none;color:var(--acc);font-weight:600}
+.bgrun .bg-tx{min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-family:var(--mono);font-size:11px;color:var(--faint)}
+.bgrun .bg-age{flex:none;margin-left:auto;color:var(--faint);font-variant-numeric:tabular-nums}
+
+/* 回覆裡的本機檔案路徑：可點 */
+.md a.flink{color:var(--acc);text-decoration:underline;text-decoration-style:dotted;text-underline-offset:3px;cursor:pointer;word-break:break-all}
+.md a.flink:hover{text-decoration-style:solid}
+.md a.flink code{color:inherit}
+.md a[href]{color:var(--acc);text-underline-offset:3px;word-break:break-word}
+
+/* 子代理列：單行、縮排跟著層級，型號放滑過提示 */
+#sessionList .item.child{padding:4px 10px 4px 34px;min-height:0}
+#sessionList .item.child.deep{padding-left:48px}
+#sessionList .item.child .t{font-size:12.5px;color:var(--dim)}
+#sessionList .item.child.on .t{color:var(--text)}
+#sessionList .item.child small{display:none}
+#sessionList .item.child .t::before{margin:-6px 6px 0 -12px}

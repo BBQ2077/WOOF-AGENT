@@ -1,6 +1,5 @@
 // WOOF 桌面外殼：啟動 Python 後端、開視窗、系統匣、結束時收掉整棵程序樹。
-const { app, BrowserWindow, Tray, Menu, ipcMain, shell, nativeImage, dialog, Notification, protocol, net } = require('electron');
-const { pathToFileURL } = require('url');
+const { app, BrowserWindow, Tray, Menu, ipcMain, shell, nativeImage, dialog, Notification, protocol } = require('electron');
 const { spawn, execFileSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -37,6 +36,16 @@ function indexHtml() {
     } catch { return all; }
   });
 }
+// 靜態檔的 Content-Type：直接讀檔回 Response，不讓 Chromium 的檔案快取插手
+const MIME = {
+  '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8', '.html': 'text/html; charset=utf-8',
+  '.json': 'application/json; charset=utf-8', '.map': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif', '.webp': 'image/webp', '.ico': 'image/x-icon', '.bmp': 'image/bmp',
+  '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.otf': 'font/otf',
+  '.wasm': 'application/wasm', '.txt': 'text/plain; charset=utf-8',
+};
 function registerWebProtocol() {
   protocol.handle('woof', (req) => {
     const u = new URL(req.url);
@@ -48,7 +57,13 @@ function registerWebProtocol() {
         return new Response(indexHtml(), { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' } });
       } catch { return new Response('not found', { status: 404 }); }
     }
-    return net.fetch(pathToFileURL(file).toString());
+    // 不能走 net.fetch(file://)：query 在 pathToFileURL 後就沒了，每次都是同一個 URL，
+    // Chromium 會拿快取的舊檔——改了 app.js 重開還是舊版。直接讀檔回，並標 no-store。
+    try {
+      const buf = fs.readFileSync(file);
+      const type = MIME[path.extname(file).toLowerCase()] || 'application/octet-stream';
+      return new Response(buf, { headers: { 'Content-Type': type, 'Cache-Control': 'no-store' } });
+    } catch { return new Response('not found', { status: 404 }); }
   });
 }
 const TOKEN = crypto.randomBytes(16).toString('hex');
@@ -320,6 +335,7 @@ function createTray() {
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: '開啟 WOOF', click: showWindow },
     { label: '開啟專案資料夾', click: () => ROOT && shell.openPath(ROOT) },
+    { label: '重新載入介面', click: () => win && win.webContents.reload() },
     { type: 'separator' },
     { label: '結束 WOOF', click: () => { quitting = true; app.quit(); } },
   ]));
@@ -333,6 +349,7 @@ ipcMain.handle('win', (_e, action) => {
   else if (action === 'close') win.hide();
   else if (action === 'quit') { quitting = true; app.quit(); }
   else if (action === 'devtools') win.webContents.toggleDevTools();
+  else if (action === 'reload') win.webContents.reload();
 });
 ipcMain.handle('open-path', (_e, p) => shell.openPath(p));
 // 選資料夾（對話的工作目錄）：回傳路徑，取消回傳空字串
@@ -342,6 +359,28 @@ ipcMain.handle('pick-folder', async (e, start) => {
   return r.canceled || !r.filePaths.length ? '' : r.filePaths[0];
 });
 ipcMain.handle('show-item', (_e, p) => shell.showItemInFolder(p));
+
+// 聊天裡的圖片：右鍵「複製圖片」「圖片另存為…」
+// Electron 45 的 clipboard 只剩 text 的同步方法，圖片要走 renderer 的 navigator.clipboard.write，
+// 這裡只負責把圖檔轉成 PNG 位元組丟過去（跨來源的 woof:// 才不用碰 canvas）
+ipcMain.handle('read-image', (_e, p) => {
+  try {
+    if (!p || !fs.existsSync(p)) return { ok: false };
+    const img = nativeImage.createFromPath(p);
+    if (img.isEmpty()) return { ok: false };
+    return { ok: true, mime: 'image/png', bytes: img.toPNG() };
+  } catch (e) { return { ok: false, error: String(e) }; }
+});
+ipcMain.handle('save-image', async (e, p) => {
+  try {
+    if (!p || !fs.existsSync(p)) return '';
+    const win = BrowserWindow.fromWebContents(e.sender);
+    const r = await dialog.showSaveDialog(win, { defaultPath: path.join(app.getPath('downloads'), path.basename(p)) });
+    if (r.canceled || !r.filePath) return '';
+    fs.copyFileSync(p, r.filePath);
+    return r.filePath;
+  } catch (e) { return ''; }
+});
 ipcMain.handle('root', () => ROOT);
 // 設定組：清單給設定頁顯示；切換要重啟後端（資料路徑在後端啟動時就決定了）
 ipcMain.handle('profiles', () => {
