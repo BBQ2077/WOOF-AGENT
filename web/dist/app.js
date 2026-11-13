@@ -7231,6 +7231,14 @@ function renderPetSec(box) {
     const sw = (k) => `<span class="sw${c[k] ? ' on' : ''}" data-petf="${k}"></span>`;
     const row = (f, title, desc, ctl) => `<div class="frow" data-f="${f}"><div><b>${title}</b><small>${desc}</small></div><div class="fctl">${ctl}</div></div>`;
     const okModel = (m) => m.provider !== 'claude_cli' && m.kind !== 'image' && m.kind !== 'video';
+    const petEffortRow = (c, mid, row) => {
+      const m = (S.models || []).find((x) => x.id === mid) || {};
+      const es = (m.efforts || []).map((e) => String(e).toLowerCase());
+      if (!es.length) return row('pet_effort', '思考強度', `${esc(m.label || '這個模型')} 不能調思考強度。`, '');
+      const cur = es.includes(String(c.effort || '').toLowerCase()) ? String(c.effort).toLowerCase() : (m.default_effort || es[es.length - 1]).toLowerCase();
+      return row('pet_effort', '思考強度', `照牠目前的模型（${esc(m.label || mid)}）能選的檔位。越高越慢、越花錢，聊天用最低的就夠。`,
+        `<div class="seg">${es.map((e) => `<b class="${e === cur ? 'on' : ''}" data-petseg="effort" data-v="${esc(e)}">${esc(EFFORT_LABEL[e] || e)}</b>`).join('')}</div>`);
+    };
     box.innerHTML = `<div class="petset">
     <div class="card"><div class="card-hd"><b>角色</b><small>每個角色有自己的角色檔、記憶與表情圖，切換不會共用。右上角的表情是牠的招牌。</small></div>
       <div class="chargrid">${(d.chars || []).map(charCard).join('')}</div>
@@ -7255,8 +7263,8 @@ function renderPetSec(box) {
     </div>
     <div class="card"><div class="card-hd"><b>模型</b><small>牠用自己的模型，跟主對話分開算錢。聊天用便宜快速的就夠，例如 DeepSeek Flash。</small></div>
       <div class="frow" data-f="pet_model"><div><b>服務商 → 模型</b><small>先選服務商，再選模型。不選就自動挑一個便宜的。</small></div>
-        <div class="fctl">${mpPairHtml('pet:model', c.model || '', { filter: okModel, blank: '自動挑', set: (v) => petSave({ model: v }).then((r) => { if (r && r.cfg) c.model = r.cfg.model; }) })}</div></div>
-      ${row('pet_effort', '思考', '先想再開口，回得比較慢。聊天通常不用。', seg('effort', [['off', '不用'], ['on', '想一下']]))}
+        <div class="fctl">${mpPairHtml('pet:model', c.model || '', { filter: okModel, blank: '自動挑', set: (v) => petSave({ model: v }).then((r) => { if (r && r.cfg) c.model = r.cfg.model; renderPetSec(box); }) })}</div></div>
+      ${petEffortRow(c, d.model, row)}
       ${petNumRow('max_out', '一次最多講多少', c)}
     </div>
     <div class="card"><div class="card-hd"><b>記憶</b><small>牠自己的對話紀錄與筆記，跟主對話的壓縮完全分開。</small></div>

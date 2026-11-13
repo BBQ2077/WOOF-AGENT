@@ -198,7 +198,10 @@ def clean(patch: dict) -> dict:
         if v in CHARS:
             out["char"] = v
     if "effort" in patch:
-        out["effort"] = "on" if patch["effort"] == "on" else "off"
+        from .effort import SCALE, norm as _norm
+
+        v = _norm(str(patch["effort"] or ""))
+        out["effort"] = v if v in SCALE or v in ("off", "on", "none") else "off"
     if "react_rate" in patch and patch["react_rate"] in REACT_GAP:
         out["react_rate"] = patch["react_rate"]
     if "mode" in patch and patch["mode"] in MODES:
@@ -577,9 +580,11 @@ def fit_react(emoji: str, c_id: str | None = None) -> str:
 
 def _params(model: dict, c: dict) -> dict:
     m = dict(model)
-    from .effort import norm as _norm
-    if _norm(c.get("effort")) in [_norm(e) for e in (m.get("efforts") or [])]:
-        m["effort"] = _norm(c["effort"])
+    from .effort import resolve
+    # 選的檔位模型沒有就往下找最近的一檔；舊設定的 "on"＝用模型預設
+    e = resolve(m.get("efforts"), c.get("effort") or None, m.get("default_effort"))
+    if e:
+        m["effort"] = e
     else:
         m.pop("effort", None)
     return m
