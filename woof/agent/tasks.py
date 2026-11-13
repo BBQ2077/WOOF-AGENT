@@ -364,6 +364,23 @@ async def _run_step(ctx, session_id: str, objective: str, step: str, idx: int, t
         return False
 
 
+async def _run_fix(ctx, session_id: str, gaps: list[str], emit) -> bool:
+    """驗收後補缺口：用「補做沒做到的部分」提示詞（設定 → 方案模式可改），不是再塞一個「步驟 9/8」。"""
+    from woof.agent.loop import run_model_loop
+
+    text = _prompt("review_fail", reason="；".join(gaps))
+    m = store.add_message(session_id, "user", [{"type": "text", "text": text}], meta=internal.meta("review_feedback"))
+    await emit({"type": "message", "session_id": session_id, "message": m})
+    try:
+        await run_model_loop(ctx)
+        return True
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        await emit({"type": "notice", "session_id": session_id, "text": f"補缺口時出錯：{e}"})
+        return False
+
+
 STEPS_MAX = 8   # 拓展補成的一整套最多幾步（規劃本身只拆 1～5 步）
 
 
@@ -387,7 +404,8 @@ def _last_mid(session_id: str) -> int:
 def resumable_goal(session_id: str) -> dict | None:
     """有沒有做到一半的方案可以接：有步驟、狀態是執行中／被停，而且之後你沒有另外下新的指令。"""
     g = _state(session_id).get("goal") or {}
-    if not g.get("steps") or g.get("status") not in ("running", "stopped"):
+    planning = g.get("status") == "planning" and g.get("gate") and g.get("since")   # 規劃／拓展／審核途中被打斷
+    if not planning and (not g.get("steps") or g.get("status") not in ("running", "stopped")):
         return None
     since = int(g.get("since") or 0)
     for m in store.get_messages(session_id, after=since):
@@ -407,6 +425,11 @@ def resume_goal(session_id: str, emit, reason: str) -> bool:
     s2 = clear_interrupted(session_id)
     if s2:
         asyncio.get_running_loop().create_task(emit({"type": "session_updated", "session": s2}))
+    if not g.get("steps"):
+        # 還沒排出方案就被打斷：照原本的模式從規劃重來（拓展、審核都會再跑一次）
+        GOAL_TASKS[session_id] = _track(session_id, run_gated(session_id, g["objective"], emit, g["gate"],
+                                                              auto=bool(g.get("auto"))), emit)
+        return True
     GOAL_TASKS[session_id] = _track(session_id, run_goal(session_id, g["objective"], emit, steps=list(g["steps"]),
                                                          start=int(g.get("idx") or 0), resume_reason=reason,
                                                          notes=str(g.get("notes") or "")), emit)
@@ -496,8 +519,7 @@ async def run_goal(session_id: str, objective: str, emit, steps: list[str] | Non
                 break
             await emit({"type": "notice", "session_id": session_id,
                         "text": f"審核模型（子代理）看過，認為還缺（補第 {rnd}/{fix_max} 輪）：" + "；".join(gaps)})
-            fixed = await _run_step(ctx, session_id, objective, "只補這些缺口：" + "；".join(gaps),
-                                    len(steps), len(steps), emit)
+            fixed = await _run_fix(ctx, session_id, gaps, emit)
             if not fixed:
                 break
             ok, gaps = await final_check(ctx, session_id, objective, steps, emit)
@@ -580,10 +602,13 @@ async def review_plan(parent, objective: str, steps: list[str]) -> tuple[bool, s
     return bool(j.get("pass")), str(j.get("reason") or "")
 
 
-async def expand_plan(parent, objective: str, steps: list[str]) -> tuple[list[str], str]:
-    """「方案・拓展」：把 A 補成 A/B/C/D 一整套，並點名哪些該先查。回（步驟, 一句話說明）。"""
+async def expand_plan(parent, objective: str, steps: list[str], feedback: str = "") -> tuple[list[str], str]:
+    """「方案・拓展」：把 A 補成 A/B/C/D 一整套，並點名哪些該先查。回（步驟, 一句話說明）。
+    feedback＝審核模型打回上一版拓展的意見，這次照著修。"""
     plan = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(steps))
     goal = _prompt("expand") + _prompt("expand_body", objective=objective, plan=plan)
+    if feedback:
+        goal += f"\n\n【審核模型打回上一版拓展的意見】{feedback}\n照這個意見修正，仍然只輸出 JSON。"
     r = await _sub(parent, goal, "思維拓展：", "拓展模型：思維拓展", "expand_request")
     if r is None:
         return [], ""
@@ -620,11 +645,17 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
     rounds = flow_settings()["plan_rounds"]
 
     try:
-        approved = False
+        approved, base = False, None
+        since = _last_mid(session_id)
         for rnd in range(1, rounds + 1):
-            _save(session_id, goal={"objective": objective, "status": "planning", "at": time.time()})
-            steps = await plan_steps(model_cfg, objective, feedback)
-            steps = [s for s in steps if str(s).strip()][:5]
+            # gate／since 存著：規劃、拓展、審核途中被打斷（程式重開、停止），「繼續」會從規劃重來，不會變成沒有審核的一般接續
+            _save(session_id, goal={"objective": objective, "status": "planning", "at": time.time(),
+                                    "gate": gate, "auto": auto, "since": since})
+            if gate != "expand" or base is None:
+                # 拓展模式只規劃一次；被打回時拿原本的步驟照審核意見重新拓展
+                base = await plan_steps(model_cfg, objective, "" if gate == "expand" else feedback)
+                base = [s for s in (_step_text(x) for x in base) if s][:5]
+            steps = base
             if not steps:
                 # 打招呼、閒聊、單純問答：不拆步驟、不出方案卡、不做對抗檢查，直接當一般對話回
                 from woof.agent.loop import run_model_loop
@@ -633,8 +664,8 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
                 _save(session_id, goal={"objective": objective, "status": "chat", "at": time.time()})
                 return
             if gate == "expand":
-                # 思維拓展：這個模型容易「你說 A 就只做 A」，先把它補成完整的一套再動手
-                exp, notes = await expand_plan(ctx, objective, steps)
+                # 思維拓展：這個模型容易「你說 A 就只做 A」，先把它補成完整的一套，再交給審核模型看過才動手
+                exp, notes = await expand_plan(ctx, objective, base, feedback)
                 if exp:
                     steps = exp
                 if notes:
@@ -643,24 +674,24 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
             items = set_todos(session_id, [{"text": s, "status": "pending"} for s in steps])
             await _push_todos(emit, session_id, items)
             plan_txt = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(steps))
-            if len(steps) == 1:
-                # 只有一步就沒有方案好審：直接做，不要多一層確認
-                approved = True
-                break
-            if gate == "expand":
-                # 思維拓展＝拓展完直接照做、做完驗收；不是人工核准，不跳確認卡
-                approved = True
-                break
-            if gate == "model":
+            if gate in ("model", "expand"):
+                # 對抗、拓展都要審：一步的方案也審（漏步驟、憑空假設的前提，一步一樣會出事）
                 ok, reason = await review_plan(ctx, objective, steps)
                 if ok:
+                    await emit({"type": "notice", "session_id": session_id,
+                                "text": f"審核模型（子代理）看過第 {rnd} 版方案（{len(steps)} 步）：通過"
+                                        + (f"。{reason}" if reason else "")})
                     approved = True
                     break
                 await emit({"type": "notice", "session_id": session_id,
                             "text": f"審核模型（子代理）打回第 {rnd}/{rounds} 版方案：{reason or '不完整'}"
-                                    + ("；換一版重提" if rnd < rounds else "")})
+                                    + (("；照意見重新拓展" if gate == "expand" else "；換一版重提") if rnd < rounds else "")})
                 feedback = reason or "方案不完整"
                 continue
+            if len(steps) == 1:
+                # 人工核准：只有一步就沒有方案好核可，直接做，不要多一層確認
+                approved = True
+                break
             ans = await ask(ctx, f"規劃模型提的方案（{len(steps)} 步），你核可才動手：\n{plan_txt}", ["照做", "換個做法", "取消"])
             if "照做" in ans or "核准" in ans or "略過" in ans:
                 # 略過＝使用者不想審這題，讓流程照這版走
@@ -688,7 +719,7 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
         await run_goal(session_id, objective, emit, steps=steps, notes=notes)
     except asyncio.CancelledError:
         g = dict(_state(session_id).get("goal") or {})   # run_goal 已存的步驟與進度留著，「繼續」才接得回來
-        g.update(objective=objective, status="stopped", at=time.time())
+        g.update(objective=objective, status="stopped" if g.get("steps") else "planning", at=time.time())
         _save(session_id, goal=g)
         raise
     except Exception as e:

@@ -1609,15 +1609,20 @@ class FlowLimits(unittest.TestCase):
         async def goal(sid, obj, emit, steps=None, **k):
             seen["goal"] = steps
 
+        async def review(*a, **k):
+            seen["review"] = seen.get("review", 0) + 1
+            return True, ""
+
         async def emit(ev):
             pass
 
         with mock.patch.object(REG, "model_cfg", return_value={"id": "m", "provider": "fakep"}), \
                 mock.patch.dict(REG.providers, {"fakep": object()}), \
                 mock.patch.object(tasks, "plan_steps", plan), mock.patch.object(tasks, "expand_plan", expand), \
-                mock.patch.object(tasks, "ask", ask), mock.patch.object(tasks, "run_goal", goal):
+                mock.patch.object(tasks, "ask", ask), mock.patch.object(tasks, "run_goal", goal), \
+                mock.patch.object(tasks, "review_plan", review):
             asyncio.run(tasks.run_gated(s["id"], "做事", emit, "expand"))
-        self.assertEqual(seen, {"ask": 0, "goal": ["一", "二", "三"]})
+        self.assertEqual(seen, {"ask": 0, "goal": ["一", "二", "三"], "review": 1})
 
     def test_goal_follows_gate(self):
         from unittest import mock
@@ -2572,7 +2577,8 @@ class ExpandGate(unittest.TestCase):
     def test_wiring(self):
         src = open(str(ROOT / "woof/agent/tasks.py"), encoding="utf-8").read()
         self.assertIn('if gate == "expand":', src)
-        self.assertIn("await expand_plan(ctx, objective, steps)", src)
+        self.assertIn("await expand_plan(ctx, objective, base, feedback)", src)
+        self.assertIn('if gate in ("model", "expand"):', src)   # 拓展完也要審核
         sv = open(str(ROOT / "woof/server.py"), encoding="utf-8").read()
         self.assertIn('("off", "human", "model", "expand")', sv)
         js = open(str(ROOT / "web/dist/app.js"), encoding="utf-8").read()
