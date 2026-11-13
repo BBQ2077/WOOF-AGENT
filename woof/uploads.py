@@ -68,8 +68,11 @@ def gc() -> tuple[int, int]:
     只掃 DIRS 這兩個資料夾；專案裡的產出一律不碰。"""
     from . import store
 
+    import time
+
     used = store.all_upload_names()
     n = size = 0
+    fresh = time.time() - 24 * 3600   # 一天內的不收：剛貼還沒送出、或工具剛存還沒寫進訊息的
     for label, d in DIRS.items():
         if not d.is_dir():
             continue
@@ -77,7 +80,10 @@ def gc() -> tuple[int, int]:
             if not p.is_file() or f"{label}/{p.name}" in used:
                 continue
             try:
-                size += p.stat().st_size
+                st = p.stat()
+                if st.st_mtime > fresh:
+                    continue
+                size += st.st_size
                 p.unlink()
                 n += 1
             except OSError:

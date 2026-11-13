@@ -2069,6 +2069,9 @@ class UploadsGC(unittest.TestCase):
         store.add_message(sid, "user", [{"type": "image", "path": str(keep.resolve())}])
 
         self.assertEqual(uploads.files_of(sid), [keep])
+        old = time.time() - 2 * 86400   # gc 不收一天內的新檔
+        for p in (keep, junk):
+            os.utime(p, (old, old))
         n, size = uploads.gc()
         self.assertGreaterEqual(n, 1)
         self.assertTrue(keep.is_file())
@@ -2099,6 +2102,8 @@ class PasteToFile(unittest.TestCase):
         out = keepdir / "gc_probe.md"
         out.write_text("產出", encoding="utf-8")
         orphan = uploads.save_paste("沒人引用")
+        old = time.time() - 2 * 86400   # gc 不收一天內的新檔
+        os.utime(orphan, (old, old))
         uploads.gc()
         self.assertTrue(out.is_file(), "gc 不准碰專案／產出資料夾")
         self.assertFalse(orphan.exists())

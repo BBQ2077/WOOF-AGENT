@@ -362,8 +362,8 @@ def aux_model(task: str, fallback: dict | None) -> dict | None:
         return find_model(want)
     if task in ("fallback", "review"):  # 這兩個沒設定就是不啟用
         return fallback
-    # 跟隨主要模型（設定頁「主要模型」）；主要模型不存在才退回目前對話的模型
-    return find_model(REG.config.get("default_model") or "") or fallback
+    # 沒指定：跟這個對話的模型（拓展、審核、子代理、壓縮都跟主代理同一個）；沒有對話模型才用設定頁的「主要模型」
+    return fallback or find_model(REG.config.get("default_model") or "")
 
 
 def vision_chain(turn_model: dict | None) -> list[dict]:
