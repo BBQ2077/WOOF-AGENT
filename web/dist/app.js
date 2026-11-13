@@ -5291,7 +5291,7 @@ function renderFlowSec(box) {
   const row = (id, title, hint, ctl) => `<div class="frow" data-f="${id}"><div><b>${title}</b><small>${hint}</small></div><div class="fctl">${ctl}</div></div>`;
   const worst = f.plan_rounds + 1 + f.fix_rounds;
   box.innerHTML = `<div class="card">
-    ${row('flRounds', '方案最多提幾版', '對抗審核打回、或你按「換個做法」時重提。到上限還沒過：對抗、拓展和 /goal 不停下來，照最後一版做，最後的審核意見交給執行的模型一起補；人工核准才問你。', num('plan_rounds', 1, 10, 1, '版'))}
+    ${row('flRounds', '方案最多提幾版', '對抗審核打回、或你按「換個做法」時重提。到上限還沒過：問你要照最後一版做、交給模型自己判斷、還是取消；沒回就當作自己判斷，照最後一版繼續（收不回來的事留到最後）。/goal 不問，直接自己判斷。', num('plan_rounds', 1, 10, 1, '版'))}
     ${row('flFix', '做完驗收後最多補幾輪', '審核模型驗收發現缺口時補做幾輪，每補一輪再驗一次。0＝不補，只把缺口告訴你。', num('fix_rounds', 0, 5, 1, '輪'))}
     ${row('flWait', '每次審核／拓展最多等多久', '審核或拓展的子代理超過這個時間還沒結論，就不等了，照目前這版繼續。0＝一直等。', num('review_timeout', 0, 3600, 30, '秒'))}
     ${row('flGoal', '/goal 也照對話選的模式走', '開著：對話選了方案模式時，/goal 先審核或拓展再做；放著讓它自己跑，打回到上限或你沒回應都照最後一版做。關掉：/goal 直接拆步驟做，做完一樣驗收。', `<span class="sw${f.goal_gate ? ' on' : ''}" data-flgoal></span>`)}

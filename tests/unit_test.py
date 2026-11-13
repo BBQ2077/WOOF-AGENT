@@ -1584,8 +1584,8 @@ class FlowLimits(unittest.TestCase):
         self.assertEqual((c["plan"], c["review"], c["ask"]), (2, 2, 0))
         self.assertEqual(c["goal"], ["一", "二"])
         c = self._gated(auto=False)
-        self.assertEqual((c["plan"], c["review"], c["ask"]), (2, 2, 0))   # 對抗模式版數用完也不問人
-        self.assertEqual(c["goal"], ["一", "二"])
+        self.assertEqual((c["plan"], c["review"], c["ask"]), (2, 2, 1))
+        self.assertIsNone(c["goal"])
 
     def test_expand_does_not_ask(self):
         from unittest import mock

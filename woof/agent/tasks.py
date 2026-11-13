@@ -100,6 +100,9 @@ def no_reply_text(waited: float) -> str:
             "留到最後跟使用者說明，等他回來再決定。）")
 
 
+NO_REPLY_PLAN = "使用者核可方案時沒有回應（人可能不在）：照這版做，刪檔、覆蓋、對外發送這類收不回來的事先不要做，留到最後說明，等他回來再決定。"
+
+
 def timed_out(answer: str) -> bool:
     return str(answer).startswith(NO_REPLY)
 
@@ -702,27 +705,36 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
                 # 略過＝使用者不想審這題，讓流程照這版走
                 approved = True
                 break
-            if auto and timed_out(ans):
-                await emit({"type": "notice", "session_id": session_id, "text": "你沒回應，目標照這版方案做"})
+            if timed_out(ans):
+                # 沒回＝略過，讓模型自己判斷：照這版做，收不回來的事留到最後（卡片上寫的就是這樣，不能變成取消）
+                await emit({"type": "notice", "session_id": session_id, "text": "你沒回應，照這版方案做"})
+                notes = (notes + "\n" if notes else "") + NO_REPLY_PLAN
                 approved = True
                 break
-            if "取消" in ans or timed_out(ans):
+            if "取消" in ans:
                 _save(session_id, goal={"objective": objective, "status": "stopped", "at": time.time()})
                 await emit({"type": "notice", "session_id": session_id, "text": "已取消，沒有動手"})
                 return
             feedback = "使用者要換一個做法"
-        if not approved and (auto or gate in ("model", "expand")):
-            # 對抗、拓展是交給模型自己把關的模式：版數用完不停下來問人，照最後這版做，最後的審核意見交給執行的模型一起補
-            notes = (notes + "\n" if notes else "") + f"方案審核最後還沒過的地方（做的時候一起補上）：{feedback}"
-            await emit({"type": "notice", "session_id": session_id,
-                        "text": f"提了 {rounds} 版，審核（{gate_name}）都沒過；不停下來，照最後這版做，最後的審核意見交給執行的模型一起補"})
-        elif not approved:
-            ans = await ask(ctx, f"提了 {rounds} 版，審核（{gate_name}）都沒過，最後一次意見：{feedback}。要照最後這版做，還是取消？",
-                            ["照做", "取消"])
-            if "取消" in ans or timed_out(ans):
+        if not approved:
+            # 版數用完：/goal 不停下來；其他模式問你，但沒回或按「你自己判斷」都繼續做（最後的審核意見交給執行的模型自己判斷要不要補），只有按取消才不做
+            fix_note = f"方案審核最後還沒過的地方（你自己判斷要不要補、怎麼補）：{feedback}"
+            ans = "你自己判斷" if auto else await ask(
+                ctx, f"提了 {rounds} 版，審核（{gate_name}）都沒過，最後一次意見：{feedback}。要怎麼做？",
+                ["照最後這版做", "你自己判斷", "取消"])
+            if timed_out(ans):
+                notes = (notes + "\n" if notes else "") + NO_REPLY_PLAN + "\n" + fix_note
+                await emit({"type": "notice", "session_id": session_id, "text": "你沒回應，交給模型自己判斷，照最後這版繼續"})
+            elif "取消" in ans:
                 _save(session_id, goal={"objective": objective, "status": "stopped", "at": time.time()})
                 await emit({"type": "notice", "session_id": session_id, "text": "已取消，沒有動手"})
                 return
+            elif "照做" not in ans and "照最後" not in ans:
+                # 你自己判斷、略過、或打了別的字：一起交給執行的模型
+                extra = "" if "自己判斷" in ans or "略過" in ans else f"\n使用者的指示：{ans}"
+                notes = (notes + "\n" if notes else "") + fix_note + extra
+                await emit({"type": "notice", "session_id": session_id,
+                            "text": f"提了 {rounds} 版，審核（{gate_name}）都沒過；照最後這版做，最後的審核意見交給執行的模型自己判斷"})
         await run_goal(session_id, objective, emit, steps=steps, notes=notes)
     except asyncio.CancelledError:
         g = dict(_state(session_id).get("goal") or {})   # run_goal 已存的步驟與進度留著，「繼續」才接得回來
