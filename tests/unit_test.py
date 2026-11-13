@@ -1564,7 +1564,7 @@ class FlowLimits(unittest.TestCase):
             calls["ask"] += 1
             return "取消"
 
-        async def goal(sid, obj, emit, steps=None):
+        async def goal(sid, obj, emit, steps=None, **k):
             calls["goal"] = steps
 
         async def emit(ev):
@@ -1606,7 +1606,7 @@ class FlowLimits(unittest.TestCase):
             seen["ask"] += 1
             return "取消"
 
-        async def goal(sid, obj, emit, steps=None):
+        async def goal(sid, obj, emit, steps=None, **k):
             seen["goal"] = steps
 
         async def emit(ev):

@@ -231,6 +231,9 @@ def register(woof):
             if last_id and n_res and used - saved < window * trigger * 0.8:
                 cur = dict((store.get_session(ctx.session_id) or {}).get("engine_state") or {})
                 cur["prune"] = {"through": last_id, "at": time.time(), "count": n_res, "saved": saved}
+                from woof.agent.loop import retire_images_on_compact
+
+                retire_images_on_compact(ctx.session_id, cur)   # 前綴反正重算，舊圖一起收
                 s2 = store.update_session(ctx.session_id, engine_state=cur)
                 await ctx.emit({"type": "session_updated", "session": s2})
                 await ctx.emit({"type": "notice", "session_id": ctx.session_id,
@@ -280,6 +283,9 @@ def register(woof):
         cur["summary"] = {"through": older[-1]["id"], "text": text, "at": time.time(),
                           "kept": sorted(recent_ids), "mode": mode, "method": method, "parts": parts,
                           "inflight": inflight}
+        from woof.agent.loop import retire_images_on_compact
+
+        retire_images_on_compact(ctx.session_id, cur)   # 前綴反正重算，看過的舊圖一起收，只留最新一則
         s2 = store.update_session(ctx.session_id, engine_state=cur)
         # 對話畫面據此在被摘要的訊息後面畫一條分隔線（可展開看摘要）
         await ctx.emit({"type": "session_updated", "session": s2})

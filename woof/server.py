@@ -813,6 +813,14 @@ async def pet_react(body: dict):
     return {"state": r, "history": pet.history()[-40:]}
 
 
+@app.get("/api/pet/history")
+async def pet_history(before: str = "", limit: int = 60):
+    """寵物紀錄往上捲：before 那則之前的 limit 則（含壓縮掉、只留給畫面看的舊紀錄）。"""
+    from . import pet
+
+    return pet.history_before(before, limit)
+
+
 @app.post("/api/pet/reset")
 async def pet_reset():
     from . import pet

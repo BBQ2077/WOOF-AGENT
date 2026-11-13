@@ -1380,10 +1380,13 @@ def load_image_b64(block: dict) -> tuple[str, str]:
     return out
 
 
-# ---- 每次請求帶多少張工具圖：超過上限才整批收起舊的（不是每張新圖都擠掉一張舊的，那樣每一步快取都斷）
-IMG_MAX = 20                 # 請求裡工具圖最多幾張（Anthropic 超過 20 張會對每張圖套更嚴的尺寸限制）
-IMG_BUDGET = 16_000_000      # 工具圖 base64 合計上限（服務商的請求大小上限多在 20～32 MB，留空間給文字）
-IMG_KEEP, IMG_KEEP_BYTES = 6, 6_000_000   # 收起時留最新幾張
+# ---- 每次請求帶多少張工具圖：
+# 服務商的快取只認「完全相同的前綴」，改到哪一則，那一則之後全部重算。所以舊圖平常一張都不動，
+# 快超過服務商的硬上限才把「最舊的 8 則」一起收起；收起線只往後移，不會又放回來。
+IMG_MAX_STRICT = 20          # 有圖最長邊超過 2000 px 時 Anthropic 的張數門檻（我們送出前都縮到 1568，正常碰不到）
+IMG_MAX = 100                # 圖都在 2000 px 內時的張數上限
+IMG_BUDGET = 24_000_000      # 工具圖 base64 合計上限（請求上限多是 32 MB，留空間給文字）
+IMG_BATCH = 8                # 一次收最舊的幾則
 
 
 def _img_b64_len(block: dict) -> int:
@@ -1391,6 +1394,21 @@ def _img_b64_len(block: dict) -> int:
         return len(load_image_b64(block)[1])
     except Exception:
         return 0
+
+
+def _img_side(block: dict) -> int:
+    """送出時這張圖的最長邊（讀 base64 開頭的檔頭；讀不出來當作超過 2000，走嚴格門檻）。"""
+    try:
+        import base64 as _b
+
+        from io import BytesIO
+
+        from PIL import Image
+
+        raw = _b.b64decode(load_image_b64(block)[1][:65536])
+        return max(Image.open(BytesIO(raw)).size)
+    except Exception:
+        return 99999
 
 
 def _strip_tool_images(msg: dict) -> dict:
@@ -1405,38 +1423,59 @@ def _strip_tool_images(msg: dict) -> dict:
     return {**msg, "content": content}
 
 
+IMG_KEEP_ON_COMPACT = 1     # 壓縮／清舊工具輸出時，帶圖的工具結果只留最新幾則
+
+
+def retire_images_on_compact(session_id: str, es: dict) -> int:
+    """壓縮時順便收掉舊圖：壓縮本來就整段前綴重算，這時收圖不會多斷一次快取。
+    看過的圖之後不再送，只留最新 IMG_KEEP_ON_COMPACT 則（可能正在改的那張）。改 es（由呼叫端存），回收起幾張。"""
+    before = int(es.get("img_before") or 0)
+    carriers = []
+    for m in store.get_messages(session_id, after=before):
+        if m.get("role") == "tool":
+            n = sum(len(b.get("images") or []) for b in m["content"] if b.get("type") == "tool_result")
+            if n:
+                carriers.append((int(m["id"]), n))
+    if len(carriers) <= IMG_KEEP_ON_COMPACT:
+        return 0
+    cut = carriers[-IMG_KEEP_ON_COMPACT - 1] if IMG_KEEP_ON_COMPACT else carriers[-1]
+    es["img_before"] = cut[0]
+    return sum(n for mid, n in carriers if mid <= cut[0])
+
+
 def trim_images(session_id: str, messages: list[dict], force: bool = False) -> tuple[list[dict], int]:
-    """依「收起線」拿掉舊工具圖。收起線存在 engine_state.img_before（訊息 id），只往後移，
-    所以同一段前綴每次請求都一樣。超過 IMG_MAX 張或 IMG_BUDGET 位元組才整批往後移一次；
-    force（服務商回 413）時只留最新一張。回傳 (訊息, 這次新收起幾張)。"""
+    """依「收起線」拿掉舊工具圖。收起線存在 engine_state.img_before（訊息 id），只往後移，同一段前綴每次送出都一樣。
+    超過張數或大小上限時，從最舊的開始一次收 IMG_BATCH 則，直到放得下；
+    force（服務商回 413）時只留最新一則。回傳 (訊息, 這次新收起幾張)。"""
     st = store.get_session(session_id) or {}
     es = st.get("engine_state") or {}
     before = int(es.get("img_before") or 0)
-    carriers = []   # (訊息 id, 張數, 位元組)，新的在前
-    for m in reversed(messages):
+    carriers = []   # (訊息 id, 張數, 位元組, 最長邊)，舊的在前
+    for m in messages:
         if m.get("role") != "tool" or int(m.get("id") or 0) <= before:
             continue
         imgs = [i for b in m["content"] if b.get("type") == "tool_result" for i in (b.get("images") or [])]
         if imgs:
-            carriers.append((int(m["id"]), len(imgs), sum(_img_b64_len(i) for i in imgs)))
-    n, size = sum(c[1] for c in carriers), sum(c[2] for c in carriers)
-    moved = 0
-    if carriers and (force or n > IMG_MAX or size > IMG_BUDGET):
-        keep_n, keep_b = (1, 0) if force else (IMG_KEEP, IMG_KEEP_BYTES)
-        kn = kb = 0
-        cut = None
-        for i, (mid, c, b) in enumerate(carriers):
-            if i and (kn + c > keep_n or (keep_b and kb + b > keep_b)):
-                cut = mid
+            carriers.append((int(m["id"]), len(imgs), sum(_img_b64_len(i) for i in imgs), max(_img_side(i) for i in imgs)))
+
+    def fits(rest):
+        lim = IMG_MAX if all(c[3] <= 2000 for c in rest) else IMG_MAX_STRICT
+        return sum(c[1] for c in rest) <= lim and sum(c[2] for c in rest) <= IMG_BUDGET
+
+    retire = 0
+    if carriers and force:
+        retire = max(1, len(carriers) - 1)
+    elif carriers and not fits(carriers):
+        while retire < len(carriers):
+            retire = min(retire + IMG_BATCH, len(carriers))
+            if fits(carriers[retire:]):
                 break
-            kn, kb = kn + c, kb + b
-        if cut is None and force and len(carriers) == 1:
-            cut = carriers[0][0]   # 只剩一則帶圖還是太大：連它也收
-        if cut:
-            moved = sum(c for mid, c, _ in carriers if mid <= cut)
-            before = cut
-            es["img_before"] = before
-            store.update_session(session_id, engine_state=es)
+    moved = 0
+    if retire:
+        moved = sum(c[1] for c in carriers[:retire])
+        before = carriers[retire - 1][0]
+        es["img_before"] = before
+        store.update_session(session_id, engine_state=es)
     if not before:
         return messages, moved
     return [_strip_tool_images(m) if m.get("role") == "tool" and int(m.get("id") or 0) <= before

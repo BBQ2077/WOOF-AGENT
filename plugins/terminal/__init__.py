@@ -10,6 +10,14 @@ from woof import procs
 
 _PY_HINT_RE = re.compile(r"ModuleNotFoundError|No module named|command not found|不是內部或外部命令", re.I)
 
+# 用系統預設程式在使用者桌面開檔／開網址（模型拿來「驗收」時會跳出 Edge、相片之類的視窗）
+_GUI_OPEN = re.compile(
+    r"""(?:^|[;&|(]\s*|\bcmd(?:\.exe)?\s+/{1,2}c\s+)start(?:\.exe)?\s+(?:(?:""|''|/\w+)\s+)*["']?(?:[a-z]:|/|\.|~|https?:|file:|[\w-]+\.\w{2,5}\b)"""
+    r"""|\bexplorer(?:\.exe)?\s+["']?(?:[a-z]:|/|\.|https?:|file:|[\w-]+\.\w{2,5}\b)"""
+    r"""|\bInvoke-Item\b|\bos\.startfile\b|\bxdg-open\b|\brundll32\b.*\bFileProtocolHandler\b"""
+    r"""|\bStart-Process\s+["']?[^\s"']+\.(?:svg|html?|png|jpe?g|gif|webp|pdf|txt|md|mp4|docx?|xlsx?|pptx?)\b"""
+    r"""|\bwebbrowser\.open""", re.I | re.M)
+
 
 def _py_cmd() -> str:
     """給 bash 用的 Python 路徑：正斜線、加引號（資料夾名稱有空白也能直接貼）。"""
@@ -86,6 +94,11 @@ def register(woof):
         command = (args.get("command") or "").strip()
         if not command:
             return {"output": "command 不能是空的", "is_error": True}
+        if not args.get("open_gui") and _GUI_OPEN.search(command):
+            return {"output": "這個指令會用系統預設程式在使用者桌面打開檔案或網址（例如 start、explorer、Invoke-Item、"
+                              "os.startfile），會跳出視窗打斷他，這次沒有執行。要檢查畫面：用瀏覽器 headless 截圖"
+                              "（msedge/chrome --headless=new --screenshot=…）再 vision_analyze。使用者明確要你幫他打開時，"
+                              "才加 open_gui=true 重送。", "is_error": True}
         cwd = args.get("workdir") or ctx.cwd
         # 寫入子代理：工作目錄鎖在主代理給的範圍內，不能開背景常駐（子代理結束後沒人收）
         turn = getattr(ctx, "turn", None)
@@ -210,7 +223,8 @@ def register(woof):
         "背景指令結束時會自動通知，不必反覆查。"
         "停止時會結束整棵程序樹。"
         f"要用 Python 時直接呼叫這一顆（已裝 pandas、openpyxl、numpy，整串連引號照貼）：{_py}；"
-        "系統 PATH 上的 python 不一定有這些套件，不要為此重複安裝。",
+        "系統 PATH 上的 python 不一定有這些套件，不要為此重複安裝。"
+        "不要用 start／explorer／Invoke-Item 開檔驗收（會在使用者桌面跳視窗）：看畫面用瀏覽器 headless 截圖再 vision_analyze。",
         {
             "type": "object",
             "properties": {
@@ -219,6 +233,7 @@ def register(woof):
                 "timeout": {"type": "integer", "description": "前景等待秒數，上限 600"},
                 "background": {"type": "boolean", "description": "直接放到背景執行"},
                 "notify": {"type": "boolean", "description": "背景指令結束時自動把結果送回對話（預設 true；不需要時設 false）"},
+                "open_gui": {"type": "boolean", "description": "使用者明確要你在他桌面打開檔案／網址時才設 true（start、explorer、Invoke-Item 這類）"},
             },
             "required": ["command"],
         },

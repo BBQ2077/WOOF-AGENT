@@ -6921,7 +6921,7 @@ if (PANE2) {
 // ---- 寵物：側邊自己的對話窗（訊息、提示詞、壓縮都跟主對話分開）
 // 版面由上而下：對話紀錄 → 頭頂泡泡（牠最新的一則）→ 牠 → 一顆模型建議 → 固定回覆 → 輸入框
 // 雙方都能對對方的訊息按表情；牠一次可以連發幾則，前端一則一則冒出來。
-const PET = { cfg: null, st: { face: 'happy', say: '', mood: '', at: 0 }, hist: [], faces: [],
+const PET = { cfg: null, st: { face: 'happy', say: '', mood: '', at: 0 }, hist: [], older: [], more: true, stick: true, faces: [],
   busy: false, model: '', label: '', lastPetId: '', reveal: null, revealTimer: 0 };
 
 document.addEventListener('input', (e) => {
@@ -6938,8 +6938,37 @@ function petLines(m) {
   return String((m && m.text) || '').split('\n').map((x) => x.trim()).filter(Boolean);
 }
 // 最後一則是牠講的 → 放泡泡；其餘放紀錄
+// 後端每次只回最近 40 則：新的一批進來時，被擠出去的舊的留在 PET.older，往上捲才看得到
+function petSetHist(h) {
+  const ids = new Set(h.map((m) => m.id).filter(Boolean));
+  const have = new Set(PET.older.map((m) => m.id));
+  const gone = PET.hist.filter((m) => m.id && !ids.has(m.id) && !have.has(m.id));
+  if (gone.length) PET.older = PET.older.concat(gone);
+  PET.hist = h;
+}
+// 捲到紀錄頂端：跟後端要更早的（含壓縮掉、牠已經不記得原文的），補在上面且畫面不跳
+async function petLoadOlder() {
+  if (PET.oldBusy || PET.more === false) return;
+  const all = [...PET.older, ...PET.hist];
+  const first = all.find((m) => m.id);
+  if (!first) return;
+  PET.oldBusy = true;
+  try {
+    const d = await api('GET', `/api/pet/history?before=${encodeURIComponent(first.id)}&limit=60`);
+    const have = new Set(all.map((m) => m.id));
+    const add = (d.items || []).filter((m) => m.id && !have.has(m.id));
+    PET.more = !!d.more && add.length > 0;
+    if (add.length) {
+      const h = $('#petHist');
+      const fromBottom = h.scrollHeight - h.scrollTop;
+      PET.older = add.concat(PET.older);
+      petPaintHist();
+      h.scrollTop = h.scrollHeight - fromBottom;
+    }
+  } catch {} finally { PET.oldBusy = false; }
+}
 function petSplit() {
-  const list = PET.hist.slice(-40);
+  const list = [...PET.older, ...PET.hist];
   const last = list[list.length - 1];
   if (last && last.role === 'pet' && petLines(last).length) return { rows: list.slice(0, -1), top: last };
   return { rows: list, top: null };
@@ -6986,7 +7015,7 @@ function petRow(m) {
   const lines = petLines(m);
   if (!lines.length) return '';
   return `<div class="pmsg p" data-mid="${esc(m.id || '')}">${lines.map((x) => `<div class="petline">${esc(x)}</div>`).join('')}`
-    + `<span class="rxadd" data-pet="rxpick" data-mid="${esc(m.id || '')}" title="按表情">☺</span>${petRx(m)}</div>`;
+    + (m.old ? '' : `<span class="rxadd" data-pet="rxpick" data-mid="${esc(m.id || '')}" title="按表情">☺</span>`) + `${petRx(m)}</div>`;
 }
 // 跟通訊軟體一樣：隔了一段時間才有下一則，就在中間標時間（看得出牠是隔多久自己找你的）
 function petWhen(t) {
@@ -6998,12 +7027,14 @@ function petWhen(t) {
   return `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
 }
 function petRows(rows) {
-  let prev = 0;
+  let prev = 0, wasOld = false;
   return rows.map((m) => {
+    const cut = wasOld && !m.old ? '<div class="pnote pcut">以上已壓縮成記憶，牠不記得原文了</div>' : '';
+    wasOld = !!m.old;
     const at = Number(m.at) || 0;
     const gap = at && (!prev || at - prev > 30 * 60) ? `<div class="pnote ptime">${esc(petWhen(at))}${m.kind === 'nudge' ? ' · 牠主動找你' : ''}</div>` : '';
     if (at) prev = at;
-    return gap + petRow(m);
+    return cut + gap + petRow(m);
   }).join('');
 }
 function petPara(x) {
@@ -7059,15 +7090,7 @@ function petPaint() {
         ? `<div class="sugrow">${quick.map((x) => `<button class="sugbtn fix" data-pet="sug" data-say="${esc(x)}">${esc(x)}</button>`).join('')}</div>`
         : '');
   }
-  const h = $('#petHist');
-  if (h) {
-    const { rows, top } = petSplit();
-    h.innerHTML = rows.length || top || PET.busy
-      ? petRows(rows)
-      : (PET.cfg && PET.cfg.on === false
-        ? '<div class="pethint">主動說話關著：牠不會自己開口。<br>想找牠，直接打字或摸摸牠就好。</div>'
-        : `<div class="pethint">${esc(PET_MODES[petMode()].hint)}<br>想找牠說話，直接打字就好。</div>`);
-  }
+  const h = petPaintHist();
   const pm = $('#petMode');
   if (pm) {
     const k = petMode();
@@ -7077,7 +7100,19 @@ function petPaint() {
   }
   petPaintStage();
   // 泡泡、建議鈕的高度會把紀錄區擠小：畫完上面再捲到底，最後一則才不會被泡泡蓋住
-  if (h) { h.scrollTop = h.scrollHeight; requestAnimationFrame(() => { h.scrollTop = h.scrollHeight; }); }
+  // 你往上翻舊紀錄時（stick=false）不拉回底部；自己送出訊息會恢復黏底
+  if (h && PET.stick !== false) { h.scrollTop = h.scrollHeight; requestAnimationFrame(() => { h.scrollTop = h.scrollHeight; }); }
+}
+function petPaintHist() {
+  const h = $('#petHist');
+  if (!h) return null;
+  const { rows, top } = petSplit();
+  h.innerHTML = rows.length || top || PET.busy
+    ? (PET.more !== false && PET.older.length + PET.hist.length >= 40 ? '<div class="pnote pmore">往上捲載入更早的紀錄</div>' : '') + petRows(rows)
+    : (PET.cfg && PET.cfg.on === false
+      ? '<div class="pethint">主動說話關著：牠不會自己開口。<br>想找牠，直接打字或摸摸牠就好。</div>'
+      : `<div class="pethint">${esc(PET_MODES[petMode()].hint)}<br>想找牠說話，直接打字就好。</div>`);
+  return h;
 }
 
 // 紀錄區黏在底部：只有使用者自己捲（滾輪、拖捲軸、按鍵）才算離開底部；
@@ -7091,12 +7126,14 @@ function petPaint() {
   h.addEventListener('scroll', () => {
     if (!h.clientHeight || Date.now() - userAt > 800) return;
     stick = h.scrollHeight - h.scrollTop - h.clientHeight < 24;
+    PET.stick = stick;
+    if (h.scrollTop < 80) petLoadOlder();
   }, { passive: true });
   new ResizeObserver(() => {
     const shown = !lastH && h.clientHeight;
     lastH = h.clientHeight;
     if (!h.clientHeight) return;
-    if (shown) stick = true;
+    if (shown) stick = PET.stick = true;
     if (stick) { toEnd(); requestAnimationFrame(toEnd); }
   }).observe(h);
   // 紀錄裡的圖片、字型晚載入會把內容撐高，但紀錄區本身大小沒變，ResizeObserver 不會觸發
@@ -7108,7 +7145,7 @@ async function petLoad() {
   try {
     const d = await api('GET', '/api/pet');
     PET.cfg = d.cfg; PET.st = d.state || PET.st; PET.faces = d.faces || [];
-    PET.model = d.model; PET.label = d.label; PET.hist = d.history || [];
+    PET.model = d.model; PET.label = d.label; PET.hist = d.history || []; PET.older = []; PET.more = true;
     PET.chars = d.chars || [];
     petMaybeReveal(false);
     petPaint();
@@ -7118,7 +7155,7 @@ async function petLoad() {
 function petEvent(p, hist) {
   if (!p) return;
   PET.st = p;
-  if (Array.isArray(hist) && !PET.busy) { PET.hist = hist; petMaybeReveal(true); }
+  if (Array.isArray(hist) && !PET.busy) { petSetHist(hist); petMaybeReveal(true); }
   petPaint();
 }
 
@@ -7189,12 +7226,13 @@ async function petSay(forced) {
   petRxClose();
   PET.busy = true; inp.value = ''; petGrow();
   if (att.length) { PET.att = []; petPaintAtt(); }
+  PET.stick = true;
   PET.hist.push({ role: 'user', text, id: '', att: att.map((a) => ({ name: a.name, preview: a.preview, kind: a.preview ? 'image' : 'file' })) });
   petPaint();
   try {
     const d = await api('POST', '/api/pet/say', { text, session_id: S.sid || '',
       att: att.map((a) => ({ name: a.name, media_type: a.media_type, data: a.data })) });
-    PET.st = d; PET.hist = d.history || PET.hist;
+    PET.st = d; petSetHist(d.history || PET.hist);
     PET.busy = false;
     petMaybeReveal(true);
     petPaint();
@@ -7221,7 +7259,7 @@ async function petReact(mid, emoji) {
   petPaint();
   try {
     const d = await api('POST', '/api/pet/react', { id: mid, emoji });
-    PET.st = d.state || PET.st; PET.hist = d.history || PET.hist;
+    PET.st = d.state || PET.st; petSetHist(d.history || PET.hist);
     petPaint();
   } catch (e) {
     if (m) m.ureact = before;
@@ -7281,11 +7319,12 @@ function petBoop() {
     PET_BOOP.n = 0;
     petRxClose();
     PET.busy = true;
+    PET.stick = true;
     PET.hist.push({ role: 'user', kind: 'poke', text: n > 1 ? `（連摸了你 ${n} 下）` : '（摸了摸你的頭）', id: '' });
     petPaint();
     try {
       const d = await api('POST', '/api/pet/poke', { n, session_id: S.sid || '' });
-      PET.st = d; PET.hist = d.history || PET.hist;
+      PET.st = d; petSetHist(d.history || PET.hist);
       PET.busy = false;
       petMaybeReveal(true);
       petPaint();
@@ -7302,7 +7341,7 @@ async function petSave(patch) {
   try {
     const d = await api('PUT', '/api/pet', patch);
     PET.cfg = d.cfg; PET.st = d.state || PET.st; PET.chars = d.chars || PET.chars;
-    PET.hist = d.history || [];
+    PET.hist = d.history || []; PET.older = []; PET.more = true;
     PET.lastPetId = ''; petMaybeReveal(false);
     petPaint();
     return d;
@@ -7359,7 +7398,7 @@ function petMenu(anchor) {
     if (k === 'reset') {
       confirmBox('清掉牠記得的事？', '牠自己的對話與摘要會清空。主對話完全不受影響。', { ok: '清空', danger: true })
         .then((ok) => ok && api('POST', '/api/pet/reset', {}).then((d) => {
-          PET.st = d.state || PET.st; PET.hist = []; PET.lastPetId = ''; petPaint();
+          PET.st = d.state || PET.st; PET.hist = []; PET.older = []; PET.more = false; PET.lastPetId = ''; petPaint();
           notify('ok', '牠忘記了', '重新開始。');
         }));
     }
@@ -7552,7 +7591,7 @@ function renderPetSec(box) {
       } else if (k === 'reset') {
         confirmBox('清掉牠記得的事？', '牠自己的對話與筆記會清空，主對話不受影響。', { ok: '清空', danger: true })
           .then((ok) => ok && api('POST', '/api/pet/reset', {}).then(() => {
-            PET.hist = []; PET.lastPetId = ''; petLoad();
+            PET.hist = []; PET.older = []; PET.lastPetId = ''; petLoad();
             const cnt = box.querySelector('[data-petcount]');
             if (cnt) cnt.textContent = '0';
           }));

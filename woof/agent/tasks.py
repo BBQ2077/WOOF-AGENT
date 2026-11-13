@@ -200,8 +200,24 @@ async def plan_steps(model_cfg: dict, objective: str, feedback: str = "") -> lis
     m = re.search(r"\[.*\]", txt or "", re.S)
     if not m:
         raise RuntimeError("規劃員沒有回傳步驟清單：" + (txt or "")[:120])
-    steps = [str(s).strip() for s in json.loads(m.group(0)) if str(s).strip()]
+    steps = [s for s in (_step_text(x) for x in json.loads(m.group(0))) if s]
     return steps[:5]   # 空陣列＝這則訊息不用動手（閒聊／問答），交給一般回合回覆
+
+
+STEP_CHARS = 400
+
+
+def _step_text(x) -> str:
+    """規劃／拓展回的一步整理成一句話。有的模型會回物件、甚至把成品（整份 SVG、程式碼）塞進步驟裡：
+    物件取它的說明欄位，成品內容丟掉，太長截斷——不然後面的模型會把它當成「已經有的檔案」。"""
+    if isinstance(x, dict):
+        x = next((x[k] for k in ("task", "step", "do", "text", "action", "title", "description")
+                  if isinstance(x.get(k), str) and x[k].strip()), "")
+    elif isinstance(x, (list, tuple)):
+        x = "；".join(str(i) for i in x if isinstance(i, (str, int, float)))
+    s = str(x or "").strip()
+    s = re.split(r"```|<svg\b|<html\b|<!DOCTYPE|<\?xml", s, maxsplit=1, flags=re.I)[0].strip()
+    return s[:STEP_CHARS] + ("…" if len(s) > STEP_CHARS else "")
 
 
 def _recent_report(session_id: str, limit: int = 8) -> str:
@@ -327,12 +343,15 @@ async def final_check(ctx, session_id: str, objective: str, steps: list[str], em
 
 
 async def _run_step(ctx, session_id: str, objective: str, step: str, idx: int, total: int, emit,
-                    plan: list[str] | None = None) -> bool:
-    """做一步：不再每步派子代理審核（那是八股與卡住的來源），做完就往下。"""
+                    plan: list[str] | None = None, notes: str = "") -> bool:
+    """做一步：不再每步派子代理審核（那是八股與卡住的來源），做完就往下。
+    notes＝拓展模型的提醒（哪些該先查、哪些是配套），每一步都附上，不然只在畫面上閃一下、模型根本沒看到。"""
     from woof.agent.loop import run_model_loop
 
-    text = _prompt("goal_step", objective=objective, n=idx + 1, total=total, step=step,
-                   plan="\n".join(f"{i + 1}. {s}" for i, s in enumerate(plan or [step])))
+    plan_txt = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(plan or [step]))
+    if notes:
+        plan_txt += "\n【拓展模型的提醒】" + notes + "\n（提醒裡點名要查的，輪到相關的步驟就先用 web_search／web_extract 真的查，不要靠猜或反覆試）"
+    text = _prompt("goal_step", objective=objective, n=idx + 1, total=total, step=step, plan=plan_txt)
     m = store.add_message(session_id, "user", [{"type": "text", "text": text}], meta=internal.meta("goal_step"))
     await emit({"type": "message", "session_id": session_id, "message": m})
     try:
@@ -349,13 +368,14 @@ STEPS_MAX = 8   # 拓展補成的一整套最多幾步（規劃本身只拆 1～
 
 
 def _goal_save(session_id: str, objective: str, status: str, steps: list[str] | None = None, idx: int = 0,
-               new: bool = False) -> None:
+               new: bool = False, notes: str | None = None) -> None:
     """方案的步驟與做到第幾步存在 goal 裡（不放 todos：模型自己呼叫 todo 會蓋掉），程式重開後「繼續」才接得回來。
     since＝流程開始時最後一則訊息；之後你自己下了新指令，就不再接回這個方案。"""
     g = {"objective": objective, "status": status, "at": time.time()}
     if steps:
         old = _state(session_id).get("goal") or {}
-        g.update(steps=steps, idx=idx, since=(None if new else old.get("since")) or _last_mid(session_id))
+        g.update(steps=steps, idx=idx, since=(None if new else old.get("since")) or _last_mid(session_id),
+                 notes=notes if notes is not None else old.get("notes") or "")
     _save(session_id, goal=g)
 
 
@@ -388,7 +408,8 @@ def resume_goal(session_id: str, emit, reason: str) -> bool:
     if s2:
         asyncio.get_running_loop().create_task(emit({"type": "session_updated", "session": s2}))
     GOAL_TASKS[session_id] = _track(session_id, run_goal(session_id, g["objective"], emit, steps=list(g["steps"]),
-                                                         start=int(g.get("idx") or 0), resume_reason=reason), emit)
+                                                         start=int(g.get("idx") or 0), resume_reason=reason,
+                                                         notes=str(g.get("notes") or "")), emit)
     return True
 
 
@@ -414,7 +435,7 @@ async def _resume_step(ctx, session_id: str, reason: str, emit) -> bool:
 
 
 async def run_goal(session_id: str, objective: str, emit, steps: list[str] | None = None,
-                   start: int = 0, resume_reason: str = "") -> None:
+                   start: int = 0, resume_reason: str = "", notes: str = "") -> None:
     """目標：拆步驟（能一步就一步）→ 照做 → 全部做完只做一次對抗檢查 → 有缺口補一輪。
     start／resume_reason：程式重開或停止後「繼續」，從第 start 步接回（那一步先用接續訊息做完）。"""
     from woof.agent.loop import TurnContext
@@ -432,7 +453,7 @@ async def run_goal(session_id: str, objective: str, emit, steps: list[str] | Non
     try:
         if steps is None:
             steps = await plan_steps(model_cfg, objective)
-        steps = [s for s in steps if str(s).strip()][:STEPS_MAX]
+        steps = [s for s in (_step_text(x) for x in steps) if s][:STEPS_MAX]
         if not steps:
             from woof.agent.loop import run_model_loop
 
@@ -442,7 +463,7 @@ async def run_goal(session_id: str, objective: str, emit, steps: list[str] | Non
             return
         start = max(0, min(start, len(steps)))
         items = set_todos(session_id, [{"text": s, "status": "done" if i < start else "pending"} for i, s in enumerate(steps)])
-        _goal_save(session_id, objective, "running", steps, start, new=not resume_reason)
+        _goal_save(session_id, objective, "running", steps, start, new=not resume_reason, notes=notes)
         await _push_todos(emit, session_id, items)
         if start:
             await emit({"type": "notice", "session_id": session_id,
@@ -458,7 +479,7 @@ async def run_goal(session_id: str, objective: str, emit, steps: list[str] | Non
             if i == start and resume_reason:
                 ok = await _resume_step(ctx, session_id, resume_reason, emit)
             else:
-                ok = await _run_step(ctx, session_id, objective, step, i, len(steps), emit, plan=steps)
+                ok = await _run_step(ctx, session_id, objective, step, i, len(steps), emit, plan=steps, notes=notes)
             items[i]["status"] = "done" if ok else "failed"
             if not ok:
                 failed += 1
@@ -567,9 +588,11 @@ async def expand_plan(parent, objective: str, steps: list[str]) -> tuple[list[st
     if r is None:
         return [], ""
     j = _jobj(r.get("answer") or "", "steps")
-    new = [str(x).strip() for x in ((j or {}).get("steps") or []) if str(x).strip()]
+    new = [s for s in (_step_text(x) for x in ((j or {}).get("steps") or [])) if s]
     if new:
-        return new[:STEPS_MAX], str((j or {}).get("notes") or "")[:200]
+        if len(new) > STEPS_MAX:   # 多出來的併進最後一步，不要直接丟掉（之前排的「出預覽圖、寫說明」就這樣被截掉）
+            new = new[:STEPS_MAX - 1] + ["；".join(new[STEPS_MAX - 1:])]
+        return new, str((j or {}).get("notes") or "")[:600]
     if parent is not None:
         await parent.emit({"type": "notice", "session_id": parent.session_id,
                            "text": "拓展模型（子代理）的回覆讀不出步驟，照原本的方案做"})
@@ -593,7 +616,7 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
         return
     ctx = TurnContext(session, model_cfg, (session or {}).get("effort") or model_cfg.get("default_effort"), emit)
     gate_name = {"human": "人工審核", "expand": "思維拓展"}.get(gate, "模型審核")
-    feedback, steps = "", None
+    feedback, steps, notes = "", None, ""
     rounds = flow_settings()["plan_rounds"]
 
     try:
@@ -662,7 +685,7 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
                 _save(session_id, goal={"objective": objective, "status": "stopped", "at": time.time()})
                 await emit({"type": "notice", "session_id": session_id, "text": "已取消，沒有動手"})
                 return
-        await run_goal(session_id, objective, emit, steps=steps)
+        await run_goal(session_id, objective, emit, steps=steps, notes=notes)
     except asyncio.CancelledError:
         g = dict(_state(session_id).get("goal") or {})   # run_goal 已存的步驟與進度留著，「繼續」才接得回來
         g.update(objective=objective, status="stopped", at=time.time())

@@ -281,18 +281,31 @@ def state() -> dict:
     return {"char": c, "name": name_of(), "face": d["face"], "mood": d.get("mood", ""),
             "say": d.get("say", ""), "sug": (d.get("sug") or [])[:1], "react": d.get("react", ""),
             "reacts": palette(c), "at": d.get("at", 0),
-            "calls": d.get("calls", 0), "msgs": len(d.get("msgs") or []),
+            "calls": d.get("calls", 0), "msgs": len(d.get("msgs") or []), "total": len(d.get("arch") or []) + len(d.get("msgs") or []),
             "mode": cfg()["mode"], "next_nudge": nudge_plan().get("at", 0),
             "summary": (d.get("summary") or "")[:400]}
 
 
+ARCH_MAX = 3000   # 壓縮掉的舊紀錄最多留幾則給畫面往上捲（不再送給模型）
+
+
 def history() -> list:
-    return _load().get("msgs") or []
+    """畫面用的完整紀錄：壓縮掉的舊紀錄（old=True，只給你看、牠已經不記得原文）＋目前的紀錄。"""
+    d = _load()
+    return [{**m, "old": True} for m in d.get("arch") or []] + (d.get("msgs") or [])
+
+
+def history_before(before: str, limit: int = 60) -> dict:
+    """往上捲時補更早的紀錄：回 before 那則之前的 limit 則，more＝再往上還有沒有。"""
+    h = history()
+    i = next((k for k, m in enumerate(h) if m.get("id") == before), len(h)) if before else len(h)
+    lo = max(0, i - max(1, min(int(limit or 60), 200)))
+    return {"items": h[lo:i], "more": lo > 0}
 
 
 def reset_chat() -> None:
     d = _load()
-    d.update(msgs=[], summary="", say="", mood="", sug=[], react="", at=0, last_main="")
+    d.update(msgs=[], arch=[], summary="", say="", mood="", sug=[], react="", at=0, last_main="")
     _save(d)
     gc_att()
 
@@ -594,7 +607,8 @@ def gc_att() -> int:
     used = set()
     for f in DIR.glob("chat-*.json"):
         try:
-            for m in json.loads(f.read_text(encoding="utf-8")).get("msgs") or []:
+            j = json.loads(f.read_text(encoding="utf-8"))
+            for m in (j.get("arch") or []) + (j.get("msgs") or []):
                 for a in m.get("att") or []:
                     used.add(str(a.get("path")))
         except Exception:
@@ -1096,6 +1110,7 @@ async def maybe_compress(emit=None) -> None:
     except Exception:
         return
     d["summary"] = out.strip()[:4000]
+    d["arch"] = ((d.get("arch") or []) + old)[-ARCH_MAX:]   # 原文留給畫面往上捲，只是不再送給模型
     d["msgs"] = recent
     d["compressed"] = int(d.get("compressed") or 0) + 1
     _save(d)
