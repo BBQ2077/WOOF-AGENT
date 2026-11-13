@@ -89,7 +89,7 @@ def _gen_by_goal(goal: str) -> str:
 
 def _gen_target(woof, t: dict) -> dict | None:
     """model 填 image／video（或直接填生圖、影片模型的名字）→ 不開子對話，直接交給生成模型。
-    模型順序：使用者勾的「可指派的模型」裡同類的 → media 插件指定的 → 第一個有 key 的同類模型。"""
+    模型順序：主模型直接點名的 → 模型用途「生圖／生影片」選的 → 子代理可指派裡同類的 → 第一個有 key 的同類模型。"""
     from woof import media
     from woof.loader import REG
 
@@ -106,16 +106,16 @@ def _gen_target(woof, t: dict) -> dict | None:
         return None
     if named and media.kind_of(named) == kind:
         return named
+    mp = REG.plugins.get("media")
+    pref = str(((mp.settings if mp else None) or {}).get(f"{kind}_model") or "")
+    if pref:  # 設定 → 模型用途 → 生圖／生影片
+        hit = next((m for m in models if m["id"] == pref), None)
+        if hit:
+            return hit
     ok = _allowed(woof)
     hit = next((m for m in models if m["id"] in ok and media.kind_of(m) == kind), None)
     if hit:
         return hit
-    mp = REG.plugins.get("media")
-    pref = str(((mp.settings if mp else None) or {}).get(f"{kind}_model") or "")
-    if pref:
-        hit = next((m for m in models if m["id"] == pref), None)
-        if hit:
-            return hit
     for m in models:
         if media.kind_of(m) == kind and woof.keys(m.get("key_pool") or m.get("provider")).entries:
             return m

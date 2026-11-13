@@ -1,5 +1,7 @@
 // 介面英文對照：key 是介面上的中文原文（{0} {1} 是會變動的部分），value 是英文
 window.WOOF_EN = {
+  '生圖・生影片': 'Image & video generation',
+  '生影片': 'Video generation',
   '方案模式': 'Plan mode',
   '方案最多提幾版': 'Max plan revisions',
   '做完驗收後最多補幾輪': 'Max fix rounds after review',

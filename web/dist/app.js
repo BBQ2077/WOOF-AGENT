@@ -4877,6 +4877,8 @@ const SET_Q = {
     ['aux:vision', '看圖', '圖片 視覺 圖片分析 vision_analyze'],
     ['aux:compact', '壓縮', '上下文 摘要 摘要模型'],
     ['aux:subagent', '子代理', 'delegate_task 分公司'],
+    ['aux:image', '生圖', '圖片生成 image 繪圖'],
+    ['aux:video', '生影片', '影片生成 video 動畫'],
     ['aux:review', '自動審核', '審核 權限 放行 先問我'],
     ['auxFollow', '全部跟隨主模型', ''],
   ],
@@ -5382,6 +5384,8 @@ const AUX = [
   ['vision', '看圖', '圖片分析', 'vision_analyze 工具看本機圖片時用的模型，要選支援看圖的。'],
   ['compact', '壓縮', '上下文壓縮', '把較早的對話寫成摘要。建議選便宜、上下文大的模型。'],
   ['subagent', '子代理', 'delegate_task', '子代理預設用的模型。需要 API 型連線（Claude Code CLI 不行）。'],
+  ['image', '生圖', 'delegate_task image', '主模型派子代理生圖（model 填 image）時用的模型。只列生圖模型；留空＝第一個有 key 的生圖模型。'],
+  ['video', '生影片', 'delegate_task video', '主模型派子代理生影片（model 填 video）時用的模型。只列影片模型；留空＝第一個有 key 的影片模型。'],
   ['review', '自動審核', '先問我', '權限要問你的動作，先交給這個模型判斷（只給工具名稱、參數、工作目錄，不給對話內容）。判定安全就直接放行並在對話裡留一行紀錄，判不出來或有疑慮才問你。危險指令一律問你。留空就不審核。建議選便宜、快的模型。'],
 ];
 // ---- 統一下拉選單（取代原生 select，與對話框的浮動選單同風格）
@@ -5564,6 +5568,7 @@ function auxFits(task, m) {
   if (task !== 'fallback' && provider === 'claude_cli') return false;
   if (task === 'vision' && !m.vision) return false;
   // 生圖／影片模型不會跑工具，不能當子代理、看圖、壓縮、審核；要生圖由主模型 delegate_task 填 model=image／video
+  if (task === 'image' || task === 'video') return m.kind === task;
   if (task !== 'fallback' && (m.kind === 'image' || m.kind === 'video')) return false;
   return true;
 }
@@ -5592,7 +5597,30 @@ function subagentRowHtml(n, tag) {
     })
     + '</div>';
 }
+function genRowHtml(k, n, tag, d) {
+  // 存在 media 插件的 image_model／video_model：跟插件設定頁、image_generate／video_generate 工具是同一份
+  const pl = (S.plugins || []).find((x) => x.name === 'media');
+  const key = `${k}_model`, cur = String(((pl && pl.settings) || {})[key] || '');
+  const m = S.cfg.models.find((x) => x.id === cur);
+  const none = !(S.models || []).some((x) => x.kind === k);
+  const now = m ? `目前：${m.label || m.id}` : none ? `目前：還沒有${n === '生圖' ? '生圖' : '影片'}模型，到「模型商」加一個` : '目前：自動（第一個有 key 的）';
+  return `<div class="auxrow" data-f="aux:${k}"><div><b>${n}<i>${tag}</i></b><small>${d}</small><div class="now">${esc(now)}</div></div>`
+    + mpPairHtml('aux:' + k, cur, {
+      filter: (x) => auxFits(k, x),
+      blank: '自動',
+      set: (v) => {
+        if (!pl) { notify('err', '沒有 media 插件，存不了'); return; }
+        pl.settings = { ...(pl.settings || {}), [key]: v || '' };
+        savePluginSetting('media', key, v || '', true);
+        const row = document.querySelector(`.auxrow[data-f="aux:${k}"] .now`);
+        const mm = S.cfg.models.find((x) => x.id === v);
+        if (row) row.textContent = mm ? `目前：${mm.label || mm.id}` : '目前：自動（第一個有 key 的）';
+      },
+    })
+    + '</div>';
+}
 function auxRowHtml(k, n, tag, d) {
+  if (k === 'image' || k === 'video') return genRowHtml(k, n, tag, d);
   if (k === 'subagent' && (S.plugins || []).some((x) => x.name === 'subagent')) return subagentRowHtml(n, tag);
   const cur = S.cfg.aux[k] || '';
   const m = S.cfg.models.find((x) => x.id === cur);
@@ -5612,10 +5640,13 @@ function renderAux(box) {
   const dm = (S.models || []).find((x) => x.id === S.cfg.default_model);
   const primary = `<div class="auxrow" data-f="primary"><div><b>主要模型<i>新對話預設</i></b><small>新對話與每次開啟 app 時使用的模型。已存在的對話仍用它自己的模型。</small><div class="now">${esc(dm ? `目前：${dm.label}` : '目前：未設定（清單第一個可用）')}</div></div>`
     + mpPairHtml('primary', S.cfg.default_model, { blank: '未設定', set: (v) => { S.cfg.default_model = v; setDirty(true); } }) + '</div>';
-  const roles = AUX.filter(([k]) => k !== 'fallback');
+  const gen = ['image', 'video'];
+  const roles = AUX.filter(([k]) => k !== 'fallback' && !gen.includes(k));
   const fb = AUX.find(([k]) => k === 'fallback');
   box.innerHTML = `<div class="card">${primary}${roles.map(([k, n, tag, d]) => auxRowHtml(k, n, tag, d)).join('')}</div>
   <div class="addbar" data-f="auxFollow"><span class="btn" id="auxFollow">全部跟隨主模型</span></div>
+  <div class="cmp-h">生圖・生影片</div>
+  <div class="card">${AUX.filter(([k]) => gen.includes(k)).map((a) => auxRowHtml(...a)).join('')}<div class="auxnote">不跟隨主模型。主模型派子代理時 model 填 image／video 就用這裡選的；image_generate／video_generate 工具開著的話也用同一個。</div></div>
   <div class="cmp-h">備用模型</div>
   <div class="card">${auxRowHtml(...fb)}<div class="auxnote">這一項不受上面的「全部」影響；預設不設，出錯就停下來告訴你。</div></div>`;
 }
