@@ -55,9 +55,21 @@ def _to_anthropic(messages: list[dict]) -> list[dict]:
                     conv.append({"type": "tool_use", "id": b["id"], "name": b["name"], "input": b.get("args") or {}})
             push("assistant", conv)
         elif role == "tool":
-            push("user", [{"type": "tool_result", "tool_use_id": b["id"], "content": b["output"] or "(無輸出)",
+            push("user", [{"type": "tool_result", "tool_use_id": b["id"], "content": _result_content(b),
                            "is_error": bool(b.get("is_error"))} for b in blocks if b["type"] == "tool_result"]
                  + [{"type": "text", "text": b["text"], "_note": True} for b in blocks if b["type"] == "note"])
+    return out
+
+
+def _result_content(b: dict):
+    """工具結果：有附圖（vision_analyze）就用文字＋圖片區塊，Claude 的 tool_result 直接收圖。"""
+    text = b["output"] or "(無輸出)"
+    if not b.get("images"):
+        return text
+    out: list[dict] = [{"type": "text", "text": text}]
+    for p in b["images"]:
+        mt, data = load_image_b64(p)
+        out.append({"type": "image", "source": {"type": "base64", "media_type": mt, "data": data}})
     return out
 
 

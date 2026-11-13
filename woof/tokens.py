@@ -31,7 +31,7 @@ def estimate_blocks(content) -> int:
         elif t == "tool_call":
             n += estimate_text(b.get("name") or "") + estimate_text(json.dumps(b.get("args") or {}, ensure_ascii=False))
         elif t == "tool_result":
-            n += estimate_text(b.get("output") or "")
+            n += estimate_text(b.get("output") or "") + 1500 * len(b.get("images") or [])
         elif t == "image":
             n += 1500  # 各家圖片約 1–1.6k tokens
     return n
@@ -52,7 +52,7 @@ def pruned_result(b: dict) -> dict:
 
     out = b.get("output") or ""
     text = _p("tool_pruned", name=b.get("name") or "tool", status="失敗" if b.get("is_error") else "成功", chars=len(out))
-    return {**b, "output": text, "pruned": True}
+    return {**{k: v for k, v in b.items() if k != "images"}, "output": text, "pruned": True}   # 舊圖一起拿掉
 
 
 def apply_prune(messages: list[dict], es: dict | None) -> list[dict]:

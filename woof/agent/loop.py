@@ -7,7 +7,7 @@
   {"type": "image", "path": str, "media_type": str}
   {"type": "thinking", "text": str, "signature"?: str}
   {"type": "tool_call", "id": str, "name": str, "args": dict}
-  {"type": "tool_result", "id": str, "name": str, "output": str, "is_error": bool}
+  {"type": "tool_result", "id": str, "name": str, "output": str, "is_error": bool, "images"?: [image 區塊]}
 角色：user / assistant / tool
 """
 from __future__ import annotations
@@ -525,6 +525,7 @@ async def _run_tool(call: dict, ctx: TurnContext) -> dict:
     await ctx.emit({"type": "tool_start", "session_id": ctx.session_id, "id": cid, "name": name, "args": args})
     tool = REG.tools.get(name)
     is_error = False
+    images: list[dict] = []
     # 原地打轉：同一個工具、同樣參數在這一回合已經失敗 2 次，第 3 次不再執行，請模型換方法
     fails = ctx.__dict__.setdefault("tool_fails", {})
     fp = name + json.dumps(args, ensure_ascii=False, sort_keys=True, default=str)[:4000]
@@ -553,6 +554,9 @@ async def _run_tool(call: dict, ctx: TurnContext) -> dict:
             result = await REG.events.pipe("after_tool", result, name, args, ctx)
             if isinstance(result, dict):
                 is_error = bool(result.get("is_error"))
+                # 工具交給主模型自己看的圖（vision_analyze）：跟著工具結果送，模型不能看圖時由服務商插件轉文字
+                images = [i for i in (result.get("images") or []) if isinstance(i, dict) and i.get("path")
+                          and Path(i["path"]).is_file()] if not is_error else []
                 output = result.get("output", "")
                 if not isinstance(output, str):
                     output = json.dumps(output, ensure_ascii=False, indent=1)
@@ -571,12 +575,15 @@ async def _run_tool(call: dict, ctx: TurnContext) -> dict:
         fails.pop(fp, None)
     ms = int((time.time() - t0) * 1000)
     await ctx.emit({"type": "tool_end", "session_id": ctx.session_id, "id": cid, "name": name,
-                    "output": output, "is_error": is_error, "ms": ms})
+                    "output": output, "is_error": is_error, "ms": ms, **({"images": images} if images else {})})
     try:
         store.log_op(ctx.session_id, "tool", name, ms, None, is_error)
     except Exception:
         pass
-    return {"type": "tool_result", "id": cid, "name": name, "output": output, "is_error": is_error}
+    res = {"type": "tool_result", "id": cid, "name": name, "output": output, "is_error": is_error}
+    if images:
+        res["images"] = images
+    return res
 
 
 

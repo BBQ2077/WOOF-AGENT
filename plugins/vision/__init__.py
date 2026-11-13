@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import io
+import uuid
 from pathlib import Path
 
 import httpx
@@ -55,6 +56,19 @@ async def _load_url(url: str) -> Image.Image:
     return Image.open(io.BytesIO(bytes(buf)))
 
 
+def _native_model(woof, turn_model: dict | None) -> dict | None:
+    """這個回合的模型能不能自己看工具給的圖。「模型用途 → 看圖」有指定模型時照指定的另外看（明確指定優先）。"""
+    from woof import caps
+    from woof.loader import REG
+
+    if turn_model is None or (REG.config.get("aux") or {}).get("vision"):
+        return None
+    cfg = REG.model_cfg(turn_model["id"]) or turn_model
+    if not cfg.get("vision") or caps.down(cfg["id"]) or cfg.get("provider") not in ("openai_compat", "anthropic"):
+        return None
+    return cfg
+
+
 def register(woof):
     async def vision_analyze(args: dict, ctx) -> dict:
         raw = (args.get("path") or "").strip()
@@ -91,6 +105,16 @@ def register(woof):
         from woof.config import DATA
 
         turn = getattr(ctx, "turn", None)
+        note = f"（來源：{src}{'，裁切 ' + str(list(region)) if region else ''}）"
+        tm = _native_model(woof, turn.model_cfg if turn is not None else None)
+        if tm is not None:
+            # 主模型自己能看圖：圖直接放進它的上下文，不另外叫模型轉述（少一次請求，看的人也知道前因後果）
+            from woof.uploads import DIR
+            DIR.mkdir(parents=True, exist_ok=True)
+            pic = DIR / f"{uuid.uuid4().hex[:12]}.png"
+            pic.write_bytes(base64.b64decode(data))
+            return {"output": f"圖片已放進你的上下文（uploads/{pic.name}）{note}，直接用你自己的視覺看圖回答：{question}",
+                    "images": [{"type": "image", "path": str(pic), "media_type": media}]}
         from woof.agent.loop import vision_chain
         chain = vision_chain(turn.model_cfg if turn is not None else None)
         if not chain:
@@ -117,13 +141,12 @@ def register(woof):
         if model is None:
             return {"output": "看圖失敗：\n" + "\n".join(errs), "is_error": True}
         who = model.get("label") or model["id"]
-        note = f"（來源：{src}{'，裁切 ' + str(list(region)) if region else ''}）"
         tried = f"（{'；'.join(errs)}，改用 {who}）" if errs else ""
         return {"output": f"（{who}）{note}{tried}\n{text or '（模型沒有回覆）'}"}
 
     woof.add_tool(
         "vision_analyze",
-        "看一張圖片並回答問題。可給本機路徑（path）或網址（url，http/https）；region 可裁切原圖的 [x1,y1,x2,y2]。使用者直接貼上的圖不用這個工具。",
+        "看一張圖片。你能看圖時，圖會直接放進你的上下文，由你自己看；不能看圖時交給看圖模型轉成文字。可給本機路徑（path）或網址（url，http/https）；region 可裁切原圖的 [x1,y1,x2,y2]。使用者直接貼上的圖不用這個工具。",
         {"type": "object", "properties": {
             "path": {"type": "string", "description": "本機圖片檔的絕對路徑（與 url 二選一）"},
             "url": {"type": "string", "description": "圖片網址，http 或 https（與 path 二選一）"},

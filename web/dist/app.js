@@ -668,7 +668,7 @@ function onEvent(ev) {
     }
     case 'tool_end': {
       const t = S.tools[ev.id] || (S.tools[ev.id] = { sid, name: ev.name });
-      Object.assign(t, { running: false, ms: ev.ms, is_error: ev.is_error, output: ev.output });
+      Object.assign(t, { running: false, ms: ev.ms, is_error: ev.is_error, output: ev.output, images: ev.images });
       if (sid === S.sid) renderChat();
       refreshTasks();
       break;
@@ -1658,6 +1658,19 @@ function toolCard(call, result) {
     el.appendChild(more);
   }
   if (S.openTools && S.openTools.has(call.id)) el.classList.add('open');
+  // 工具交給模型自己看的圖（vision_analyze）：卡片上直接顯示，點一下用看圖器開
+  const imgs = (result && result.images) || live.images || [];
+  if (imgs.length) {
+    const box = document.createElement('div');
+    box.className = 'timgs';
+    for (const p of imgs) {
+      const im = document.createElement('img');
+      im.src = fileUrl(p.path); im.loading = 'lazy'; im.title = p.path;
+      im.onclick = (ev) => { ev.stopPropagation(); openPreview(p.path); };
+      box.appendChild(im);
+    }
+    el.insertBefore(box, $('pre', el));
+  }
   if (call.name === 'delegate_task') {
     const sids = [...String(out || '').matchAll(/對話 ([0-9a-f]{12})）/g)].map((x) => x[1]);
     // 執行中還沒有輸出：只列「這次派出的」一般子代理（審核另外一疊，不混進來）

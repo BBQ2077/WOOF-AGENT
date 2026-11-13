@@ -85,10 +85,26 @@ def _to_chat(messages: list[dict], vision: bool, echo: str) -> list[dict]:
             for b in blocks:
                 if b["type"] == "tool_result":
                     out.append({"role": "tool", "tool_call_id": b["id"], "content": b["output"] or "(無輸出)"})
-            notes = [b["text"] for b in blocks if b["type"] == "note"]
-            if notes:  # 重點便條：工具結果後面另起一則，工具結果本身一個字都不動，快取前綴不受影響
-                out.append({"role": "user", "content": "\n".join(notes)})
+            # 工具給的圖：tool 訊息很多服務商只收文字，所以放在工具結果後面另起一則 user（各家都收）。
+            # 圖在前、便條在後：便條只出現在最後一次請求，拿掉時圖那段的快取前綴不變
+            parts = []
+            for p in _tool_images(blocks):
+                if vision:
+                    mt, data = load_image_b64(p)
+                    parts.append({"type": "image_url", "image_url": {"url": f"data:{mt};base64,{data}"}})
+                else:
+                    parts.append({"type": "text", "text": f"[工具附上一張圖片：{p['path']}，此模型無法直接看圖]"})
+            if parts:
+                parts.insert(0, {"type": "text", "text": "[上面工具結果附的圖片]"})
+            parts += [{"type": "text", "text": b["text"]} for b in blocks if b["type"] == "note"]
+            if parts:  # 重點便條：工具結果後面另起一則，工具結果本身一個字都不動，快取前綴不受影響
+                out.append({"role": "user", "content": parts if any(p["type"] != "text" for p in parts)
+                            else "\n".join(p["text"] for p in parts)})
     return out
+
+
+def _tool_images(blocks: list[dict]) -> list[dict]:
+    return [i for b in blocks if b.get("type") == "tool_result" for i in (b.get("images") or [])]
 
 
 _REASONING_MODELS = ("gpt-5", "gpt-6", "o1", "o3", "o4", "codex")
@@ -169,9 +185,20 @@ def _to_responses(messages: list[dict], vision: bool, echo: str) -> list[dict]:
                 if b["type"] == "tool_result":
                     out.append({"type": "function_call_output", "call_id": b["id"],
                                 "output": b["output"] or "(無輸出)"})
+            parts = []
+            for p in _tool_images(blocks):
+                if vision:
+                    mt, data = load_image_b64(p)
+                    parts.append({"type": "input_image", "image_url": f"data:{mt};base64,{data}"})
+                else:
+                    parts.append({"type": "input_text", "text": f"[工具附上一張圖片：{p['path']}，此模型無法直接看圖]"})
+            if parts:
+                parts.insert(0, {"type": "input_text", "text": "[上面工具結果附的圖片]"})
             notes = [b["text"] for b in blocks if b["type"] == "note"]
             if notes:
-                out.append({"role": "user", "content": [{"type": "input_text", "text": "\n".join(notes)}]})
+                parts.append({"type": "input_text", "text": "\n".join(notes)})
+            if parts:
+                out.append({"role": "user", "content": parts})
     return out
 
 
@@ -215,7 +242,8 @@ _DESC_CACHE: dict[str, str] = {}   # 圖片路徑 → 看圖模型的描述（�
 
 
 def _has_image(messages: list[dict]) -> bool:
-    return any(b.get("type") == "image" for m in messages if m["role"] == "user" for b in m["content"])
+    return any(b.get("type") == "image" or b.get("images") for m in messages if m["role"] in ("user", "tool")
+               for b in m["content"])
 
 
 def _short_reason(e) -> str:
@@ -228,41 +256,51 @@ def _short_reason(e) -> str:
 
 
 async def _describe_images(woof, messages: list[dict]) -> list[dict]:
-    """模型不能看圖時，用「輔助模型 → 看圖」把每張圖轉成文字；沒有可用的看圖模型就留路徑說明。"""
+    """模型不能看圖時，用「輔助模型 → 看圖」把每張圖轉成文字；沒有可用的看圖模型就留路徑說明。
+    使用者貼的圖換成文字區塊；工具附的圖（vision_analyze）把描述接在工具結果後面。"""
     from woof.agent.loop import complete, vision_chain
     from woof.prompts import get as _prompt
     chain = [m for m in vision_chain(None) if m.get("vision") is not False]
-    vm = chain[0] if chain else None
     cache = _DESC_CACHE
+
+    async def desc_of(b: dict, who: str) -> str:
+        key = b.get("path") or b.get("sha") or str(id(b))
+        if key not in cache:
+            desc = ""
+            errs = []
+            for vm in chain[:3]:
+                try:
+                    desc = await complete(vm, _prompt("vision"), [{"role": "user", "content": [
+                        b, {"type": "text", "text": "詳細描述這張圖，包含所有看得到的文字。"}]}])
+                    break
+                except Exception as ex:  # 換下一個看圖模型
+                    errs.append(f"{vm.get('label', vm['id'])}：{str(ex)[:160]}")
+            if not desc and errs:
+                return f"[{who}附上一張圖片：{b.get('path', '')}，看圖模型都失敗：{'；'.join(errs)}]"
+            cache[key] = (f"[{who}附上一張圖片：{b.get('path', '')}。以下是看圖模型的描述]\n{desc}" if desc
+                          else f"[{who}附上一張圖片：{b.get('path', '')}，這個模型不能直接看圖，也沒有設定看圖輔助模型]")
+        if len(cache) > 200:
+            cache.pop(next(iter(cache)))
+        return cache[key]
+
     out = []
     for m in messages:
+        if m["role"] == "tool" and any(b.get("images") for b in m["content"]):
+            blocks = []
+            for b in m["content"]:
+                if b.get("type") == "tool_result" and b.get("images"):
+                    texts = [await desc_of(p, "工具") for p in b["images"]]
+                    b = {**{k: v for k, v in b.items() if k != "images"},
+                         "output": "\n".join([b.get("output") or ""] + texts)}
+                blocks.append(b)
+            out.append({**m, "content": blocks})
+            continue
         if m["role"] != "user" or not any(b.get("type") == "image" for b in m["content"]):
             out.append(m)
             continue
         blocks = []
         for b in m["content"]:
-            if b.get("type") != "image":
-                blocks.append(b)
-                continue
-            key = b.get("path") or b.get("sha") or str(id(b))
-            if key not in cache:
-                desc = ""
-                errs = []
-                for vm in chain[:3]:
-                    try:
-                        desc = await complete(vm, _prompt("vision"), [{"role": "user", "content": [
-                            b, {"type": "text", "text": "詳細描述這張圖，包含所有看得到的文字。"}]}])
-                        break
-                    except Exception as ex:  # 換下一個看圖模型
-                        errs.append(f"{vm.get('label', vm['id'])}：{str(ex)[:160]}")
-                if not desc and errs:
-                    blocks.append({"type": "text", "text": f"[使用者附上一張圖片：{b.get('path', '')}，看圖模型都失敗：{'；'.join(errs)}]"})
-                    continue
-                cache[key] = (f"[使用者附上一張圖片：{b.get('path', '')}。以下是看圖模型的描述]\n{desc}" if desc
-                              else f"[使用者附上一張圖片：{b.get('path', '')}，這個模型不能直接看圖，也沒有設定看圖輔助模型]")
-            if len(cache) > 200:
-                cache.pop(next(iter(cache)))
-            blocks.append({"type": "text", "text": cache[key]})
+            blocks.append({"type": "text", "text": await desc_of(b, "使用者")} if b.get("type") == "image" else b)
         out.append({**m, "content": blocks})
     return out
 

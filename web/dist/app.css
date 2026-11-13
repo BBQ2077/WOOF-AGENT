@@ -1850,3 +1850,5 @@ body.pane2 #paneA{padding:0}
 .cp-tool .cp-sw{display:inline-block;vertical-align:middle;margin-left:10px;overflow:visible}
 .cp-tool .cp-sw.pend{background:var(--warn)}
 .cp-tool .cp-sw.dis{opacity:.35;cursor:not-allowed}
+.tool .timgs{display:flex;gap:6px;padding:6px 10px 8px;flex-wrap:wrap}
+.tool .timgs img{max-height:120px;max-width:220px;border-radius:6px;border:1px solid var(--line);cursor:zoom-in;object-fit:contain;background:var(--panel)}
