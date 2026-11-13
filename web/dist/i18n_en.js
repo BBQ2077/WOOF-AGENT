@@ -1,5 +1,9 @@
 // 介面英文對照：key 是介面上的中文原文（{0} {1} 是會變動的部分），value 是英文
 window.WOOF_EN = {
+  '打開': 'Enable',
+  '這個對話打開工具': 'Enable tool for this chat',
+  '壓縮時關': 'Off at next compaction',
+  '這個對話關了': 'Off in this chat',
   '這個對話開': 'Enable here',
   '這個對話開著': 'On in this chat',
   '關掉': 'Turn off',

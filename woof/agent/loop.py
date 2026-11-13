@@ -110,6 +110,8 @@ class TurnContext:
         self.tool_exclude: set[str] = set()
         # 這個對話手動開的工具（全域「設定中停用」的才算），送出時排在工具清單最後面
         self.tool_include: set[str] = set((session.get("engine_state") or {}).get("tools_on") or [])
+        # 這個對話手動關的工具（全域開著的）
+        self.tool_off: set[str] = set((session.get("engine_state") or {}).get("tools_off") or [])
         self.extra_system = ""
         # 寫入子代理可改的範圍（None＝不限；唯讀子代理用不到）
         self.write_scope: list | None = None
@@ -172,9 +174,12 @@ def tool_cost(name: str, description: str, schema) -> tuple[int, int]:
 async def tool_specs_for(ctx: TurnContext) -> list[dict]:
     """這一步實際送給模型的工具：先排除停用的，再交給 tool_specs 掛鉤（例如工具延遲載入）。"""
     live = store.get_session(ctx.session_id) if getattr(ctx, "session_id", None) else None
-    if live is not None:  # 回合中途壓縮時拿掉的工具，這一步就不送（不等下一回合，免得再重算一次）
-        ctx.tool_include = set((live.get("engine_state") or {}).get("tools_on") or [])
-    return await REG.events.pipe("tool_specs", active_tool_specs(ctx.tool_exclude, getattr(ctx, "tool_include", None)), ctx)
+    if live is not None:  # 回合中途壓縮時換掉的工具，這一步就照新的送（不等下一回合，免得再重算一次）
+        les = live.get("engine_state") or {}
+        ctx.tool_include = set(les.get("tools_on") or [])
+        ctx.tool_off = set(les.get("tools_off") or [])
+    return await REG.events.pipe("tool_specs", active_tool_specs(ctx.tool_exclude | getattr(ctx, "tool_off", set()),
+                                                                 getattr(ctx, "tool_include", None)), ctx)
 
 
 async def tool_overview(ctx: TurnContext) -> list[dict]:
@@ -198,6 +203,8 @@ async def tool_overview(ctx: TurnContext) -> list[dict]:
     for ex in [ctx.tool_exclude]:
         for n in ex:
             reasons.setdefault(n, "這個對話停用")
+    for n in getattr(ctx, "tool_off", ()) or ():
+        reasons.setdefault(n, "這個對話關了")
     pre = [t for t in REG.tool_specs() if t["name"] not in reasons]
     pre = [t for t in pre if t["name"] not in inc] + [t for t in pre if t["name"] in inc]
     sent = {t["name"]: t for t in await REG.events.pipe("tool_specs", pre, ctx)}
@@ -214,6 +221,7 @@ async def tool_overview(ctx: TurnContext) -> list[dict]:
                     "enabled": n not in reasons, "reason": reasons.get(n, "") or ("延遲載入：用到時才載入說明" if deferred else ""),
                     "deferred": deferred, "chars": chars, "tokens_est": 0 if deferred else tok,
                     "session_on": n in inc and n not in reasons,
+                    "session_off": reasons.get(n) == "這個對話關了",
                     "drop_pending": n in set(es.get("tools_drop") or ())})
     for n, t in sent.items():
         if n not in REG.tools or n in reasons:
@@ -525,7 +533,8 @@ async def _run_tool(call: dict, ctx: TurnContext) -> dict:
         output, is_error = f"找不到工具：{name}", True
     elif isinstance(args, dict) and "_raw" in args:
         output, is_error = _P("raw_args"), True
-    elif (name in disabled_tools() and name not in getattr(ctx, "tool_include", ())) or name in getattr(ctx, "tool_exclude", ()):
+    elif ((name in disabled_tools() and name not in getattr(ctx, "tool_include", ())) or name in getattr(ctx, "tool_exclude", ())
+          or name in getattr(ctx, "tool_off", ())):
         output, is_error = f"工具 {name} 已被停用", True
     elif not (ok := await _approved(call, ctx))[0]:
         output, is_error = ok[1], True

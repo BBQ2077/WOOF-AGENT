@@ -3160,6 +3160,14 @@ function sysNotify(title, body) {
 
 // ------------------------------------------------------------------ 上下文面板：用量、統計、這個對話的總提示詞、壓縮
 const CP = { sid: null, d: null, stats: null, draft: null };
+// 本回合工具每一列的開關：只改這個對話。權限、插件、計畫模式擋掉的不能開（灰色、不能按）
+function cpToolSw(t) {
+  if (t.bridge) return '';
+  const on = t.enabled && !t.drop_pending;
+  const can = t.enabled || t.reason === '設定中停用' || t.session_off;
+  const tip = t.drop_pending ? '下次壓縮時關；按一下取消' : !can ? `${t.reason}，要到對應的設定改` : on ? '這個對話關掉' : '這個對話打開';
+  return `<span class="sw sm cp-sw${on ? ' on' : ''}${t.drop_pending ? ' pend' : ''}${can ? '' : ' dis'}" data-cp="${!can ? 'noop' : t.drop_pending ? 'toolKeep' : on ? 'toolOff' : 'toolOn'}" data-tn="${esc(t.name)}" title="${esc(tip)}"></span>`;
+}
 async function loadCtxData() {
   const [d, st] = await Promise.all([api('GET', `/api/sessions/${S.sid}/prompt`), api('GET', `/api/sessions/${S.sid}/stats`)]);
   CP.d = d; CP.stats = st; CP.sid = S.sid;
@@ -3240,8 +3248,8 @@ function renderCtxPanel() {
     <div class="cp-sec">
       <div class="cp-sh"><b>本回合工具</b><span class="pr-badge">${onTools} / ${tools.length} 個會送出${nDefer ? `・${nDefer} 個延遲載入` : ''}・約 ${tools.filter((t) => t.enabled).reduce((a, t) => a + (t.tokens_est || 0), 0).toLocaleString()} tokens</span></div>
       <small class="cp-note">模型這一回合真正看得到的工具。灰色的是被排除，後面寫原因。每個工具的「字元」是名稱、說明與參數結構的 JSON 長度；tok 是粗估（英文約 4 字元 1 token，中文約 1.5 字元 1 token），實際計費以模型回報為準。</small>
-      <small class="cp-note">「設定中停用」的工具可以只在這個對話打開。工具清單在快取最前面，開或關的那一則整段對話要重算一次；開著的工具也走快取，每次只多一點點。要關建議選「壓縮時一起關」：壓縮本來就整段重算，一起換不多花。新對話照設定。</small>
-      ${tools.map((t) => `<div class="cp-tool" style="${t.enabled && !t.deferred ? '' : 'opacity:.55'}"><span>${esc(t.name)}</span><b>${esc(t.plugin)}${t.session_on ? (t.drop_pending ? ' · 這個對話開著，壓縮時關' : ' · 這個對話開著') : t.reason ? ' · ' + esc(t.reason) : ''}<em class="ctx-tok">${(t.chars || 0).toLocaleString()} 字 ≈ ${(t.tokens_est || 0).toLocaleString()} tok</em>${t.session_on ? (t.drop_pending ? `<span class="btn cp-tbtn" data-cp="toolKeep" data-tn="${esc(t.name)}">不關了</span>` : `<span class="btn cp-tbtn" data-cp="toolOff" data-tn="${esc(t.name)}">關掉</span>`) : t.reason === '設定中停用' ? `<span class="btn cp-tbtn" data-cp="toolOn" data-tn="${esc(t.name)}">這個對話開</span>` : ''}</b></div>`).join('') || '<small class="cp-note">沒有任何工具。</small>'}
+      <small class="cp-note">右邊的開關只改這個對話，新對話照「設定 → 工具」。工具清單在快取最前面，開或關的那一則整段對話要重算一次；開著的工具也走快取，每次只多一點點。要關建議選「壓縮時一起關」：壓縮本來就整段重算，一起換不多花。權限、插件、計畫模式擋掉的不能在這裡開。</small>
+      ${tools.map((t) => `<div class="cp-tool" style="${t.enabled && !t.deferred ? '' : 'opacity:.55'}"><span>${esc(t.name)}</span><b>${esc(t.plugin)}${t.drop_pending ? ' · 壓縮時關' : t.session_on ? ' · 這個對話開著' : t.reason ? ' · ' + esc(t.reason) : ''}<em class="ctx-tok">${(t.chars || 0).toLocaleString()} 字 ≈ ${(t.tokens_est || 0).toLocaleString()} tok</em>${cpToolSw(t)}</b></div>`).join('') || '<small class="cp-note">沒有任何工具。</small>'}
     </div>
     <div class="cp-sec">
       <div class="cp-sh"><b>輔助模型與搜尋</b></div>
@@ -3280,6 +3288,7 @@ $('#ctxPanel').addEventListener('click', async (e) => {
   if (k === 'webset') { closeCtxPanel(); showView('plug'); return; }
   if (k === 'compact') { await compactNow(); await refreshCtxPanel(); return; }
   if (k === 'style') { pickStyle(b); return; }
+  if (k === 'noop') { notify('info', b.title || '這個工具不能在這裡開'); return; }
   if (k === 'toolOff' || k === 'toolKeep') {
     const name = b.dataset.tn;
     let when = 'keep';
@@ -3306,10 +3315,10 @@ $('#ctxPanel').addEventListener('click', async (e) => {
     return;
   }
   if (k === 'toolOn') {
-    if (!await confirmBox('這個對話開啟工具', `開啟 ${b.dataset.tn}。下一則訊息整段對話要重算一次快取，之後照常命中。要關的話建議等壓縮時一起關。`, { ok: '開啟' })) return;
+    if (!await confirmBox('這個對話打開工具', `打開 ${b.dataset.tn}。下一則訊息整段對話要重算一次快取，之後照常命中。`, { ok: '打開' })) return;
     try {
       await api('POST', `/api/sessions/${S.sid}/tools`, { name: b.dataset.tn, on: true });
-      notify('ok', `這個對話開了 ${b.dataset.tn}`, '下一則訊息起生效');
+      notify('ok', `這個對話打開了 ${b.dataset.tn}`, '下一則訊息起生效');
       await refreshCtxPanel();
     } catch (err) { notify('error', '改不了', err.message); }
     return;

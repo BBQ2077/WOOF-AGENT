@@ -1843,4 +1843,6 @@ body.pane2 #paneA{padding:0}
 .genp-row input{width:60px}
 .genp-row em{font-style:normal;color:var(--faint)}
 .genp-doc{cursor:pointer;color:var(--acc);text-decoration:underline}
-.cp-tool .cp-tbtn{margin-left:8px;padding:0 7px;height:20px;line-height:18px;font-size:11px;font-weight:500;white-space:nowrap;display:inline-flex;align-items:center}
+.cp-tool .cp-sw{display:inline-block;vertical-align:middle;margin-left:10px;overflow:visible}
+.cp-tool .cp-sw.pend{background:var(--warn)}
+.cp-tool .cp-sw.dis{opacity:.35;cursor:not-allowed}

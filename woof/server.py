@@ -2317,28 +2317,34 @@ async def set_gate(sid: str, body: dict):
 
 @app.post("/api/sessions/{sid}/tools")
 async def set_session_tool(sid: str, body: dict):
-    """這個對話手動開／關一個全域停用的工具。body: {"name", "on", "when"}。開的工具排在工具清單最後面。
-    關：when="compress" 等下次壓縮一起拿掉（不多花）；when="now" 立刻拿掉（下一則整段重算）；on=true 會取消待關。"""
+    """這個對話手動開／關一個工具，不動全域設定。body: {"name", "on", "when"}。
+    開：全域停用的放進 tools_on（排在工具清單最後面）；這個對話關過的從 tools_off 拿掉；也會取消待關。
+    關：when="compress" 等下次壓縮一起關（不多花）；when="now" 立刻關（下一則整段重算）。"""
     s = store.get_session(sid)
     if not s:
         raise HTTPException(404)
     name = str(body.get("name") or "")
     if name not in REG.tools:
         raise HTTPException(400, f"沒有工具 {name}")
+    from woof.agent.loop import disabled_tools
+
     st = dict(s.get("engine_state") or {})
     on = list(st.get("tools_on") or [])
+    off = [x for x in (st.get("tools_off") or []) if x != name]
     drop = [x for x in (st.get("tools_drop") or []) if x != name]
+    glob_off = name in disabled_tools()
     if body.get("on"):
-        if name not in on:
+        if glob_off and name not in on:
             on.append(name)
     elif body.get("when") == "compress":
-        if name in on:
-            drop.append(name)
+        drop.append(name)
     else:
         on = [x for x in on if x != name]
-    st["tools_on"], st["tools_drop"] = on, drop
+        if not glob_off:
+            off.append(name)
+    st["tools_on"], st["tools_off"], st["tools_drop"] = on, off, drop
     store.update_session(sid, engine_state=st)
-    return {"ok": True, "tools_on": on, "tools_drop": drop}
+    return {"ok": True, "tools_on": on, "tools_off": off, "tools_drop": drop}
 
 
 @app.get("/api/media/spec")
