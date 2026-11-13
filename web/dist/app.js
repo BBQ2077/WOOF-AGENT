@@ -3065,7 +3065,7 @@ async function renderSkillsSet(box) {
   for (const s of info.skills) (byCat[s.category] = byCat[s.category] || []).push(s);
   const cats = Object.keys(byCat).sort();
   box.innerHTML = `<div class="sk-perm" data-f="skPerm">`
-    + `<div class="trow"><span class="sk-l"><b>允許讀取</b><small>模型能列出已勾選的 skill，並用 skill_view 載入全文</small></span><span class="sw sm${rw('read', false) ? ' on' : ''}" data-skperm="read"></span></div>`
+    + `<div class="trow"><span class="sk-l"><b>允許讀取</b><small>模型能列出已勾選的 skill，並用 skill_view 載入全文</small></span><span class="sw sm${rw('read', true) ? ' on' : ''}" data-skperm="read"></span></div>`
     + `<div class="trow"><span class="sk-l"><b>允許寫入</b><small>模型能用 skill_write 建立或覆寫 SKILL.md（只寫到 WOOF 的資料夾）</small></span><span class="sw sm${rw('write', false) ? ' on' : ''}" data-skperm="write"></span></div>`
     + `<div class="trow"><span class="sk-l"><b>讀取的外部資料夾</b><small>多個用 ; 分隔。留空＝只用 WOOF 自己的 data/skills，不讀任何外部技能庫。</small></span><input class="sk-dirs" value="${esc(sv.dirs || '')}" placeholder="留空＝不讀外部"><button class="btn sm" data-skdirs>套用資料夾</button></div>`
     + `</div>`
@@ -3164,7 +3164,7 @@ const CP = { sid: null, d: null, stats: null, draft: null };
 function cpToolSw(t) {
   if (t.bridge) return '';
   const on = t.enabled && !t.drop_pending;
-  const can = t.enabled || t.reason === '設定中停用' || t.session_off;
+  const can = t.enabled || t.reason === '設定中停用' || t.session_off || (t.reason === '權限設定關閉' && /^skill_(view|write)$/.test(t.name));
   const tip = t.drop_pending ? '下次壓縮時關；按一下取消' : !can ? `${t.reason}，要到對應的設定改` : on ? '這個對話關掉' : '這個對話打開';
   return `<span class="sw sm cp-sw${on ? ' on' : ''}${t.drop_pending ? ' pend' : ''}${can ? '' : ' dis'}" data-cp="${!can ? 'noop' : t.drop_pending ? 'toolKeep' : on ? 'toolOff' : 'toolOn'}" data-tn="${esc(t.name)}" title="${esc(tip)}"></span>`;
 }
@@ -3318,6 +3318,8 @@ $('#ctxPanel').addEventListener('click', async (e) => {
     if (!await confirmBox('這個對話打開工具', `打開 ${b.dataset.tn}。下一則訊息整段對話要重算一次快取，之後照常命中。`, { ok: '打開' })) return;
     try {
       await api('POST', `/api/sessions/${S.sid}/tools`, { name: b.dataset.tn, on: true });
+      const sk = { skill_view: 'read', skill_write: 'write' }[b.dataset.tn];
+      if (sk) await api('PUT', `/api/sessions/${S.sid}/skills`, { [sk]: true });  // Skill 權限也一起開，不然還是被擋
       notify('ok', `這個對話打開了 ${b.dataset.tn}`, '下一則訊息起生效');
       await refreshCtxPanel();
     } catch (err) { notify('error', '改不了', err.message); }

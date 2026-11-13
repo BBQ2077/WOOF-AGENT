@@ -1821,7 +1821,7 @@ class MemoryPerms(unittest.TestCase):
                 got.setdefault(ev, []).append(fn)
 
             def add_tool(self, name, desc, schema, fn):
-                got["tool"] = fn
+                got[name] = fn
 
         mod.register(W())
         return got
@@ -1839,11 +1839,11 @@ class MemoryPerms(unittest.TestCase):
         self.assertEqual(perms.decide("readonly", "memory", {"action": "add", "text": "x"})["decision"], "deny")
 
     def test_write_off_still_reads(self):
-        run = self.mod({"allow_read": True, "allow_write": False})["tool"]
-        out = asyncio.run(run({"action": "add", "text": "x"}, None))
+        got = self.mod({"allow_read": True, "allow_write": False})
+        out = asyncio.run(got["memory_write"]({"action": "add", "text": "x"}, None))
         self.assertTrue(out.get("is_error"))
         self.assertIn("關掉", out["output"])
-        listed = asyncio.run(run({"action": "list"}, None))
+        listed = asyncio.run(got["memory_view"]({}, None))
         self.assertFalse(listed.get("is_error"))   # 只關寫，讀照常
 
     def test_read_off_hides_prompt_and_list(self):
@@ -1859,7 +1859,7 @@ class MemoryPerms(unittest.TestCase):
         with unittest.mock.patch.object(promptfiles, "read", lambda k: data.get(k, "")), \
                 unittest.mock.patch.object(promptfiles, "memory_switch", lambda k, d=True: True):
             self.assertIn("記憶乙", promptfiles.build_prompt_gated())
-        out = asyncio.run(self.mod({"allow_read": False, "allow_write": True})["tool"]({"action": "list"}, None))
+        out = asyncio.run(self.mod({"allow_read": False, "allow_write": True})["memory_view"]({}, None))
         self.assertTrue(out.get("is_error"))
 
     def test_prompt_files_are_core_not_plugin(self):
@@ -1915,11 +1915,11 @@ class PromptLimits(unittest.TestCase):
                 got.setdefault(ev, []).append(fn)
 
             def add_tool(self, name, desc, schema, fn):
-                got["tool"] = fn
+                got[name] = fn
 
         mod.register(W())
         self.pf.set_limit("memory", 200)
-        out = asyncio.run(got["tool"]({"action": "add", "text": "字" * 300}, None))
+        out = asyncio.run(got["memory_write"]({"action": "add", "text": "字" * 300}, None))
         self.assertTrue(out.get("is_error"))
         self.assertIn("200", out["output"])
 

@@ -50,7 +50,7 @@ TOOL_CAT = {
     "write_file": "write", "patch": "write", "skill_write": "write", "Write": "write", "Edit": "write",
     "terminal": "exec", "process": "exec", "Bash": "exec",
     "web_search": "network", "web_extract": "network", "image_generate": "network", "video_generate": "network",
-    "memory": "write",
+    "memory": "write", "memory_view": "read", "memory_write": "write",
     "delegate_task": "agent", "schedule": "agent",
 }
 

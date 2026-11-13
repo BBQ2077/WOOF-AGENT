@@ -383,7 +383,10 @@ def vision_chain(turn_model: dict | None) -> list[dict]:
 
 
 def disabled_tools() -> set[str]:
-    return set(REG.config.get("disabled_tools") or [])
+    s = set(REG.config.get("disabled_tools") or [])
+    if "memory" in s:  # 舊設定：memory 拆成 memory_view（只讀）與 memory_write 之前停用的，當成停用寫入
+        s.add("memory_write")
+    return s
 
 
 def active_tool_specs(exclude: set[str] | None = None, include: set[str] | None = None) -> list[dict]:
