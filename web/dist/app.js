@@ -787,7 +787,14 @@ async function refreshState() {
   renderModelSelect(); renderPlugins(); renderKeys(); renderSessions(); renderComposer();
 }
 async function refreshKeys() { try { S.keys = (await api('GET', '/api/state')).keys; renderKeys(); } catch {} }
-async function loadSessions() { S.sessions = await api('GET', '/api/sessions'); await loadGroups(); }
+async function loadSessions() {
+  S.sessions = await api('GET', '/api/sessions');
+  // 分頁開著的對話已經不在（在別處被刪掉）：關掉那個分頁，不然標題、上下文面板會一直讀到 404
+  const ids = new Set(S.sessions.map((x) => x.id));
+  const gone = new Set((S.tabs || []).map((t) => t.sid).filter((id) => id && !ids.has(id)));
+  if (gone.size) { dropTabsOf(gone); renderAll(); }
+  await loadGroups();
+}
 async function loadGroups() {
   try { S.groups = await api('GET', '/api/groups'); } catch { S.groups = S.groups || []; }
   renderSessions();
