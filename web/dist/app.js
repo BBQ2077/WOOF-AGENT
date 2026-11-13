@@ -5887,7 +5887,7 @@ function pickerHtml(models, have) {
   const nFree = models.filter((m) => m.free).length;
   // 免費的排前面，其餘照原順序
   const list = [...models].sort((a, b) => (b.free ? 1 : 0) - (a.free ? 1 : 0));
-  const tags = (m) => [m.free ? '<em class="pk-free">免費</em>' : '', m.vision === false ? '<em>不能看圖</em>' : '', m.reasoning === false ? '<em>沒有思考</em>' : ''].join('');
+  const tags = (m) => [m.free ? '<em class="pk-free">免費</em>' : '', m.vision === false ? '<em title="模型商目錄的輸入類型沒列圖片。目錄可能寫錯，加進來後會先直接送圖，被拒才改走看圖模型">目錄寫只收文字</em>' : '', m.reasoning === false ? '<em>沒有思考</em>' : ''].join('');
   return `<div class="pickhd"><input data-pq placeholder="搜尋 ${models.length} 個模型">${nFree ? `<label class="pk-only"><input type="checkbox" data-pfree>只看免費（${nFree}）</label>` : ''}<span class="btn sm" data-pall>全選</span><span class="btn sm" data-pnone>全不選</span></div>`
     + `<div class="picker">${list.map((m) => `<label class="${have.has(m.id) ? 'have' : ''}" data-pid="${esc(m.id)}"${m.free ? ' data-free' : ''}><input type="checkbox" value="${esc(m.id)}"${have.has(m.id) ? ' disabled' : ''}><span>${esc(m.name !== m.id ? `${m.name}` : m.id)}${tags(m)}</span><small>${esc(m.id)}${m.context ? ' · ' + fmtCtx(m.context) : ''}${have.has(m.id) ? ' · 已加入' : ''}</small></label>`).join('')}</div>`;
 }
@@ -5903,7 +5903,7 @@ function bindPicker(root) {
   $('[data-pnone]', root).onclick = () => $$('[data-pid] input', root).forEach((c) => (c.checked = false));
 }
 function modelFromProbe(vid, pm) {
-  return { id: '', vendor: vid, label: pm.name && pm.name !== pm.id ? pm.name : pm.id.split('/').pop(), model: pm.id, context_window: pm.context ? Number(pm.context) : undefined, vision: pm.vision === false ? false : undefined, _new: true };
+  return { id: '', vendor: vid, label: pm.name && pm.name !== pm.id ? pm.name : pm.id.split('/').pop(), model: pm.id, context_window: pm.context ? Number(pm.context) : undefined, _new: true };   // 目錄寫只收文字也不寫 vision：目錄可能寫錯，先直接送圖、被拒才自動改走看圖模型
 }
 async function probe(body) {
   try { return await api('POST', '/api/vendors/probe', body); }

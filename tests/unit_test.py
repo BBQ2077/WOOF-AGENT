@@ -1507,6 +1507,21 @@ class AskSkip(unittest.TestCase):
             loop.close()
 
 
+class CatalogVisionHint(unittest.TestCase):
+    """模型商目錄寫只收文字不寫進 vision：目錄可能寫錯，先直接送圖、被拒才改走看圖模型。"""
+
+    def test_not_written(self):
+        from unittest import mock
+
+        from woof import discover
+
+        saved = {}
+        with mock.patch.object(discover, "load_config", return_value={"models": []}), \
+             mock.patch.object(discover, "save_config", side_effect=lambda c: saved.update(c)):
+            discover.add_to_config("od", [{"model": "eco", "vision": False}, {"model": "x", "vision": True}])
+        self.assertEqual([m.get("vision") for m in saved["models"]], [None, None])
+
+
 class AskTimeout(unittest.TestCase):
     """提問等太久沒回：自動略過，交給模型的話要寫明人不在；在卡片上打字會重新計時。"""
 

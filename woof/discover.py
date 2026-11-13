@@ -5,7 +5,7 @@
 - 快取在 data/cache/models/<模型商>.json，記錄上次檢索時間與錯誤，用來判斷要不要重抓。
 - Claude Code CLI 不做檢索。
 - 有些模型商的 /v1/models 不完整（例如 Respan 不列 :free 免費路由），改讀它的完整目錄（CATALOGS）。
-- 每筆記下 free（免費）、vision（看圖，目錄有寫才算數）、reasoning（思考）。
+- 每筆記下 free（免費）、vision（目錄寫的輸入類型，只當參考，不寫進設定）、reasoning（思考）。
 """
 from __future__ import annotations
 
@@ -156,8 +156,8 @@ def add_to_config(vendor_id: str, items: list[dict]) -> tuple[int, int]:
         m = {"id": mid, "vendor": vendor_id, "model": it["model"], "label": it.get("label") or it["model"]}
         if it.get("context_window"):
             m["context_window"] = int(it["context_window"])
-        if it.get("vision") is False:
-            m["vision"] = False          # 目錄明說不能看圖才寫；沒寫＝預設會看圖（woof/caps.py）
+        # 目錄寫「只收文字」不寫進 vision：有的模型商目錄寫錯（OpenDesign 的 deepseek-v4.1-flash-eco
+        # 目錄只列 text，實際看得到圖）。不寫＝先直接送圖，被拒才記成不能看圖、改走看圖模型（woof/caps.py）
         if it.get("reasoning") is False:
             m["effort_style"] = "none"   # 目錄明說沒有思考；沒寫＝預設有思考、強度高
         models.append(m)
