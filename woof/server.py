@@ -589,26 +589,6 @@ async def set_session_prompt(sid: str, body: dict):
     return {"ok": True, "override": es.get("prompt_override")}
 
 
-@app.put("/api/sessions/{sid}/skills")
-async def set_session_skills(sid: str, body: dict):
-    """body: {"read": true|false|null, "write": true|false|null}；null＝跟插件設定預設。"""
-    s = store.get_session(sid)
-    if s is None:
-        raise HTTPException(404)
-    es = s.get("engine_state") or {}
-    cur = dict(es.get("skills") or {})
-    for k in ("read", "write"):
-        if k in body:
-            v = body[k]
-            if v is None:
-                cur.pop(k, None)
-            else:
-                cur[k] = bool(v)
-    es["skills"] = cur
-    store.update_session(sid, engine_state=es)
-    return {"ok": True, "skills": cur}
-
-
 @app.post("/api/sessions/{sid}/plugins")
 async def session_plugins(sid: str, body: dict):
     """body: {"off": [插件名...]}；只影響這個對話的工具。"""

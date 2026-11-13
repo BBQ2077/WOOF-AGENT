@@ -1,5 +1,9 @@
 // 介面英文對照：key 是介面上的中文原文（{0} {1} 是會變動的部分），value 是英文
 window.WOOF_EN = {
+  '讓模型自己寫記憶': 'Let the model write memory',
+  '套用': 'Apply',
+  '寫入位置': 'Write location',
+  '讀、寫': 'Read / write',
   '打開': 'Enable',
   '這個對話打開工具': 'Enable tool for this chat',
   '壓縮時關': 'Off at next compaction',

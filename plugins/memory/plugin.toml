@@ -5,11 +5,7 @@ description = "提示詞檔：設定檔、人物檔、使用者檔、記憶檔�
 enabled = true
 
 [settings.allow_read]
+in_settings = "prompts"
 type = "bool"
 default = true
 label = "記憶放進提示詞（讀）：記憶檔與使用者檔進系統提示。關掉只是模型看不到內容，檔案還在、你照樣改得動"
-
-[settings.allow_write]
-type = "bool"
-default = true
-label = "讓模型自己寫記憶（add／replace／remove）。關掉後模型只能讀不能改，改由你在「提示詞與記憶」頁手動編"

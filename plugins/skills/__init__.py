@@ -1,8 +1,8 @@
 """Skills：讀取 SKILL.md（含附屬檔案），清單放進系統提示，需要時載入全文；也能建立或覆寫 skill。
 
-權限分兩個開關，預設值在插件設定，每個對話也能各自覆寫（對話 → 插件 → Skills 權限）：
-  讀取 read ：列出 skill 清單、skill_view 載入全文
-  寫入 write：skill_write 建立或覆寫 SKILL.md；只能寫到 write_dir（WOOF 自己的資料夾），覆寫前先備份舊檔
+讀和寫就是 skill_view、skill_write 兩個工具，在「設定 → 工具」或對話的「本回合工具」開關，不另設權限：
+  skill_view ：載入全文；關掉時 skill 清單也不放進系統提示
+  skill_write：建立或覆寫 SKILL.md；只能寫到 write_dir（WOOF 自己的資料夾），覆寫前先備份舊檔
 """
 from __future__ import annotations
 
@@ -24,17 +24,6 @@ def _field(fm: str, key: str) -> str:
     if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
         v = v[1:-1]
     return v
-
-
-def _on(v, default: bool) -> bool:
-    """設定值可能是 bool、字串或數字，統一轉成 bool。"""
-    if isinstance(v, bool):
-        return v
-    if isinstance(v, (int, float)):
-        return bool(v)
-    if isinstance(v, str) and v.strip():
-        return v.strip().lower() in ("1", "true", "yes", "on")
-    return default
 
 
 def _enabled(raw) -> set[str]:
@@ -105,19 +94,20 @@ def register(woof):
             out.append(wd)  # WOOF 自己建立的 skill 也要能讀
         return out
 
-    def perms(ctx) -> tuple[bool, bool]:
-        """這個對話實際的讀／寫權限：對話覆寫優先，沒有就跟插件設定。"""
-        sk = ((getattr(ctx, "session", None) or {}).get("engine_state") or {}).get("skills") or {}
-        r = sk["read"] if isinstance(sk.get("read"), bool) else _on(woof.settings.get("read"), True)
-        w = sk["write"] if isinstance(sk.get("write"), bool) else _on(woof.settings.get("write"), False)
-        return r, w
+    def view_on(ctx) -> bool:
+        """skill_view 這個工具這回合給不給（設定 → 工具、這個對話的開關）：不給就連 skill 清單也不放進提示詞。"""
+        from woof.agent.loop import disabled_tools
+
+        if "skill_view" in (getattr(ctx, "tool_off", None) or ()) or "skill_view" in (getattr(ctx, "tool_exclude", None) or ()):
+            return False
+        return "skill_view" not in disabled_tools() or "skill_view" in (getattr(ctx, "tool_include", None) or ())
 
     def chosen(sk: dict) -> dict:
         on = _enabled(woof.settings.get("enabled_skills"))
         return {k: v for k, v in sk.items() if k in on}
 
     def build_prompt(ctx):
-        if not perms(ctx)[0]:
+        if not view_on(ctx):
             return None
         sk = chosen(scan(dirs()))
         if not sk:
@@ -139,20 +129,6 @@ def register(woof):
                 where = f"  [{s['file'].as_posix()}]" if native else ""
                 lines.append(f"  - {s['name']}{desc}{where}")
         return "\n".join(lines)
-
-    def _excl(ctx) -> set:
-        """讀取關 → 不給 skill_view；寫入關 → 不給 skill_write（prepare 與面板預覽共用）。"""
-        r, w = perms(ctx)
-        out = set()
-        if not r:
-            out.add("skill_view")
-        if not w:
-            out.add("skill_write")
-        return out
-
-    def prepare(ctx):
-        """每回合依權限把工具關掉。"""
-        ctx.tool_exclude |= _excl(ctx)
 
     async def skill_view(args: dict, ctx) -> dict:
         sk = chosen(scan(dirs()))
@@ -199,8 +175,7 @@ def register(woof):
 
     woof._reg.skills_lister = lambda: list_all(woof)  # 設定頁的 Skills 分區用
     woof.on("build_prompt", build_prompt, order=50)
-    woof.on("prepare_turn", prepare, order=50)
-    woof.on("tool_exclude", _excl, order=50)
+
     woof.add_tool("skill_view", "載入一個 skill 的全文，或它的附屬檔案。",
                   {"type": "object", "properties": {
                       "name": {"type": "string"}, "file_path": {"type": "string", "description": "附屬檔案相對路徑"}},

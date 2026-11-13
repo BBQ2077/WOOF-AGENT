@@ -93,11 +93,8 @@ def register(woof):
         turn = getattr(ctx, "turn", None)
         from woof.agent.loop import vision_chain
         chain = vision_chain(turn.model_cfg if turn is not None else None)
-        want = (woof.settings.get("model") or "").strip()
-        if want:
-            chain = [m for m in turn.registry.config.get("models") or [] if m.get("id") == want] + chain if turn else chain
         if not chain:
-            return {"output": "沒有可用的看圖模型：在「設定 → 輔助模型 → 看圖」選一個能看圖的模型", "is_error": True}
+            return {"output": "沒有可用的看圖模型：在「設定 → 模型用途 → 看圖」選一個能看圖的模型", "is_error": True}
         tmp = DATA / "tmp"
         tmp.mkdir(exist_ok=True)
         shot = tmp / f"vision_{ctx.call_id}.png"

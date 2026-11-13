@@ -2986,36 +2986,6 @@ function renderScopePill() {
   const s = cur(); t.textContent = s ? scopeLabel(s) : '插件';
   const p = $('#scopePill'); if (p) p.title = '這個對話能用哪些插件（' + (s ? scopeLabel(s) : '全部') + '）';
 }
-// ---- Skills 權限：讀取與寫入分開；三態＝跟插件設定預設／開／關
-function skillsRowHtml(sk) {
-  const tri = (k, label, desc) => {
-    const v = (typeof sk[k] === 'boolean') ? (sk[k] ? 'on' : 'off') : 'def';
-    const name = { def: '跟預設', on: '開', off: '關' };
-    return `<div class="trow skrow"><span class="sk-l"><b>${label}</b><small>${desc}</small></span>`
-      + `<span class="seg sk-seg" data-sk-key="${k}">${['def', 'on', 'off'].map((x) => `<b class="${v === x ? 'on' : ''}" data-skv="${x}">${name[x]}</b>`).join('')}</span></div>`;
-  };
-  return `<div class="tgrp"><h4>Skills<small>讀取與寫入分開，這裡只影響這個對話</small></h4><div class="list">`
-    + tri('read', '讀取', '列出 skill 清單、用 skill_view 載入全文')
-    + tri('write', '寫入', '用 skill_write 建立或覆寫 SKILL.md（只寫到 WOOF 的 skill 資料夾，覆寫前會備份）')
-    + `</div></div>`;
-}
-function bindSkillsSeg(m) {
-  m.querySelectorAll('[data-sk-key]').forEach((seg) => {
-    seg.querySelectorAll('[data-skv]').forEach((b) => b.addEventListener('click', () => {
-      seg.querySelectorAll('[data-skv]').forEach((x) => x.classList.toggle('on', x === b));
-      seg.dataset.picked = b.dataset.skv;
-    }));
-  });
-}
-function readSkillsSeg(m) {
-  const out = {};
-  m.querySelectorAll('[data-sk-key]').forEach((seg) => {
-    const v = seg.dataset.picked || (seg.querySelector('[data-skv].on') || {}).dataset?.skv || 'def';
-    out[seg.dataset.skKey] = v === 'def' ? null : v === 'on';
-  });
-  return out;
-}
-
 // ---- 設定：工具分區（依插件分組，每個工具一個開關；全域同一份停用清單）
 async function renderToolsSet(box) {
   if (!S.toolsAll) await loadToolsAll();
@@ -3059,15 +3029,14 @@ async function renderSkillsSet(box) {
   if (!info.plugin_loaded) { box.innerHTML = '<div class="blank">Skills 插件沒有載入。請到「插件」啟用 skills。</div>'; return; }
   const ps = (S.plugins || []).find((x) => x.name === 'skills');
   const sv = (ps && ps.settings) || {};
-  const rw = (k, def) => (typeof sv[k] === 'boolean' ? sv[k] : def);
   const on = new Set(info.enabled || []);
   const byCat = {};
   for (const s of info.skills) (byCat[s.category] = byCat[s.category] || []).push(s);
   const cats = Object.keys(byCat).sort();
   box.innerHTML = `<div class="sk-perm" data-f="skPerm">`
-    + `<div class="trow"><span class="sk-l"><b>允許讀取</b><small>模型能列出已勾選的 skill，並用 skill_view 載入全文</small></span><span class="sw sm${rw('read', true) ? ' on' : ''}" data-skperm="read"></span></div>`
-    + `<div class="trow"><span class="sk-l"><b>允許寫入</b><small>模型能用 skill_write 建立或覆寫 SKILL.md（只寫到 WOOF 的資料夾）</small></span><span class="sw sm${rw('write', false) ? ' on' : ''}" data-skperm="write"></span></div>`
-    + `<div class="trow"><span class="sk-l"><b>讀取的外部資料夾</b><small>多個用 ; 分隔。留空＝只用 WOOF 自己的 data/skills，不讀任何外部技能庫。</small></span><input class="sk-dirs" value="${esc(sv.dirs || '')}" placeholder="留空＝不讀外部"><button class="btn sm" data-skdirs>套用資料夾</button></div>`
+    + `<div class="trow"><span class="sk-l"><b>讀、寫</b><small>就是 skill_view、skill_write 兩個工具：在<span class="genp-doc" data-goset="tools">「設定 → 工具」</span>開關，單一對話用「上下文 → 本回合工具」。skill_view 關掉時，skill 清單也不放進提示詞。</small></span></div>`
+    + `<div class="trow"><span class="sk-l"><b>讀取的外部資料夾</b><small>多個用 ; 分隔。留空＝只用 WOOF 自己的 data/skills，不讀任何外部技能庫。</small></span><input class="sk-dirs" value="${esc(sv.dirs || '')}" placeholder="留空＝不讀外部"><button class="btn sm" data-skdirs>套用資料夾</button></div>`    + `<div class="trow"><span class="sk-l"><b>寫入位置</b><small>skill_write 只能寫到這裡（相對 WOOF 資料夾），不碰別的技能庫；覆寫前先備份。</small></span><input class="sk-wdir" value="${esc(sv.write_dir || 'data/skills')}"><button class="btn sm" data-skwdir>套用</button></div>`
+
     + `</div>`
     + `<div class="sk-top" data-f="skList"><span>共 ${info.skills.length} 個 skill，已勾選 <b id="skCount">${on.size}</b> 個（預設全部關閉）</span><span class="grow"></span>`
     + `<button class="btn sm" data-skall="on">全部勾選</button><button class="btn sm" data-skall="off">全部取消</button></div>`
@@ -3088,11 +3057,12 @@ async function renderSkillsSet(box) {
   };
   const current = () => [...box.querySelectorAll('[data-skname].on')].map((x) => x.dataset.skname);
   box.onclick = async (e) => {
-    const perm = e.target.closest('[data-skperm]');
-    if (perm) {
-      perm.classList.toggle('on');
-      try { await api('POST', '/api/plugins/skills', { settings: { ...sv, [perm.dataset.skperm]: perm.classList.contains('on') } }); notify('ok', '已更新 Skills 權限'); }
-      catch (err) { notify('error', '儲存失敗', err.message); }
+    const go = e.target.closest('[data-goset]');
+    if (go) { openSettings(go.dataset.goset); return; }
+    if (e.target.closest('[data-skwdir]')) {
+      const v = box.querySelector('.sk-wdir').value.trim() || 'data/skills';
+      try { await api('POST', '/api/plugins/skills', { settings: { ...sv, write_dir: v } }); notify('ok', '已套用寫入位置'); }
+      catch (err) { notify('error', '套用失敗', err.message); }
       return;
     }
     if (e.target.closest('[data-skdirs]')) {
@@ -3164,7 +3134,7 @@ const CP = { sid: null, d: null, stats: null, draft: null };
 function cpToolSw(t) {
   if (t.bridge) return '';
   const on = t.enabled && !t.drop_pending;
-  const can = t.enabled || t.reason === '設定中停用' || t.session_off || (t.reason === '權限設定關閉' && /^skill_(view|write)$/.test(t.name));
+  const can = t.enabled || t.reason === '設定中停用' || t.session_off;
   const tip = t.drop_pending ? '下次壓縮時關；按一下取消' : !can ? `${t.reason}，要到對應的設定改` : on ? '這個對話關掉' : '這個對話打開';
   return `<span class="sw sm cp-sw${on ? ' on' : ''}${t.drop_pending ? ' pend' : ''}${can ? '' : ' dis'}" data-cp="${!can ? 'noop' : t.drop_pending ? 'toolKeep' : on ? 'toolOff' : 'toolOn'}" data-tn="${esc(t.name)}" title="${esc(tip)}"></span>`;
 }
@@ -3318,8 +3288,6 @@ $('#ctxPanel').addEventListener('click', async (e) => {
     if (!await confirmBox('這個對話打開工具', `打開 ${b.dataset.tn}。下一則訊息整段對話要重算一次快取，之後照常命中。`, { ok: '打開' })) return;
     try {
       await api('POST', `/api/sessions/${S.sid}/tools`, { name: b.dataset.tn, on: true });
-      const sk = { skill_view: 'read', skill_write: 'write' }[b.dataset.tn];
-      if (sk) await api('PUT', `/api/sessions/${S.sid}/skills`, { [sk]: true });  // Skill 權限也一起開，不然還是被擋
       notify('ok', `這個對話打開了 ${b.dataset.tn}`, '下一則訊息起生效');
       await refreshCtxPanel();
     } catch (err) { notify('error', '改不了', err.message); }
@@ -3371,14 +3339,13 @@ async function openScopeModal() {
     + `<div class="scope-top"><label>模板</label><select id="tplSel"><option value="">全部插件（預設）</option>`
     + S.templates.map((t) => `<option value="${esc(t.id)}"${es.template === t.id ? ' selected' : ''}>${esc(t.label)}（${t.plugins.length} 個插件）</option>`).join('')
     + `</select><button class="btn" data-savetpl>存成模板</button></div>`
-    + `<p class="scope-note">這裡的開關只影響這個對話。沒勾的插件，模型在這個對話裡看不到它的工具。</p>`
+    + `<p class="scope-note">這裡是整個插件（連同它的工具和掛鉤）在這個對話開不開。只要關單一工具，用「上下文 → 本回合工具」的開關。</p>`
     + plugins.map((p) => `<div class="tgrp"><h4>${esc(p)}<small>${byP[p].length} 個工具</small></h4><div class="list">`
       + `<div class="trow${off.has(p) ? ' off' : ''}"><span class="sw sm${off.has(p) ? '' : ' on'}" data-plug="${esc(p)}"></span><code>${esc(p)}</code>`
-      + `<span class="d">${esc(byP[p].map((t) => t.name).join('、'))}</span></div></div></div>`).join('')
-    + skillsRowHtml(es.skills || {});
+      + `<span class="d">${esc(byP[p].map((t) => t.name).join('、'))}</span></div></div></div>`).join('');
   modal({
     title: '這個對話能用的插件', wide: true, ok: '套用到這個對話', body,
-    onOpen: (m, close) => { bindSkillsSeg(m); m.addEventListener('click', async (e) => {
+    onOpen: (m, close) => { m.addEventListener('click', async (e) => {
       if (e.target.closest('[data-gopreset]')) { close(false); openSettings('presets'); return; }
       const sw = e.target.closest('[data-plug]');
       if (sw) { sw.classList.toggle('on'); sw.closest('.trow').classList.toggle('off', !sw.classList.contains('on')); const ts = m.querySelector('#tplSel'); if (ts) ts.value = ''; const ps2 = m.querySelector('#presetSel'); if (ps2) ps2.value = ''; return; }
@@ -3413,8 +3380,6 @@ async function openScopeModal() {
           s.engine_state = es;
           if (preset) s.perm = r.perm;
         }
-        const sk = readSkillsSeg(m);
-        if (Object.keys(sk).length) { await api('PUT', `/api/sessions/${S.sid}/skills`, sk); const cs = cur(); if (cs) cs.engine_state = { ...(cs.engine_state || {}), skills: Object.fromEntries(Object.entries(sk).filter(([, v]) => v !== null)) }; }
         renderScopePill(); renderPerm();
         notify('ok', '已套用到這個對話', r.pending ? '權限下一則訊息生效；插件開關等下次壓縮或開新對話才換，這個對話的快取不會斷。' : '');
       } catch (err) { notify('error', '套用失敗', err.message); return false; }
@@ -4310,12 +4275,20 @@ $('#paneFiles').addEventListener('click', async (e) => {
 // ------------------------------------------------------------------ 插件頁（清單）
 const KIND_LABEL = { provider: '模型連線', engine: '引擎', tool: '工具', hook: '掛鉤', search: '搜尋', connector: '連接器', ui: '介面' };
 const HOOK_LABEL = { build_prompt: '系統提示', before_request: '送出前', before_tool: '工具前', after_tool: '工具後', on_message: '收到訊息', on_session: '對話事件', prepare_turn: '回合開始', force_compact: '壓縮', mcp_status: 'MCP 狀態', plugin_unload: '卸載' };
+// 有專屬設定頁的欄位（plugin.toml 標 in_settings）不在插件頁重複，改成一行連到那一頁
 function pluginForm(p) {
-  return Object.entries(p.settings_schema || {}).map(([key, f]) => {
+  const owned = {};
+  for (const [key, f] of Object.entries(p.settings_schema || {})) if (f.in_settings) (owned[f.in_settings] = owned[f.in_settings] || []).push(f.label ? String(f.label).split(/[（：(:]/)[0] : key);
+  const links = Object.entries(owned).map(([sec, names]) => {
+    const t = (SECTIONS.find((x) => x[0] === sec) || [, sec])[1];
+    const what = names.length > 2 ? `${names.length} 項設定` : names.join('、');
+    return `<label>設定</label><div class="pf-owned" title="${esc(names.join('、'))}">${esc(what)}在<span class="genp-doc" data-goset="${esc(sec)}">「設定 → ${esc(t)}」</span>調</div>`;
+  }).join('');
+  return links + Object.entries(p.settings_schema || {}).filter(([, f]) => !f.in_settings).map(([key, f]) => {
     const v = p.settings[key] ?? f.default ?? '';
     let ctl;
     if (f.type === 'select') ctl = `<select data-set="${key}">${(f.options || []).map((o) => `<option${String(o) === String(v) ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
-    else if (f.type === 'bool') ctl = `<span class="sw sm${v ? ' on' : ''}" data-setsw="${key}"></span>`;
+    else if (f.type === 'bool' || f.type === 'boolean') ctl = `<span class="sw sm${v ? ' on' : ''}" data-setsw="${key}"></span>`;
     else if (f.type === 'model') ctl = modelSelectHtml(key, v, p.name, f.filter);
     else if (f.type === 'order') ctl = orderHtml(key, v, f.options || []);
     else if (f.type === 'models') ctl = modelsMultiHtml(key, v, p.name, f.filter);
@@ -4372,6 +4345,8 @@ $('#plugGrid').addEventListener('click', async (e) => {
     } catch (err) { notify('error', `${name} 切換失敗`, err.message); }
     return;
   }
+  const go = e.target.closest('[data-goset]');
+  if (go) { openSettings(go.dataset.goset); return; }
   const sw = e.target.closest('[data-setsw]');
   if (sw) { sw.classList.toggle('on'); savePluginSetting(name, sw.dataset.setsw, sw.classList.contains('on')); return; }
   const act = e.target.closest('[data-pact]');
@@ -4677,8 +4652,8 @@ const SECTIONS = [
   ['pet', '寵物', '陪你聊天的小角色。牠有自己的對話、記憶和角色檔，跟主對話分開；對你的對話只看不改——不會插話、不會用工具、不會動任何檔案。'],
   ['compress', '上下文壓縮', '對話變長時把較早的內容摘要起來，全文仍留在資料庫。'],
   ['perms', '權限', '模型要用工具時，依類別決定直接執行、先問你、或不允許。'],
-  ['tools', '工具', '每個工具一個開關，依插件分組。停用後模型看不到該工具。'],
-  ['skills', 'Skills', '知識文件，跟工具分開。預設全部關閉，需要哪個就勾哪個。'],
+  ['tools', '工具', '每個工具的總開關（含 Skill、記憶的讀和寫），依插件分組。停用後模型看不到該工具；整個插件的啟停、安裝在「插件」頁，單一對話在「上下文 → 本回合工具」。'],
+  ['skills', 'Skills', '有哪些 skill 文件、從哪些資料夾讀、勾選哪些（預設全部關閉）。讀寫的開關在「工具」。'],
   ['presets', '模式預設組', '把「哪些插件可用」和「工具權限」打包成一個模式，一鍵套用。'],
   ['general', '一般', '工作目錄、終端機、可預覽的資料夾，以及執行中按 Enter 的行為。'],
   ['appearance', '外觀', '顏色、縮放與字級。只存在這台電腦，拉了立即生效。'],
@@ -5197,7 +5172,7 @@ function renderPromptsSec(box) {
   <div class="card pf-card" data-f="pfBox">
     <div class="card-hd"><b>設定檔・人物檔・使用者檔・記憶檔</b><small>存在 data/prompts/，每個對話都會把它們放進系統提示。</small></div>
     <div class="frow pf-memsw"><div><b>記憶放進提示詞（讀）</b><small>記憶檔、使用者檔會放進系統提示。關掉只是模型看不到內容——檔案不會被刪，你在下面照樣改得動。</small></div><div class="fctl"><span class="sw${memOn('allow_read') ? ' on' : ''}" data-memsw="allow_read"></span></div></div>
-    <div class="frow pf-memsw"><div><b>讓模型自己寫記憶</b><small>add／replace／remove。關掉後模型只能讀、不能改，改由你在下面這個框手動編——記憶不會消失。</small></div><div class="fctl"><span class="sw${memOn('allow_write') ? ' on' : ''}" data-memsw="allow_write"></span></div></div>
+    <div class="frow pf-memsw"><div><b>讓模型自己寫記憶</b><small>就是 memory_write 工具，在<span class="genp-doc" data-goset="tools">「設定 → 工具」</span>開關（單一對話用「上下文 → 本回合工具」）。</small></div><div class="fctl"></div></div>
     <div id="pfBox"><div class="blank">讀取中…</div></div>
   </div>`;
   box.oninput = (e) => {
@@ -5209,6 +5184,8 @@ function renderPromptsSec(box) {
     clearTimeout(PF.timer); PF.timer = setTimeout(() => pfSave(true), 900);
   };
   box.onclick = async (e) => {
+    const go = e.target.closest('[data-goset]');
+    if (go) { openSettings(go.dataset.goset); return; }
     const ms = e.target.closest('[data-memsw]');
     if (ms) {
       const key = ms.dataset.memsw, on = !ms.classList.contains('on');

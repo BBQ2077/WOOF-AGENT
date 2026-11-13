@@ -4,12 +4,6 @@ kinds = ["tool"]
 description = "讓 agent 看本機圖片：讀取圖片檔，交給支援看圖的模型描述"
 enabled = true
 
-[settings.model]
-type = "model"
-filter = "vision"
-default = ""
-label = "看圖用的模型 id（空白＝目前對話的模型，不支援看圖時改用清單裡第一個支援的）"
-
 [settings.max_px]
 type = "number"
 default = 1568

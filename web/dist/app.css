@@ -913,8 +913,12 @@ details.internal .ifirst{flex:1 1 0;min-width:0}
 .sk-perm > .trow .sk-l small { font-size: 12px; color: var(--mut, #7a8699); line-height: 1.5; }
 .sk-perm > .trow .sk-dirs, .sk-perm > .trow input.sk-dirs { grid-column: 1 / -1; width: 100%; box-sizing: border-box; }
 .sk-perm > .trow:has(.sk-dirs) { grid-template-columns: minmax(0, 1fr) auto; }
+.sk-perm > .trow:has(.sk-dirs) .sk-l { grid-column: 1 / -1; }
 .sk-perm > .trow:has(.sk-dirs) .sk-dirs { grid-column: 1 / 2; }
 .sk-perm > .trow:has(.sk-dirs) [data-skdirs] { grid-column: 2 / 3; }
+.sk-perm > .trow:has(.sk-wdir) .sk-l { grid-column: 1 / -1; }
+.sk-perm > .trow:has(.sk-wdir) .sk-wdir { grid-column: 1 / 2; width: 100%; box-sizing: border-box; }
+.sk-perm > .trow:has(.sk-wdir) [data-skwdir] { grid-column: 2 / 3; }
 .sk-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 6px 0 10px; font-size: 13px; color: var(--mut, #5b6675); }
 .tgrp h4 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .tgrp h4 .btn.sm { font-weight: 500; }

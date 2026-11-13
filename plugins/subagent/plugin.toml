@@ -11,6 +11,7 @@ default = 3
 help = "一次 delegate_task 最多並行的子代理數"
 
 [settings.models]
+in_settings = "aux"
 type = "models"
 filter = "api"
 label = "可指派的模型"

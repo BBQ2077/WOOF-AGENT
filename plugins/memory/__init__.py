@@ -10,7 +10,7 @@ def register(woof):
     from woof import promptfiles
 
     def allowed(key: str, dflt: bool = True) -> bool:
-        """讀與寫分開的開關（設定 → 插件 → memory）：預設都開，使用者可以只留讀。"""
+        """allow_read：記憶放進提示詞、memory_view 能讀（設定 → 提示詞與記憶）。寫入就是 memory_write 工具的開關。"""
         try:
             v = woof.settings.get(key, dflt)
         except Exception:
@@ -31,9 +31,6 @@ def register(woof):
 
     async def memory_write(args: dict, tctx) -> dict:
         act = str(args.get("action") or "").strip()
-        if not allowed("allow_write"):
-            return {"output": "使用者把「讓模型自己改記憶」關掉了：記憶檔只由他在「設定 → 提示詞與記憶」手動修改。"
-                              "這次不要改，改用回覆跟使用者說你建議記什麼", "is_error": True}
         target, label, ents = _load(args)
         text = " ".join(str(args.get("text") or "").split())
         old = str(args.get("old") or "").strip()

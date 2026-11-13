@@ -1838,13 +1838,12 @@ class MemoryPerms(unittest.TestCase):
         self.assertEqual(perms.decide("readonly", "memory", {"action": "list"})["decision"], "auto")
         self.assertEqual(perms.decide("readonly", "memory", {"action": "add", "text": "x"})["decision"], "deny")
 
-    def test_write_off_still_reads(self):
-        got = self.mod({"allow_read": True, "allow_write": False})
-        out = asyncio.run(got["memory_write"]({"action": "add", "text": "x"}, None))
-        self.assertTrue(out.get("is_error"))
-        self.assertIn("關掉", out["output"])
+    def test_view_and_write_are_separate_tools(self):
+        got = self.mod({"allow_read": True})
+        self.assertIn("memory_view", got)
+        self.assertIn("memory_write", got)   # 寫入就是這個工具的開關，沒有另外的 allow_write
         listed = asyncio.run(got["memory_view"]({}, None))
-        self.assertFalse(listed.get("is_error"))   # 只關寫，讀照常
+        self.assertFalse(listed.get("is_error"))
 
     def test_read_off_hides_prompt_and_list(self):
         from woof import promptfiles

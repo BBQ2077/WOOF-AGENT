@@ -5,12 +5,14 @@ description = "生成圖片、影片：讓聊天模型呼叫生圖／影片模�
 enabled = true
 
 [settings.image_model]
+in_settings = "aux"
 type = "model"
 filter = "image"
 default = ""
 label = "生圖用的模型（空白＝第一個有 key 的生圖模型）"
 
 [settings.video_model]
+in_settings = "aux"
 type = "model"
 filter = "video"
 default = ""
