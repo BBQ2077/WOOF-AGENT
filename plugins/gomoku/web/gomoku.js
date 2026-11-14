@@ -22,6 +22,7 @@
   };
   const ASK_MS = 190000;  // 一次最多等多久（後端自己會在 180 秒放棄；思考開越高越久）
   const SPEC_MAX = 3;     // 每一手最多先替你想幾個點
+  const LETTERS = 'ABCDEFGHIJKLMNO';
   const HOVER_MS = 450;   // 滑鼠在一格停多久就開始先想
 
   Object.assign(window.WOOF_EN || {}, {
@@ -102,33 +103,37 @@
 
   /* ---------------------------------------------------------- 畫面 */
   function build(el) {
+    const ico = (n) => '<svg class="ic"><use href="#i-' + n + '"></use></svg>';
     el.innerHTML =
       '<div class="gk"><div class="gk-in">' +
       '  <div class="gk-hd">' +
-      '    <div class="gk-tx"><b>五子棋</b><small class="gk-sub"></small></div>' +
-      '    <span class="gk-grow"></span>' +
-      '    <label class="gk-pre" title="輪到你時，先替你最可能下的幾個點各問一次模型；你下在那裡就馬上回。問的是那個確切的棋面，不會不即時；token 大約多花 2～3 倍">' +
-      '      <span class="gk-sw"></span><span>預先思考</span></label>' +
-      '    <div class="gk-seg gk-eff" title="他想多久：預設跟「設定 → 寵物」的思考強度；越高下得越好，也越慢"></div>' +
-      '    <div class="gk-seg">' + Object.keys(DIFF).map((k) => '<b data-gk="diff" data-v="' + k + '" title="' + esc(DIFF[k].hint) + '">' + DIFF[k].label + '</b>').join('') + '</div>' +
+      '    <div class="gk-pl gk-me"><i class="gk-dot"></i><div class="gk-who"><b>你</b><small class="gk-mec"></small></div><em class="gk-su">0</em></div>' +
+      '    <div class="gk-mid"><span class="gk-turn"></span><small class="gk-took"></small>' +
+      '      <span class="btn primary gk-retry" data-gk="retry" hidden>再想一次</span></div>' +
+      '    <div class="gk-pl gk-pet"><em class="gk-sp">0</em><div class="gk-who"><b class="gk-pn"></b><small class="gk-pc"></small></div><span class="gk-av"></span></div>' +
       '  </div>' +
       '  <div class="gk-stage"><div class="gk-wrap"><canvas class="gk-cv"></canvas>' +
-      '    <div class="gk-over"><b class="gk-rtxt"></b><span class="btn primary" data-gk="new">再來一局</span></div></div></div>' +
+      '    <div class="gk-over"><b class="gk-rtxt"></b><small class="gk-rsub"></small><span class="btn primary" data-gk="new">再來一局</span></div></div></div>' +
       '  <div class="gk-bar">' +
-      '    <span class="gk-turn"></span><span class="gk-score"></span><span class="gk-took"></span>' +
-      '    <span class="gk-grow"></span>' +
-      '    <span class="btn primary gk-b gk-retry" data-gk="retry" hidden>再想一次</span>' +
-      '    <span class="gk-side" data-gk="side" title="換先手（會開新的一局）"></span>' +
-      '    <span class="btn gk-b" data-gk="undo">悔棋</span>' +
-      '    <span class="btn gk-b" data-gk="resign">認輸</span>' +
-      '    <span class="btn gk-b" data-gk="new">新局</span>' +
+      '    <span class="gk-tb" data-gk="undo">' + ico('refresh') + '悔棋</span>' +
+      '    <span class="gk-tb" data-gk="resign">' + ico('x') + '<span class="gk-rsl">認輸</span></span>' +
+      '    <span class="gk-tb" data-gk="new">' + ico('plus') + '新局</span>' +
+      '    <span class="gk-tb gk-gear" data-gk="menu" title="設定">' + ico('gear') + '</span>' +
+      '    <div class="gk-pop">' +
+      '      <div class="gk-row"><span>先手</span><div class="gk-seg"><b data-gk="side" data-v="me">你先</b><b data-gk="side" data-v="pet">他先</b></div></div>' +
+      '      <div class="gk-row"><span>難度</span><div class="gk-seg">' + Object.keys(DIFF).map((k) => '<b data-gk="diff" data-v="' + k + '" title="' + esc(DIFF[k].hint) + '">' + DIFF[k].label + '</b>').join('') + '</div></div>' +
+      '      <div class="gk-row"><span>思考</span><div class="gk-seg gk-eff"></div></div>' +
+      '      <label class="gk-row gk-pre"><span>預先思考<small>先猜你會下哪，你下在那就秒回；token 多花 2～3 倍</small></span><span class="gk-sw"></span></label>' +
+      '      <div class="gk-rule">換先手會開新局・15×15・連五即勝・無禁手</div>' +
+      '    </div>' +
       '  </div>' +
-      '  <div class="gk-foot">15×15・五連（含以上）即勝・無禁手</div>' +
       '</div></div>';
     const q = (s) => el.querySelector(s);
     G.el = el; G.cv = q('.gk-cv'); G.ctx = G.cv.getContext('2d');
-    G.ui = { sub: q('.gk-sub'), turn: q('.gk-turn'), score: q('.gk-score'), took: q('.gk-took'), over: q('.gk-over'), rtxt: q('.gk-rtxt'), undo: q('[data-gk="undo"]'), resign: q('[data-gk="resign"]'),
-      side: q('.gk-side'), retry: q('.gk-retry'), pre: q('.gk-pre'), stage: q('.gk-stage') };
+    G.ui = { turn: q('.gk-turn'), took: q('.gk-took'), over: q('.gk-over'), rtxt: q('.gk-rtxt'), rsub: q('.gk-rsub'),
+      undo: q('[data-gk="undo"]'), resign: q('[data-gk="resign"]'), rsl: q('.gk-rsl'), retry: q('.gk-retry'), pre: q('.gk-pre'),
+      stage: q('.gk-stage'), me: q('.gk-me'), pet: q('.gk-pet'), mec: q('.gk-mec'), pc: q('.gk-pc'), pn: q('.gk-pn'),
+      su: q('.gk-su'), sp: q('.gk-sp'), av: q('.gk-av'), pop: q('.gk-pop'), gear: q('.gk-gear'), mid: q('.gk-mid') };
     el.addEventListener('click', onClick);
     G.cv.addEventListener('click', onBoard);
     G.cv.addEventListener('mousemove', onMove);
@@ -137,6 +142,8 @@
     G.ro.observe(G.ui.stage);
     G.tick = setInterval(() => { if (G.thinking) updateUI(); }, 200);
     window.addEventListener('woof:event', onWoof);
+    G.outside = (e) => { if (G.menu && !e.target.closest('.gk-pop,.gk-gear')) { G.menu = false; updateUI(); } };
+    document.addEventListener('mousedown', G.outside);
   }
 
   // 你在寵物欄跟他講了話：先想好的棋是照舊的對話想的，作廢
@@ -153,22 +160,38 @@
   function updateUI() {
     if (!G.el) return;
     const u = G.ui, name = petName();
-    u.sub.textContent = '跟' + name + '下一局';
-    if (G.over) u.turn.textContent = G.winner === 0 ? '和棋' : G.winner === G.human ? '你贏了' : name + '贏了';
-    else if (G.thinking) u.turn.textContent = name + '在想… ' + ((performance.now() - G.t0) / 1000).toFixed(1) + ' 秒';
-    else if (G.stuck) u.turn.textContent = name + '卡住了：' + G.stuck;
-    else u.turn.textContent = G.turn === G.human ? '輪到你' : name + '的回合';
-    u.score.textContent = '你 ' + G.score.u + '：' + G.score.p + ' ' + name + (G.score.d ? '・和 ' + G.score.d : '');
-    u.took.textContent = G.took ? '上一手想了 ' + (G.took / 1000).toFixed(1) + ' 秒' : '';
+    const color = (p) => (p === BLACK ? '執黑' : '執白') + (p === BLACK ? '・先手' : '');
+    u.pn.textContent = name;
+    u.mec.textContent = color(G.human); u.pc.textContent = color(petColor());
+    u.me.classList.toggle('black', G.human === BLACK); u.pet.classList.toggle('black', petColor() === BLACK);
+    u.su.textContent = G.score.u; u.sp.textContent = G.score.p;
+    u.me.classList.toggle('on', !G.over && G.turn === G.human);
+    u.pet.classList.toggle('on', !G.over && G.turn !== G.human);
+    u.pet.classList.toggle('think', G.thinking);
+    const fk = G.over ? (G.winner === G.human ? 'sad' : G.winner ? 'proud' : 'happy') : G.thinking ? 'think' : G.stuck ? 'confused' : 'happy';
+    if (u.av.dataset.f !== fk) {
+      u.av.dataset.f = fk;
+      let src = ''; try { src = W.pet.face(fk) || W.pet.face('happy'); } catch (e) { src = ''; }
+      u.av.innerHTML = src ? '<img alt="" draggable="false" src="' + esc(src) + '">' : '';
+    }
+    let t = '', sub = '';
+    if (G.over) { t = G.winner === 0 ? '和棋' : G.winner === G.human ? '你贏了' : name + '贏了'; sub = '第 ' + G.moves.length + ' 手'; }
+    else if (G.thinking) { t = name + '在想'; sub = ((performance.now() - G.t0) / 1000).toFixed(1) + ' 秒'; }
+    else if (G.stuck) { t = name + '卡住了'; sub = G.stuck; }
+    else { t = G.turn === G.human ? (G.moves.length ? '輪到你' : '你先下') : '輪到' + name; sub = G.took ? '他上一手想了 ' + (G.took / 1000).toFixed(1) + ' 秒' : (G.score.d ? '和棋 ' + G.score.d + ' 局' : ''); }
+    u.turn.textContent = t; u.took.textContent = sub;
+    u.mid.classList.toggle('think', G.thinking);
+    u.retry.hidden = !G.stuck;
     const canUndo = !G.over && G.moves.some((m) => m.p === G.human);
     u.undo.classList.toggle('dis', !canUndo);
     u.resign.classList.toggle('dis', G.over);
-    u.resign.textContent = G.rst ? '確定認輸？' : '認輸';
+    u.rsl.textContent = G.rst ? '再按一次確定' : '認輸';
     u.resign.classList.toggle('danger', G.rst);
-    u.side.textContent = petFirst() ? '他先' : '你先';
-    u.retry.hidden = !G.stuck;
+    u.pop.classList.toggle('on', !!G.menu);
+    u.gear.classList.toggle('on', !!G.menu);
     u.pre.classList.toggle('on', G.pre);
     G.el.querySelectorAll('[data-gk="diff"]').forEach((b) => b.classList.toggle('on', b.dataset.v === G.diff));
+    G.el.querySelectorAll('[data-gk="side"]').forEach((b) => b.classList.toggle('on', (b.dataset.v === 'pet') === petFirst()));
     // 思考：跟寵物設定，或寵物目前的模型有的每一檔
     let th = { cur: '', efforts: [] };
     try { th = W.pet.thinking(); } catch (e) { /* 舊版沒有 */ }
@@ -179,70 +202,84 @@
     const box = G.el.querySelector('.gk-eff');
     if (box.dataset.sig !== sig) {
       box.dataset.sig = sig;
-      box.innerHTML = '<i>思考</i>' + opts.map((o) => '<b data-gk="eff" data-v="' + esc(o[0]) + '" class="' + (o[0] === G.eff ? 'on' : '') + '">' + esc(o[1]) + '</b>').join('');
+      box.innerHTML = opts.map((o) => '<b data-gk="eff" data-v="' + esc(o[0]) + '" class="' + (o[0] === G.eff ? 'on' : '') + '">' + esc(o[1]) + '</b>').join('');
     }
-    G.ui.over.classList.toggle('on', G.over);
+    u.over.classList.toggle('on', G.over);
+    G.el.querySelector('.gk-wrap').classList.toggle('done', G.over);
   }
 
   function resize() {
     if (!G.cv) return;
     const st = G.ui.stage;
-    const w = Math.max(240, Math.min(720, Math.floor(Math.min(st.clientWidth, st.clientHeight || st.clientWidth)) - 4));
+    const w = Math.max(260, Math.min(760, Math.floor(Math.min(st.clientWidth, st.clientHeight || st.clientWidth)) - 8));
     if (!st.clientWidth || w === G.px) return;
     const dpr = window.devicePixelRatio || 1;
-    G.px = w; G.pad = Math.max(14, Math.round(w * 0.055)); G.cell = (w - G.pad * 2) / (SIZE - 1);
+    G.px = w; G.pad = Math.max(24, Math.round(w * 0.065)); G.cell = (w - G.pad * 2) / (SIZE - 1);
     G.cv.style.width = w + 'px'; G.cv.style.height = w + 'px';
     G.cv.width = Math.round(w * dpr); G.cv.height = Math.round(w * dpr);
     G.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    G.el.querySelector('.gk-bar').style.width = w + 'px';
     draw();
   }
 
-  function stone(ctx, cx, cy, r, p) {
+  function stone(ctx, cx, cy, r, p, alpha) {
     ctx.save();
+    if (alpha) ctx.globalAlpha = alpha;
     ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2);
-    const g = ctx.createRadialGradient(cx - r * 0.35, cy - r * 0.4, r * 0.12, cx, cy, r);
-    if (p === BLACK) { g.addColorStop(0, '#6f6f6f'); g.addColorStop(0.5, '#2c2c2c'); g.addColorStop(1, '#050505'); }
-    else { g.addColorStop(0, '#ffffff'); g.addColorStop(0.62, '#f4f1ea'); g.addColorStop(1, '#cdc7ba'); }
-    ctx.fillStyle = g; ctx.shadowColor = 'rgba(0,0,0,.28)'; ctx.shadowBlur = r * 0.5; ctx.shadowOffsetY = r * 0.16;
-    ctx.fill(); ctx.restore();
+    const g = ctx.createRadialGradient(cx - r * 0.38, cy - r * 0.42, r * 0.08, cx, cy, r * 1.02);
+    if (p === BLACK) { g.addColorStop(0, '#7a7d84'); g.addColorStop(0.32, '#33363c'); g.addColorStop(1, '#0b0c0e'); }
+    else { g.addColorStop(0, '#ffffff'); g.addColorStop(0.55, '#f3f1ec'); g.addColorStop(1, '#c9c3b6'); }
+    ctx.fillStyle = g;
+    if (!alpha) { ctx.shadowColor = 'rgba(40,25,5,.38)'; ctx.shadowBlur = r * 0.45; ctx.shadowOffsetX = r * 0.08; ctx.shadowOffsetY = r * 0.18; }
+    ctx.fill();
+    ctx.shadowColor = 'transparent';
+    if (p === WHITE) { ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(70,55,30,.32)'; ctx.stroke(); }
+    ctx.restore();
   }
 
   function draw() {
     if (!G.ctx || !G.px) return;
     const ctx = G.ctx, R = G.px, P = G.pad, c = G.cell;
+    const css = getComputedStyle(G.el);
+    const gc = css.getPropertyValue('--gk-grid').trim() || 'rgba(72,54,30,.6)';
+    const lc = css.getPropertyValue('--gk-label').trim() || 'rgba(72,54,30,.55)';
     ctx.clearRect(0, 0, R, R);
-    const gc = getComputedStyle(G.el).getPropertyValue('--gk-grid').trim() || 'rgba(72,54,30,.55)';
-    ctx.strokeStyle = gc; ctx.lineWidth = 1;
+    ctx.strokeStyle = gc;
     for (let i = 0; i < SIZE; i++) {
-      const p = P + i * c;
+      const p = Math.round(P + i * c) + 0.5;
+      ctx.lineWidth = i === 0 || i === SIZE - 1 ? 1.6 : 1;
       ctx.beginPath(); ctx.moveTo(P, p); ctx.lineTo(R - P, p); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(p, P); ctx.lineTo(p, R - P); ctx.stroke();
     }
     ctx.fillStyle = gc;
     for (const s of [[3, 3], [11, 3], [3, 11], [11, 11], [7, 7]]) {
-      ctx.beginPath(); ctx.arc(P + s[0] * c, P + s[1] * c, Math.max(2.2, c * 0.09), 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(Math.round(P + s[0] * c) + 0.5, Math.round(P + s[1] * c) + 0.5, Math.max(2.5, c * 0.1), 0, Math.PI * 2); ctx.fill();
     }
+    // 座標：上面 A–O、左邊 1–15
+    ctx.fillStyle = lc; ctx.font = '500 ' + Math.max(9, Math.round(c * 0.3)) + 'px system-ui, "Microsoft JhengHei UI", sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    for (let i = 0; i < SIZE; i++) {
+      ctx.fillText(LETTERS[i], P + i * c, P * 0.45);
+      ctx.fillText(String(i + 1), P * 0.45, P + i * c);
+    }
+    const r = c * 0.45;
     for (let y = 0; y < SIZE; y++) for (let x = 0; x < SIZE; x++) {
       const v = G.board[ix(x, y)];
-      if (v) stone(ctx, P + x * c, P + y * c, c * 0.44, v);
+      if (v) stone(ctx, P + x * c, P + y * c, r, v);
+    }
+    // 連成五：每顆加一圈金光
+    if (G.line && G.line.length >= 5) {
+      ctx.save(); ctx.strokeStyle = '#f2b705'; ctx.lineWidth = Math.max(2.2, c * 0.09);
+      ctx.shadowColor = 'rgba(242,183,5,.85)'; ctx.shadowBlur = c * 0.4;
+      for (const p of G.line) { ctx.beginPath(); ctx.arc(P + p[0] * c, P + p[1] * c, r + 1.5, 0, Math.PI * 2); ctx.stroke(); }
+      ctx.restore();
     }
     const lm = G.moves[G.moves.length - 1];
     if (lm) {
-      ctx.beginPath(); ctx.arc(P + lm.x * c, P + lm.y * c, Math.max(2.4, c * 0.12), 0, Math.PI * 2);
-      ctx.fillStyle = '#e04848'; ctx.fill();
+      ctx.beginPath(); ctx.arc(P + lm.x * c, P + lm.y * c, Math.max(2.6, c * 0.12), 0, Math.PI * 2);
+      ctx.fillStyle = lm.p === BLACK ? '#ff6b5e' : '#e5484d'; ctx.fill();
     }
-    if (G.line && G.line.length >= 5) {
-      const a = G.line[0], z = G.line[G.line.length - 1];
-      ctx.strokeStyle = 'rgba(228,58,58,.9)'; ctx.lineWidth = Math.max(2.5, c * 0.1); ctx.lineCap = 'round';
-      ctx.beginPath(); ctx.moveTo(P + a[0] * c, P + a[1] * c); ctx.lineTo(P + z[0] * c, P + z[1] * c); ctx.stroke();
-    }
-    if (G.hover && canPlay() && G.board[ix(G.hover.x, G.hover.y)] === EMPTY) {
-      ctx.save(); ctx.globalAlpha = 0.35;
-      ctx.beginPath(); ctx.arc(P + G.hover.x * c, P + G.hover.y * c, c * 0.44, 0, Math.PI * 2);
-      ctx.fillStyle = G.human === BLACK ? '#000' : '#fff'; ctx.fill();
-      if (G.human === WHITE) { ctx.strokeStyle = 'rgba(0,0,0,.35)'; ctx.lineWidth = 1; ctx.stroke(); }
-      ctx.restore();
-    }
+    if (G.hover && canPlay() && G.board[ix(G.hover.x, G.hover.y)] === EMPTY) stone(ctx, P + G.hover.x * c, P + G.hover.y * c, r, G.human, 0.45);
   }
 
   /* ---------------------------------------------------------- 操作 */
@@ -271,8 +308,9 @@
     const b = e.target.closest('[data-gk]');
     if (b) {
       const k = b.dataset.gk;
-      if (k === 'new') reset(petFirst());
-      else if (k === 'side') reset(!petFirst());
+      if (k === 'new') { G.menu = false; reset(petFirst()); }
+      else if (k === 'menu') { G.menu = !G.menu; updateUI(); }
+      else if (k === 'side') { const want = b.dataset.v === 'pet'; if (want !== petFirst()) reset(want); }
       else if (k === 'undo') undo();
       else if (k === 'resign') resign();
       else if (k === 'retry') petTurn(null);
@@ -399,7 +437,8 @@
     G.over = true; G.winner = w; G.line = line || null; G.thinking = false; G.hover = null;
     SP.map.clear(); SP.n = 0;
     if (w === 0) G.score.d++; else if (w === G.human) G.score.u++; else G.score.p++;
-    G.ui.rtxt.textContent = reason === 'resign' ? petName() + '贏了（你認輸）' : w === 0 ? '和棋' : w === G.human ? '你贏了' : petName() + '贏了';
+    G.ui.rtxt.textContent = w === 0 ? '和棋' : w === G.human ? '你贏了！' : petName() + '贏了';
+    G.ui.rsub.textContent = (reason === 'resign' ? '你認輸了・' : '') + '比分 你 ' + G.score.u + '：' + G.score.p + ' ' + petName();
     G.rev++;
     const lm = G.moves[G.moves.length - 1];
     if (w === G.human) react('lose', { move: lm ? [lm.x, lm.y] : null });
@@ -464,6 +503,7 @@
       G.rev++;
       clearInterval(G.tick); clearTimeout(G.hoverT); clearTimeout(G.rstT);
       window.removeEventListener('woof:event', onWoof);
+      document.removeEventListener('mousedown', G.outside);
       if (G.ro) G.ro.disconnect();
       SP.map.clear(); SP.n = 0;
       G.el = null; G.cv = null; G.ctx = null; G.ro = null; G.thinking = false;
