@@ -3326,7 +3326,7 @@ function renderCtxPanel() {
       <div class="cp-sh"><b>輔助模型與搜尋</b></div>
       <small class="cp-note">看圖（VIS）、壓縮、子代理、備用模型用哪個模型。在設定頁的「輔助模型」改。</small>
       ${auxRows.map((a) => `<div class="cp-tool"><span>${esc(AUX_NAMES[a.task] || a.task)}</span><b>${esc(a.label)}</b></div>`).join('')}
-      <div class="cp-tool"><span>網路搜尋（WEB）順序</span><b>${esc(d.web_order || '預設：Firecrawl → Tavily')}</b></div>
+      <div class="cp-tool"><span>網路搜尋（WEB）順序</span><b>${esc(d.web_order || '預設：Firecrawl 免 key → Tavily 免 key → Firecrawl → Tavily')}</b></div>
       <div class="cp-btns"><span class="btn" data-cp="aux">改輔助模型</span><span class="btn" data-cp="webset">改搜尋順序</span></div>
     </div>
     <div class="cp-sec">

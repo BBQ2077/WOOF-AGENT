@@ -1,8 +1,10 @@
 """網路搜尋與網頁擷取。
 
-搜尋順序由設定 order 決定（預設 firecrawl_keyless → firecrawl → tavily）：先用 Firecrawl 官方免 key 端點省額度，
-限流或失敗才換 key。同一家有多把 key 時一把用到完再換下一把；全部用完就換下一家。key 不刪除，到期自動恢復。
-firecrawl_keyless 是官方免 key 端點（/v2/scrape、/v2/search，不帶 Authorization，有每 IP 限流）。
+搜尋順序由設定 order 決定（預設 firecrawl_keyless → tavily_keyless → firecrawl → tavily）：先用兩家官方免 key 端點，
+限流或失敗才換要扣點數的 key。同一家有多把 key 時一把用到完再換下一把；全部用完就換下一家。key 不刪除，到期自動恢復。
+firecrawl_keyless 是 Firecrawl 官方免 key 端點（/v2/scrape、/v2/search，不帶 Authorization，有每 IP 限流）。
+tavily_keyless 是 Tavily 官方免 key 端點（/search、/extract，帶 X-Tavily-Access-Mode: keyless，有每日上限）。
+免 key 撞到限流時照 Retry-After 暫停（沒給就 60 秒），搜尋和擷取分開算，暫停期間直接跳過不再白打一次。
 
 錯誤處理（官方文件）：
   Firecrawl  402 Payment Required → 額度用完，標記到下個重置日
@@ -18,6 +20,17 @@ import time
 import httpx
 
 _TIMEOUT = httpx.Timeout(30.0, read=90.0)
+_COOL: dict[tuple[str, str], float] = {}   # (免 key 服務, search/extract) → 暫停到幾點
+
+
+def _retry_after(r: httpx.Response) -> float:
+    try:
+        sec = float(r.headers.get("retry-after") or 0)
+    except ValueError:
+        sec = 0
+    if sec <= 0:
+        sec = 60 if r.status_code == 429 or r.status_code >= 500 else 600
+    return min(sec, 86400)
 
 
 def _next_reset(now: float, day: int = 1) -> float:
@@ -42,7 +55,7 @@ def _clip(text: str, n: int) -> str:
 
 def register(woof):
     def providers() -> list[str]:
-        raw = woof.settings.get("order") or "firecrawl_keyless,firecrawl,tavily"
+        raw = woof.settings.get("order") or "firecrawl_keyless,tavily_keyless,firecrawl,tavily"
         return [p.strip() for p in str(raw).split(",") if p.strip()]
 
     def limit() -> int:
@@ -52,7 +65,10 @@ def register(woof):
         return max(2000, int(woof.settings.get("extract_chars") or 12000))
 
     async def _post(client: httpx.AsyncClient, url: str, key: str, body: dict) -> dict:
-        headers = {"Authorization": f"Bearer {key}"} if key else {}
+        if key:
+            headers = {"Authorization": f"Bearer {key}"}
+        else:
+            headers = {"X-Tavily-Access-Mode": "keyless"} if "api.tavily.com" in url else {}
         r = await client.post(url, json=body, headers=headers)
         if r.status_code >= 400:
             raise httpx.HTTPStatusError(r.text[:300], request=r.request, response=r)
@@ -95,9 +111,11 @@ def register(woof):
         return [(it.get("url", ""), it.get("raw_content") or "（沒有內容）") for it in (data.get("results") or [])]
 
     SEARCH = {"firecrawl": _search_firecrawl, "tavily": _search_tavily,
-              "firecrawl_keyless": lambda c, _k, q: _search_firecrawl(c, None, q)}
+              "firecrawl_keyless": lambda c, _k, q: _search_firecrawl(c, None, q),
+              "tavily_keyless": lambda c, _k, q: _search_tavily(c, None, q)}
     EXTRACT = {"firecrawl": _extract_firecrawl, "tavily": _extract_tavily,
-               "firecrawl_keyless": lambda c, _k, u: _extract_firecrawl(c, None, u)}
+               "firecrawl_keyless": lambda c, _k, u: _extract_firecrawl(c, None, u),
+               "tavily_keyless": lambda c, _k, u: _extract_tavily(c, None, u)}
 
     def billing_day(name: str) -> int:
         return int(woof.settings.get(f"{name}_billing_day") or 1)
@@ -122,18 +140,25 @@ def register(woof):
                     tried.append(f"{name}：不支援")
                     continue
                 if name.endswith("_keyless"):
+                    who = name[:-len("_keyless")]
+                    wait = _COOL.get((name, kind), 0) - time.time()
+                    if wait > 0:
+                        tried.append(f"{name}：限流中，約 {int(wait)} 秒後恢復")
+                        continue
                     try:
                         result = await fn(client, None, arg)
                     except httpx.HTTPStatusError as e:
-                        tried.append(f"{name}：HTTP {e.response.status_code}（免 key 有每 IP 限流）")
+                        sec = _retry_after(e.response)
+                        _COOL[(name, kind)] = time.time() + sec
+                        tried.append(f"{name}：HTTP {e.response.status_code}（免 key 限流，暫停 {int(sec)} 秒）")
                         continue
                     except httpx.HTTPError as e:
                         tried.append(f"{name}：{type(e).__name__}")
                         continue
                     if kind == "search":
-                        return "（firecrawl 免 key）\n" + result
+                        return f"（{who} 免 key）\n" + result
                     blocks = [f"## {u}\n\n{_clip(body, chars())}" for u, body in result]
-                    return "（firecrawl 免 key）\n" + ("\n\n".join(blocks) or "沒有擷取到內容。")
+                    return f"（{who} 免 key）\n" + ("\n\n".join(blocks) or "沒有擷取到內容。")
                 pool = woof.keys(name)
                 while True:
                     entry = pool.get()
