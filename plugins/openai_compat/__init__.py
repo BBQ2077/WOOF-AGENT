@@ -255,6 +255,26 @@ def _short_reason(e) -> str:
     return " ".join(msg.split())[:160]
 
 
+
+def _json_closed(text: str) -> bool:
+    """參數 JSON 是否已經收尾（括號在字串外配平）：用來判斷同一個 index 來了新 id 是不是下一個呼叫。"""
+    depth, in_str, esc, started = 0, False, False, False
+    for ch in text:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch in "{[":
+            depth, started = depth + 1, True
+        elif ch in "}]":
+            depth -= 1
+    return started and depth == 0 and not in_str
+
 async def _describe_images(woof, messages: list[dict]) -> list[dict]:
     """模型不能看圖時，用「輔助模型 → 看圖」把每張圖轉成文字；沒有可用的看圖模型就留路徑說明。
     使用者貼的圖換成文字區塊；工具附的圖（vision_analyze）把描述接在工具結果後面。"""
@@ -497,6 +517,7 @@ class OpenAICompat:
         text, thinking = "", ""
         details: list[dict] = []
         calls: dict[int, dict] = {}
+        slot_of: dict = {}   # 服務給的 index → 實際存放的位置
         usage = None
         finish = ""
         resp = await client.chat.completions.create(**kw)
@@ -519,11 +540,20 @@ class OpenAICompat:
                 text += d.content
                 yield {"type": "text_delta", "text": d.content}
             for tc in d.tool_calls or []:
-                c = calls.setdefault(tc.index, {"id": "", "name": "", "args": ""})
+                raw_i = tc.index if tc.index is not None else 0
+                slot = slot_of.setdefault(raw_i, raw_i)
+                name = tc.function.name if tc.function else None
+                cur = calls.get(slot)
+                # 有的中轉站一次發好幾個工具時都標同一個 index，只靠 id 分：帶名字的新 id 而且
+                # （名字不同，或上一個參數已經收尾）就是下一個呼叫，不然會黏成「vision_analyzevision_analyze」
+                if (cur and tc.id and cur["id"] and str(tc.id) != cur["id"] and name
+                        and (name != cur["name"] or _json_closed(cur["args"]))):
+                    slot = slot_of[raw_i] = max(calls) + 1
+                c = calls.setdefault(slot, {"id": "", "name": "", "args": ""})
                 if tc.id:
-                    c["id"] = tc.id
-                if tc.function and tc.function.name:
-                    c["name"] += tc.function.name
+                    c["id"] = str(tc.id)
+                if name:
+                    c["name"] = name   # 名字是整段送來的，有的服務每段都重送一次，用覆寫不用接
                 if tc.function and tc.function.arguments:
                     c["args"] += tc.function.arguments
 
