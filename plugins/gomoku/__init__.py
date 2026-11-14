@@ -19,7 +19,14 @@ import time
 
 SIZE = 15
 LETS = "ABCDEFGHIJKLMNO"
-# 下得多好全看他想多久：棋盤上選的思考強度（沒選就照寵物設定）。不另外分難度，也不給程式算的提示
+# 難度＝想多久＋怎麼下。想多久照他目前模型自己有的檔位挑（不寫死哪一家的檔位）：
+#   簡單＝模型最低的一檔（能關就關），普通＝寵物設定的思考強度，高手＝模型最高的一檔。
+# 不給程式算的候選點或提示。
+DIFF = {
+    "easy": ("low", "隨性下，像陪朋友玩，不用每手都算到最好，偶爾放水沒關係；但對方下一手就要連五時還是要擋。"),
+    "normal": ("set", "認真下：自己能連五就下，對方要連五一定擋，再顧攻守。"),
+    "hard": ("top", "全力下：先看自己能不能連五、做活四或雙三，再看對方有沒有活三、衝四或雙重威脅要擋，想清楚再落子。"),
+}
 TIMEOUT = 180
 
 
@@ -86,6 +93,12 @@ def _board(body: dict) -> list[list[int]]:
     return rows
 
 
+def _stones(rows, me: int, you: int) -> str:
+    """同一個棋盤再用座標寫一次：模型數格子常數錯一欄，直接列出每顆子的位置比較不會看錯（不是提示，只是換個寫法）。"""
+    pts = lambda who: " ".join(coord(x, y) for y in range(SIZE) for x in range(SIZE) if rows[y][x] == who) or "（無）"
+    return f"你的子（X）：{pts(me)}\n對方的子（O）：{pts(you)}\n"
+
+
 def _grid(rows, me: int) -> str:
     out = "    " + " ".join(LETS) + "\n"
     for y, r in enumerate(rows):
@@ -118,13 +131,23 @@ def _face(v) -> str:
     return v if v in _faces() else ""
 
 
-def _use_effort(pet, body: dict) -> None:
-    """棋盤上選的思考強度：這局下棋和這段時間的聊天都用它（空白＝照設定）。"""
-    pet.set_temp_effort(str(body.get("effort") or ""))
+def _diff_effort(model: dict, c: dict, diff: str) -> str:
+    """難度對到這個模型有的思考檔位；模型沒有檔位（不能調思考）就照設定，難度只剩下法的差別。"""
+    from woof.effort import SCALE, norm
+    es = [norm(e) for e in (model.get("efforts") or []) if e]
+    how = DIFF.get(diff, DIFF["normal"])[0]
+    if not es or how == "set":
+        return c.get("effort") or ""
+    if set(es) <= {"off", "on"}:
+        return "off" if how == "low" and "off" in es else "on"
+    graded = sorted((e for e in es if e in SCALE), key=SCALE.index)
+    if how == "low":
+        return "off" if "off" in es else (graded[0] if graded else es[0])
+    return graded[-1] if graded else es[-1]
 
 
-async def _ask(pet, c, model, prompt: str, max_out: int) -> str:
-    m = pet._params(model, c)   # 有暫時的思考強度就用它，沒有就照寵物設定（模型沒有那一檔就往下找最近的）
+async def _ask(pet, c, model, prompt: str, max_out: int, diff: str = "normal") -> str:
+    m = pet._params(model, {**c, "effort": _diff_effort(model, c, diff)})
     return await asyncio.wait_for(
         pet._call(m, pet.build_system(c, "game", GAME), pet.game_messages(c, prompt), max_out),
         timeout=TIMEOUT)
@@ -140,7 +163,7 @@ def register(woof):
             me, you = int(body.get("pet") or 2), int(body.get("human") or 1)
         except Exception as e:
             return {"error": str(e)[:80]}
-        _use_effort(pet, body)
+        diff = str(body.get("diff") or "normal")
         hist = ""
         for mv in list(body.get("moves") or [])[-16:]:
             try:
@@ -151,14 +174,15 @@ def register(woof):
         prompt = (
             f"（五子棋・目前棋盤）輪到你，你執{'黑' if me == 1 else '白'}子（X），對方執{'黑' if you == 1 else '白'}子（O）。\n"
             "棋盤（·＝空點）：\n" + _grid(rows, me) + "\n"
+            + _stones(rows, me, you)
             + (f"最近的落子：{hist}\n" if hist else "")
-            + "認真下：自己能連五就下，對方要連五一定擋，其餘照你的判斷攻守。\n"
+            + DIFF.get(diff, DIFF["normal"])[1] + "\n"
             + (str(body.get("retry_note") or "")[:120] + "\n" if body.get("retry_note") else "")
             + "move 一定要是空點。回覆格式：" + fmt
         )
         t0 = time.time()
         try:
-            raw = await _ask(pet, c, model, prompt, 200)
+            raw = await _ask(pet, c, model, prompt, 200, diff)
         except asyncio.TimeoutError:
             return {"error": "他想太久了"}
         except Exception as e:
@@ -200,7 +224,6 @@ def register(woof):
         "resign": "（五子棋）我認輸了，這局算你贏（比分 我 {u}：你 {p}）",
         "draw": "（五子棋）棋盤下滿了，和棋",
     }
-    OVER = {"lose", "win", "resign", "draw"}
 
     async def react(body: dict) -> dict:
         pet, c, model = _pet()
@@ -209,7 +232,6 @@ def register(woof):
         ev = str(body.get("event") or "")
         if ev not in EVENTS:
             return {"error": "不認得的事件"}
-        _use_effort(pet, body)
         sc = body.get("score") or {}
         note = EVENTS[ev].format(mv=_pt(body.get("move")) or "最後一手", p=int(sc.get("p") or 0), u=int(sc.get("u") or 0))
         await pet.game_log(note, emit=_emit())   # 先寫進紀錄，寵物欄馬上看得到；他就照著紀錄回
@@ -220,23 +242,12 @@ def register(woof):
             return {"error": "他想太久了"}
         except Exception as e:
             return {"error": f"模型呼叫失敗：{str(e)[:120]}"}
-        finally:
-            if ev in OVER:
-                pet.set_temp_effort("")   # 這局結束：聊天回到設定的思考強度
         got = _json(raw)
         say = _say(got.get("say") or ("" if got else raw))
         if say:
             await pet.game_log("", say, _face(got.get("face")), emit=_emit())
         return {"say": say, "face": _face(got.get("face"))}
 
-    async def effort(body: dict) -> dict:
-        """棋盤上換思考強度（棋局進行中才帶進聊天）；關掉棋盤或棋局結束時前端送空白，回到設定。"""
-        from woof import pet
-        if not body.get("peek"):
-            _use_effort(pet, body if body.get("live") else {})
-        return {"effort": pet.temp_effort()}
-
     woof.add_action("move", move)
-    woof.add_action("effort", effort)
     woof.add_action("record", record)
     woof.add_action("react", react)
