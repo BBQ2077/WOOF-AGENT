@@ -6,7 +6,8 @@
    預先思考：輪到你的時候，照棋子附近的威脅排出你可能下的點（最多 30 個，滑鼠停住的那一格插隊），
    同時開 2～4 個，用「你下在那裡之後」的完整棋面各問一次模型，想完一個接下一個。你真的下在那裡，就直接用他已經想好的那一手；
    問的就是那個確切的棋面，所以不會不即時。沒猜中就照常問。這些猜測只用來決定要先問哪幾格，模型看不到。
-   預先想的結果只有真的用到才寫進他的紀錄；你在寵物欄跟他講了話，先想好的就作廢重想（他要看到最新的對話）。 */
+   預先想的結果只有真的用到才寫進他的紀錄；你在寵物欄跟他講了話，先想好的就作廢重想（他要看到最新的對話）。
+   棋局、比分和預先思考的命中紀錄存在這台電腦（localStorage），重新整理、關掉分頁或重開 WOOF 都接著下。 */
 (function () {
   'use strict';
   const W = window.WOOF;
@@ -102,7 +103,53 @@
     score: { u: 0, p: 0, d: 0 }, rst: false, rstT: 0, t0: 0, took: 0,
     px: 0, pad: 16, cell: 30, hoverT: 0, q: null, recorded: new Set(), lastUser: '',
   };
-  const SP = { map: new Map(), live: 0, n: 0, seq: 0, queue: [], gen: 0 };   // 預先思考：棋面 → 模型的回答（Promise）
+  const SP = { map: new Map(), live: 0, n: 0, seq: 0, queue: [], gen: 0 };
+  // 預先思考的命中紀錄：每一手（你下完、他回）算一次。ready＝你下之前就想好（秒回）、
+  // pending＝有先想但還沒想完（少等一段）、miss＝沒想到這格。asked／used＝先想了幾個點、用到幾個
+  const SAVE = 'woof.gomoku.game', STATS = 'woof.gomoku.stats';
+  const blank = () => ({ ready: 0, pending: 0, miss: 0, waitHit: 0, waitMiss: 0, asked: 0, used: 0 });
+  const ST = { game: blank(), all: (() => { try { return Object.assign(blank(), JSON.parse(localStorage.getItem(STATS) || '{}')); } catch (e) { return blank(); } })() };
+  function stat(f) { for (const o of [ST.game, ST.all]) f(o); try { localStorage.setItem(STATS, JSON.stringify(ST.all)); } catch (e) { /* 存不了就算了 */ } }
+  function statText(o) {
+    const n = o.ready + o.pending + o.miss;
+    if (!n) return '還沒有紀錄';
+    const hit = o.ready + o.pending, avg = (ms, k) => (k ? (ms / k / 1000).toFixed(1) + ' 秒' : '—');
+    return '猜中 ' + hit + '/' + n + ' 手（' + Math.round(hit / n * 100) + '%，秒回 ' + o.ready + '、提早想一半 ' + o.pending + '）・'
+      + '猜中平均等 ' + avg(o.waitHit, hit) + '、沒猜中 ' + avg(o.waitMiss, o.miss) + '・先想了 ' + o.asked + ' 個點，用到 ' + o.used + ' 個';
+  }
+  // 棋局存在這台電腦：重新整理、關掉分頁、重開 WOOF 都接著下
+  function save() {
+    try {
+      localStorage.setItem(SAVE, JSON.stringify({ v: 1, human: G.human, over: G.over, took: G.took, score: G.score, stats: ST.game,
+        moves: G.moves.map((m) => [m.x, m.y, m.p]) }));
+    } catch (e) { /* 存不了就算了 */ }
+  }
+  function restore() {
+    let d = null;
+    try { d = JSON.parse(localStorage.getItem(SAVE) || 'null'); } catch (e) { d = null; }
+    if (!d || d.v !== 1) return false;
+    if (d.score) G.score = { u: +d.score.u || 0, p: +d.score.p || 0, d: +d.score.d || 0 };
+    if (d.over || !Array.isArray(d.moves) || !d.moves.length) return false;   // 上一局下完了：比分留著，開新局
+    const b = new Int8Array(N), moves = [];
+    for (const m of d.moves) {
+      const [x, y, p] = (Array.isArray(m) ? m : []).map((v) => +v);
+      if (!inb(x, y) || b[ix(x, y)] !== EMPTY || (p !== BLACK && p !== WHITE)) return false;
+      if (p !== (moves.length ? other(moves[moves.length - 1].p) : BLACK)) return false;
+      b[ix(x, y)] = p; moves.push({ x, y, p });
+      if (winLine(b, x, y, p)) return false;
+    }
+    G.rev++;
+    G.board = b; G.moves = moves; G.human = d.human === WHITE ? WHITE : BLACK;
+    G.turn = other(moves[moves.length - 1].p);
+    G.over = false; G.winner = 0; G.line = null; G.thinking = false; G.stuck = ''; G.hover = null; G.took = +d.took || 0;
+    G.rst = false; G.recorded = new Set(moves);   // 這些都已經寫進他的紀錄了
+    ST.game = Object.assign(blank(), d.stats || {});
+    dropSpec();
+    updateUI(); draw();
+    if (G.turn !== G.human) petTurn(null);   // 關掉時他正在想：接著想
+    else guessAhead();
+    return true;
+  }   // 預先思考：棋面 → 模型的回答（Promise）
   // 作廢預先思考：前端丟掉，後端也取消還在跑的（keep＝猜中、正在用的那個）
   function dropSpec(keep) {
     const had = SP.map.size;
@@ -136,6 +183,7 @@
       '    <div class="gk-pop">' +
       '      <div class="gk-row"><span>先手<small class="gk-next"></small></span><div class="gk-seg"><b data-gk="side" data-v="me">你先</b><b data-gk="side" data-v="pet">他先</b></div></div>' +
       '      <div class="gk-row"><span>預先思考<small>你在想時他先想你可能下的點（最多 30 個），下在想好的點就秒回；思考強度不變，同時越多 token 越多</small></span><div class="gk-seg">' + PARS.map((n) => '<b data-gk="par" data-v="' + n + '">' + (n ? '同時 ' + n : '關') + '</b>').join('') + '</div></div>' +
+      '      <div class="gk-row gk-stat"><span>預先思考紀錄<small class="gk-sg"></small><small class="gk-sa"></small></span><span class="gk-tb gk-sr" data-gk="sreset">清除</span></div>' +
       '      <div class="gk-rule">先手從下一局開始換・15×15・連五即勝・無禁手</div>' +
       '    </div>' +
       '  </div>' +
@@ -143,7 +191,7 @@
     const q = (s) => el.querySelector(s);
     G.el = el; G.cv = q('.gk-cv'); G.ctx = G.cv.getContext('2d');
     G.ui = { turn: q('.gk-turn'), took: q('.gk-took'), over: q('.gk-over'), rtxt: q('.gk-rtxt'), rsub: q('.gk-rsub'),
-      undo: q('[data-gk="undo"]'), resign: q('[data-gk="resign"]'), rsl: q('.gk-rsl'), retry: q('.gk-retry'),
+      undo: q('[data-gk="undo"]'), resign: q('[data-gk="resign"]'), rsl: q('.gk-rsl'), retry: q('.gk-retry'), sg: q('.gk-sg'), sa: q('.gk-sa'),
       stage: q('.gk-stage'), me: q('.gk-me'), pet: q('.gk-pet'), mec: q('.gk-mec'), pc: q('.gk-pc'), pn: q('.gk-pn'),
       su: q('.gk-su'), sp: q('.gk-sp'), next: q('.gk-next'), av: q('.gk-av'), pop: q('.gk-pop'), gear: q('.gk-gear'), mid: q('.gk-mid') };
     el.addEventListener('click', onClick);
@@ -192,7 +240,7 @@
     if (G.over) { t = G.winner === 0 ? '和棋' : G.winner === G.human ? '你贏了' : name + '贏了'; sub = '第 ' + G.moves.length + ' 手'; }
     else if (G.thinking) { t = name + '在想'; sub = ((performance.now() - G.t0) / 1000).toFixed(1) + ' 秒'; }
     else if (G.stuck) { t = name + '卡住了'; sub = ''; u.retry.title = G.stuck; }
-    else { t = G.turn === G.human ? (G.moves.length ? '輪到你' : '你先下') : '輪到' + name; sub = G.took ? '他上一手想了 ' + (G.took / 1000).toFixed(1) + ' 秒' : (G.score.d ? '和棋 ' + G.score.d + ' 局' : ''); }
+    else { t = G.turn === G.human ? (G.moves.length ? '輪到你' : '你先下') : '輪到' + name; sub = G.took ? '他上一手想了 ' + (G.took / 1000).toFixed(1) + ' 秒' + (G.tookPre ? '（先想好的）' : '') : (G.score.d ? '和棋 ' + G.score.d + ' 局' : ''); }
     u.turn.textContent = t; u.took.textContent = sub;
     u.mid.classList.toggle('think', G.thinking);
     u.retry.hidden = !G.stuck;
@@ -204,6 +252,7 @@
     u.pop.classList.toggle('on', !!G.menu);
     u.gear.classList.toggle('on', !!G.menu);
     G.el.querySelectorAll('[data-gk="par"]').forEach((b) => b.classList.toggle('on', +b.dataset.v === G.par));
+    if (G.menu) { u.sg.textContent = '這局：' + statText(ST.game); u.sa.textContent = '累計：' + statText(ST.all); }
     G.el.querySelectorAll('[data-gk="side"]').forEach((b) => b.classList.toggle('on', (b.dataset.v === 'pet') === G.nextPet));
     G.el.querySelectorAll('[data-gk="diff"]').forEach((b) => b.classList.toggle('on', b.dataset.v === G.diff));
     u.next.textContent = G.nextPet !== petFirst() ? '下一局換成' + (G.nextPet ? name + '先' : '你先') : '';
@@ -316,6 +365,7 @@
       else if (k === 'undo') undo();
       else if (k === 'resign') resign();
       else if (k === 'retry') petTurn(null);
+      else if (k === 'sreset') { ST.game = blank(); ST.all = blank(); stat(() => {}); save(); updateUI(); }
       else if (k === 'par' && PARS.includes(+b.dataset.v)) {
         G.par = +b.dataset.v; localStorage.setItem('woof.gomoku.par', String(G.par)); updateUI();
         if (!G.par) dropSpec(); else if (canPlay()) { pump(); guessAhead(); }
@@ -370,11 +420,12 @@
       const key = keyOf(b);
       if (SP.map.has(key)) continue;
       SP.n++; SP.live++;
-      const id = 's' + (++SP.seq);
+      stat((o) => { o.asked++; });
+      const ent = { id: 's' + (++SP.seq), t0: performance.now(), done: 0 };
       const moves = G.moves.concat([{ x, y, p: G.human }]);
-      const pr = callMove(b, moves, '', id).catch((e) => ({ error: e.message }))
-        .then((r) => { if (gen === SP.gen) { SP.live--; pump(); } return r; });
-      SP.map.set(key, { pr, id, t0: performance.now() });
+      ent.pr = callMove(b, moves, '', ent.id).catch((e) => ({ error: e.message }))
+        .then((r) => { ent.done = performance.now(); if (gen === SP.gen) { SP.live--; pump(); } return r; });
+      SP.map.set(key, ent);
     }
   }
   function guessAhead() {
@@ -387,9 +438,12 @@
     });
   }
 
-  async function petTurn(spec) {
+  async function petTurn(spec, mine) {
     if (G.over || !G.el) return;
     const rev = G.rev;
+    // mine＝你剛下完這一手（悔棋、重想、他先手不算）；記下有沒有先想到
+    // 你的第一手沒有東西可以先想，不算
+    let cat = mine && G.par && G.moves.length > 1 ? (spec ? (spec.done ? 'ready' : 'pending') : 'miss') : '';
     G.thinking = true; G.stuck = ''; G.turn = petColor(); G.t0 = performance.now();
     updateUI(); draw();
     await (G.q || Promise.resolve());   // 前一句還在寫進紀錄就先等
@@ -398,7 +452,7 @@
     if (spec) {
       r = await spec.pr;
       if (rev !== G.rev) return;
-      if (!usable(r, G.board)) { err = (r && r.error) || ''; r = null; }
+      if (!usable(r, G.board)) { err = (r && r.error) || ''; r = null; if (cat) cat = 'miss'; }
     }
     for (let i = 0; !r && i < 2; i++) {
       const note = !i ? '' : taken ? `上一次你選的 ${taken} 已經有子了，換一個空點。` : '上一次的回覆看不懂，這次只回 JSON。';
@@ -408,11 +462,19 @@
         err = (r && r.error) || '回覆不合法'; taken = (r && r.taken) || '';
         const slow = r && (r.timeout || r.error === '他想太久了');
         r = null;
-        if (slow) break;   // 後端已經改最快的檔位再想過一次，再問也一樣，交給「再想一次」
+        if (slow) break;   // 後端已經用同一檔重想過一次，再問也一樣，交給「再想一次」
       }
     }
     G.thinking = false;
     G.took = performance.now() - G.t0;
+    G.tookPre = !!r && (cat === 'ready' || cat === 'pending');
+    if (r && cat) {
+      stat((o) => {
+        o[cat]++;
+        if (cat === 'miss') o.waitMiss += G.took;
+        else { o.waitHit += G.took; o.used++; }
+      });
+    }
     if (!r) {
       G.stuck = err || '沒有回應';
       updateUI(); draw();
@@ -421,7 +483,7 @@
     const hm = [...G.moves].reverse().find((m) => m.p === G.human);
     const opening = !G.moves.length;
     const res = place(r.move[0], r.move[1], petColor());
-    updateUI(); draw();
+    updateUI(); draw(); save();
     record({ human: hm && !G.recorded.has(hm) ? [hm.x, hm.y] : null, pet: r.move, say: r.say || '', face: r.face || '', opening });
     if (hm) G.recorded.add(hm);
     if (res === petColor()) react('win');
@@ -452,7 +514,8 @@
     const hm = G.moves[G.moves.length - 1];
     G.recorded.add(hm);
     record({ human: [hm.x, hm.y] });
-    petTurn(spec || null);
+    save();
+    petTurn(spec || null, true);
   }
 
   // 開新局、悔棋、認輸、輸贏：寫進他的紀錄，讓他自己回一句（不用罐頭台詞），寵物欄看得到
@@ -473,7 +536,7 @@
     else if (reason === 'resign') react('resign');
     else if (w === 0 && lm && lm.p === G.human) react('draw');
     // 他贏、他下滿的和棋：等他那一手寫進紀錄後再說（petTurn 裡處理）
-    updateUI(); draw();
+    updateUI(); draw(); save();
   }
 
   function reset(byPet) {
@@ -481,8 +544,9 @@
     G.board = new Int8Array(N); G.moves = []; G.turn = BLACK; G.human = byPet ? WHITE : BLACK;
     G.over = false; G.winner = 0; G.line = null; G.thinking = false; G.stuck = ''; G.hover = null; G.took = 0;
     G.rst = false; clearTimeout(G.rstT); G.recorded = new Set();
+    ST.game = blank();
     dropSpec();
-    updateUI(); draw();
+    updateUI(); draw(); save();
     if (G.turn !== G.human) petTurn(null);
     else react('start');
   }
@@ -497,7 +561,7 @@
     if (G.moves.length && G.moves[G.moves.length - 1].p === G.human) pop();
     G.line = null; G.hover = null;
     G.turn = G.moves.length ? other(G.moves[G.moves.length - 1].p) : BLACK;
-    updateUI(); draw();
+    updateUI(); draw(); save();
     react('undo');
     if (G.turn === petColor()) petTurn(null);
     else guessAhead();
@@ -522,7 +586,7 @@
     mount(el) {
       G.score = { u: 0, p: 0, d: 0 };
       build(el);
-      reset(G.nextPet);
+      if (!restore()) reset(G.nextPet);
       requestAnimationFrame(resize); setTimeout(resize, 0);   // 視窗在背景時 rAF 不會跑
     },
     show() { G.px = 0; requestAnimationFrame(resize); setTimeout(resize, 0); },
@@ -538,5 +602,5 @@
     },
   });
   // 測試、除錯用：看棋局狀態（不改棋局）
-  W.gomoku = { state: () => ({ moves: G.moves.slice(), over: G.over, winner: G.winner, turn: G.turn, human: G.human, thinking: G.thinking, stuck: G.stuck, diff: G.diff, par: G.par, spec: SP.map.size, live: SP.live, queued: SP.queue.length, took: G.took, lastUser: G.lastUser }) };
+  W.gomoku = { state: () => ({ moves: G.moves.slice(), over: G.over, winner: G.winner, turn: G.turn, human: G.human, thinking: G.thinking, stuck: G.stuck, diff: G.diff, par: G.par, stats: { game: Object.assign({}, ST.game), all: Object.assign({}, ST.all) }, spec: SP.map.size, live: SP.live, queued: SP.queue.length, took: G.took, lastUser: G.lastUser }) };
 })();

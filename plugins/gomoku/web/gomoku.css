@@ -77,3 +77,6 @@ html.dark .gk-cv{background:
 .gk-seg b:hover{color:var(--text)}
 .gk-seg b.on{background:var(--panel2);color:var(--acc);box-shadow:0 1px 3px rgb(0 0 0 / .12)}
 .gk-rule{font-size:11.5px;color:var(--faint);border-top:1px solid var(--line);padding-top:8px}
+.gk-stat small{max-width:300px;line-height:1.45}
+.gk-stat .gk-sa{margin-top:2px}
+.gk-sr{height:26px;padding:0 10px;font-size:12px;flex:none}
