@@ -24,13 +24,14 @@ PLAN_TOOLS = {"write_file", "patch", "terminal", "process"}
 ASKS: dict[str, dict] = {}
 GOAL_TASKS: dict[str, asyncio.Task] = {}
 PLAN_ROUNDS = 3  # 方案最多提幾版（模型審核打回、或使用者要求重提）；設定 [flow] plan_rounds 可改
-FLOW_DEFAULTS = {"plan_rounds": PLAN_ROUNDS, "fix_rounds": 1, "review_timeout": 300, "goal_gate": True}
-FLOW_LIMITS = {"plan_rounds": (1, 10), "fix_rounds": (0, 5), "review_timeout": (0, 3600)}
+FLOW_DEFAULTS = {"plan_rounds": PLAN_ROUNDS, "fix_rounds": 1, "review_timeout": 300, "context_chars": 1500, "goal_gate": True}
+FLOW_LIMITS = {"plan_rounds": (1, 10), "fix_rounds": (0, 5), "review_timeout": (0, 3600), "context_chars": (0, 20000)}
 
 
 def flow_settings() -> dict:
     """方案模式的上限（設定 → 方案模式，存在 config.toml [flow]）：
     plan_rounds 方案最多提幾版；fix_rounds 做完驗收後最多補幾輪；review_timeout 每次審核／拓展最多等幾秒（0＝不限）；
+    context_chars 規劃／拓展／審核附上的前文最多幾字（0＝不附）；
     goal_gate /goal 是否照對話選的方案模式走。"""
     from woof.config import load_config
 
@@ -399,6 +400,43 @@ def _goal_save(session_id: str, objective: str, status: str, steps: list[str] | 
     _save(session_id, goal=g)
 
 
+def _with_context(session_id: str, objective: str) -> str:
+    """這則訊息接在前面的對話後面時（「0分」「不夠厲害 多想」「改成藍色」），單看這句規劃員會當成閒聊、
+    拓展與審核也不知道在講什麼。附上之前在做的事與上一輪的回覆，第一則訊息就原樣回。"""
+    budget = flow_settings()["context_chars"]
+    if budget <= 0:
+        return objective
+    msgs = store.get_messages(session_id)
+
+    def text(m):
+        return "".join(b.get("text", "") for b in m.get("content") or [] if b.get("type") == "text").strip()
+
+    def real_user(m):
+        return m["role"] == "user" and not (m.get("meta") or {}).get("internal") and text(m)
+
+    cut = next((i for i in range(len(msgs) - 1, -1, -1) if real_user(msgs[i]) and text(msgs[i]) == objective.strip()),
+               len(msgs))
+    before = msgs[:cut]
+    # 字數上限：你之前說的最多 3 句、每句最多 300 字，先占一半；剩下的給上一輪回覆的結尾（結論通常在最後）
+    asks = [re.sub(r"\s+", " ", text(m))[:300] for m in before if real_user(m)][-3:]
+    while asks and sum(len(a) for a in asks) > budget // 2:
+        asks.pop(0)
+    reply = next((text(m) for m in reversed(before) if m["role"] == "assistant" and text(m)), "")
+    reply = re.sub(r"\s+", " ", reply)[-max(0, budget - sum(len(a) for a in asks)):] if reply else ""
+    if budget - sum(len(a) for a in asks) <= 0:
+        reply = ""
+    if not asks and not reply:
+        return objective
+    out = []
+    if asks:
+        out.append("【這個對話之前使用者要的（舊→新）】\n" + "\n".join("- " + a for a in asks))
+    if reply:
+        out.append("【上一輪助手的回覆（節錄）】\n" + reply)
+    out.append("【這次使用者說】" + objective)
+    out.append("（這句接在上面的對話後面。如果是在評價或不滿意上一輪的成果，就是要把那個成果重做或改好，照前文的任務拆步驟。）")
+    return "\n".join(out)
+
+
 def _last_mid(session_id: str) -> int:
     msgs = store.get_messages(session_id)
     return int(msgs[-1]["id"]) if msgs else 0
@@ -650,13 +688,15 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
     gate_name = {"human": "人工審核", "expand": "思維拓展"}.get(gate, "模型審核")
     feedback, steps, notes = "", None, ""
     rounds = flow_settings()["plan_rounds"]
+    raw_objective = objective   # 存檔用原句：「繼續」從規劃重來時會再附一次前文，不能疊兩層
+    objective = _with_context(session_id, objective)
 
     try:
         approved, base, prev = False, None, None
         since = _last_mid(session_id)
         for rnd in range(1, rounds + 1):
             # gate／since 存著：規劃、拓展、審核途中被打斷（程式重開、停止），「繼續」會從規劃重來，不會變成沒有審核的一般接續
-            _save(session_id, goal={"objective": objective, "status": "planning", "at": time.time(),
+            _save(session_id, goal={"objective": raw_objective, "status": "planning", "at": time.time(),
                                     "gate": gate, "auto": auto, "since": since})
             if gate != "expand" or base is None:
                 # 拓展模式只規劃一次；被打回時拿原本的步驟照審核意見重新拓展
@@ -668,7 +708,7 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
                 from woof.agent.loop import run_model_loop
 
                 await run_model_loop(ctx)
-                _save(session_id, goal={"objective": objective, "status": "chat", "at": time.time()})
+                _save(session_id, goal={"objective": raw_objective, "status": "chat", "at": time.time()})
                 return
             if gate == "expand":
                 # 思維拓展：這個模型容易「你說 A 就只做 A」，先把它補成完整的一套，再交給審核模型看過才動手
@@ -712,7 +752,7 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
                 approved = True
                 break
             if "取消" in ans:
-                _save(session_id, goal={"objective": objective, "status": "stopped", "at": time.time()})
+                _save(session_id, goal={"objective": raw_objective, "status": "stopped", "at": time.time()})
                 await emit({"type": "notice", "session_id": session_id, "text": "已取消，沒有動手"})
                 return
             feedback = "使用者要換一個做法"
@@ -726,7 +766,7 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
                 notes = (notes + "\n" if notes else "") + NO_REPLY_PLAN + "\n" + fix_note
                 await emit({"type": "notice", "session_id": session_id, "text": "你沒回應，交給模型自己判斷，照最後這版繼續"})
             elif "取消" in ans:
-                _save(session_id, goal={"objective": objective, "status": "stopped", "at": time.time()})
+                _save(session_id, goal={"objective": raw_objective, "status": "stopped", "at": time.time()})
                 await emit({"type": "notice", "session_id": session_id, "text": "已取消，沒有動手"})
                 return
             elif "照做" not in ans and "照最後" not in ans:
@@ -738,11 +778,13 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
         await run_goal(session_id, objective, emit, steps=steps, notes=notes)
     except asyncio.CancelledError:
         g = dict(_state(session_id).get("goal") or {})   # run_goal 已存的步驟與進度留著，「繼續」才接得回來
-        g.update(objective=objective, status="stopped" if g.get("steps") else "planning", at=time.time())
+        # 已經在執行步驟：留 run_goal 存的（附前文的）目標；還在規劃：存原句，「繼續」會再附一次前文
+        g.update(objective=g.get("objective") if g.get("steps") else raw_objective,
+                 status="stopped" if g.get("steps") else "planning", at=time.time())
         _save(session_id, goal=g)
         raise
     except Exception as e:
-        _save(session_id, goal={"objective": objective, "status": "error", "error": str(e)[:300]})
+        _save(session_id, goal={"objective": raw_objective, "status": "error", "error": str(e)[:300]})
         await emit({"type": "notice", "session_id": session_id, "text": f"方案流程失敗：{e}"})
 
 

@@ -1905,8 +1905,8 @@ async def fs_stat(body: dict):
             p = wd / p
         try:
             st = p.stat()
-            out.append({"req": raw, "path": str(p), "exists": p.is_file(), "size": st.st_size, "mtime": st.st_mtime,
-                        "allowed": _allowed(p)})
+            out.append({"req": raw, "path": str(p), "exists": p.is_file(), "dir": p.is_dir(), "size": st.st_size,
+                        "mtime": st.st_mtime, "allowed": _allowed(p)})
         except OSError:
             out.append({"req": raw, "path": str(p), "exists": False, "size": 0, "mtime": 0, "allowed": False})
     return out

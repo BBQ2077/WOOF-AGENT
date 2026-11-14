@@ -25,7 +25,7 @@ const TOOL_POOL_DESC = { firecrawl: '網頁搜尋與擷取', tavily: '網頁搜�
 
 localStorage.removeItem('woof.perm'); localStorage.removeItem('woof.effortWant'); localStorage.removeItem('woof.model');   // 舊版把權限、強度、模型記成全域，會帶到別的對話
 const S = {
-  draft: {}, follow: true,
+  draft: {}, follow: true, chatShow: {},
   models: [], vendors: [], backends: [], plugins: [], keys: {}, sessions: [], sid: null, msgs: [],
   running: new Set(), live: {}, tools: {}, errors: {}, usage: {}, attach: [], plugFilter: '全部', ws: null, approvals: {}, asks: {}, askDone: {}, todos: {}, planOn: {}, gate: {}, subOpen: new Set(), subShut: new Set(), act: {}, groups: [], drag: null,
   modelId: null, workdir: '', tasks: [], queue: {}, srvQ: {}, resumeHide: {}, interrupting: {}, askDraft: {},
@@ -1033,6 +1033,8 @@ function ftsHtml(f) {
 async function gotoHit(sid, mid, q) {
   if (S.sid !== sid) await openSession(sid);
   const chat = $('#chat');
+  const first = S.msgs.find((m) => typeof m.id === 'number' && !chat.querySelector(`[data-mid="${m.id}"]`) && m.id <= mid);
+  if (first && chatFrom() > 0) { S.chatShow[S.sid] = S.msgs.length; S.follow = false; renderChat(); }
   const users = [...chat.querySelectorAll('.msg.user[data-mid], details.internal[data-mid]')];
   let el = users.find((x) => +x.dataset.mid === mid);
   if (!el) { const before = users.filter((x) => +x.dataset.mid < mid).pop(); el = before ? (before.nextElementSibling || before) : chat.querySelector('.msg.bot'); }
@@ -2034,6 +2036,23 @@ async function reviewNow(scope = 'last') {
   try { const r = await api('POST', `/api/sessions/${S.sid}/review`, { scope }); n.remove(); notify(r.ok ? 'ok' : 'warn', r.ok ? '審核通過' : '審核未通過', r.reason || ''); }
   catch (e) { n.remove(); notify('error', '審核失敗', e.message); }
 }
+const CHAT_WIN = 160;
+// 這次從第幾則開始畫：預設最近 CHAT_WIN 則，往前對齊到使用者訊息（不要從一組回覆的中間切）
+function chatFrom() {
+  const n = S.msgs.length, show = S.chatShow[S.sid] || CHAT_WIN;
+  if (n <= show) return 0;
+  let i = n - show;
+  while (i > 0 && S.msgs[i].role !== 'user') i--;
+  return i;
+}
+function chatMore() {
+  if (chatFrom() <= 0 || S.chatMoreBusy) return;
+  S.chatMoreBusy = true;
+  S.follow = false;   // 重畫時用錨點留在原位
+  S.chatShow[S.sid] = (S.chatShow[S.sid] || CHAT_WIN) + CHAT_WIN;
+  renderChat();
+  setTimeout(() => { S.chatMoreBusy = false; }, 150);
+}
 function renderChat(scrollBottom) {
   renderTaskBar();
   const chat = $('#chat');
@@ -2063,6 +2082,10 @@ function renderChat(scrollBottom) {
     chat.insertAdjacentHTML('beforeend', `<div class="subbar"><div>${ico('agent')}<span>這是子代理的對話${par ? `，由「${esc(par.title)}」派出` : ''}。子代理做完會把最後一則回覆交回主對話。</span>${par ? '<a data-backparent>回到主對話</a>' : ''}</div></div>`);
   }
   let group = null, lastUser = null;
+  // 長對話只畫最近一段：每次有動靜（工具開始／結束、新訊息）整串會重畫，幾百則加上百張圖時往上捲會卡。
+  // 從使用者訊息切開，捲到頂再往前多畫一段
+  const from = chatFrom();
+  if (from > 0) chat.insertAdjacentHTML('beforeend', `<div class="chatmore" data-chatmore>往上捲載入更早的訊息（還有 ${from} 則沒顯示）</div>`);
   // 剛從「思考中」變成正式訊息的那一則：沿用使用者原本的展開狀態，不要一 commit 就收起來
   const carry = S.thinkCarry; S.thinkCarry = null;
   const groups = [];
@@ -2088,7 +2111,7 @@ function renderChat(scrollBottom) {
     groups.push(group);
     chat.appendChild(group);
   };
-  for (const m of S.msgs) {
+  for (const m of (from ? S.msgs.slice(from) : S.msgs)) {
     if (!sumDone && typeof m.id === 'number' && m.id > sumThrough) putSummary();
     if (m.role === 'tool' && group && typeof m.id === 'number') group._info.lastId = m.id;
     if (m.role === 'user' && m.meta && m.meta.internal) {
@@ -2386,7 +2409,8 @@ $('#chat').addEventListener('scroll', () => {
   if (S.progTop != null && Math.abs(c.scrollTop - S.progTop) <= 2) S.progTop = null;   // 程式自己捲的：不改跟隨狀態
   else {
     if (c.scrollTop < (S.lastTop ?? c.scrollTop) - 2) S.follow = false;            // 使用者往上
-    if (gap < 8) S.follow = true;                                                // 使用者自己捲回底部
+    if (gap < 8) { S.follow = true; delete S.chatShow[S.sid]; }                  // 使用者自己捲回底部：下次重畫縮回最近一段
+    if (c.scrollTop < 300 && S.follow === false) chatMore();
   }
   S.lastTop = c.scrollTop;
   updateToBottom();
@@ -4199,8 +4223,14 @@ async function openFlink(fl) {
   openFileLink(flinkPath(fl));
 }
 // 點本機檔案連結：圖片在看圖器開，其他在右側預覽開；預覽不了的（例如 exe）交給系統
-function openFileLink(p) {
+async function openFileLink(p) {
   if (IMG_EXT.test(p)) { openViewer({ src: fileUrl(p) }); return; }
+  // 資料夾：在檔案總管開（以前沒副檔名一律送預覽，資料夾讀不到內容就 404）
+  let isDir = /[\\/]$/.test(p);
+  if (!isDir && !/\.[a-z0-9]{1,5}$/i.test(p)) {
+    try { const st = await api('POST', '/api/fs/stat', { session_id: S.sid, paths: [p] }); isDir = !!(st[0] && st[0].dir); } catch {}
+  }
+  if (isDir) { if (D && D.openPath) D.openPath(p); else notify('warn', '這是資料夾', p); return; }
   if (/\.(html?|md|txt|json|toml|ya?ml|csv|log|py|js|ts|css|svg|pdf|xml|ini|bat|sh|ps1)$/i.test(p) || !/\.[a-z0-9]{1,5}$/i.test(p)) {
     if (typeof openPreview === 'function') { openPreview(p); return; }
   }
@@ -5286,7 +5316,7 @@ function renderPromptsSec(box) {
 const FLOW_PROMPTS = ['plan_review', 'review', 'expand', 'plan_goal', 'plan_redo', 'review_fail'];
 function renderFlowSec(box) {
   IP.only = FLOW_PROMPTS;
-  const f = S.cfg.flow = Object.assign({ plan_rounds: 3, fix_rounds: 1, review_timeout: 300, goal_gate: true }, S.cfg.flow || {});
+  const f = S.cfg.flow = Object.assign({ plan_rounds: 3, fix_rounds: 1, review_timeout: 300, context_chars: 1500, goal_gate: true }, S.cfg.flow || {});
   const num = (k, min, max, step, unit) => `<label class="cin"><input type="number" data-fl="${k}" min="${min}" max="${max}" step="${step}" value="${f[k]}"><span>${unit}</span></label>`;
   const row = (id, title, hint, ctl) => `<div class="frow" data-f="${id}"><div><b>${title}</b><small>${hint}</small></div><div class="fctl">${ctl}</div></div>`;
   const worst = f.plan_rounds + 1 + f.fix_rounds;
@@ -5294,6 +5324,7 @@ function renderFlowSec(box) {
     ${row('flRounds', '方案最多提幾版', '對抗審核打回、或你按「換個做法」時重提。到上限還沒過：問你要照最後一版做、交給模型自己判斷、還是取消；沒回就當作自己判斷，照最後一版繼續（收不回來的事留到最後）。/goal 不問，直接自己判斷。', num('plan_rounds', 1, 10, 1, '版'))}
     ${row('flFix', '做完驗收後最多補幾輪', '審核模型驗收發現缺口時補做幾輪，每補一輪再驗一次。0＝不補，只把缺口告訴你。', num('fix_rounds', 0, 5, 1, '輪'))}
     ${row('flWait', '每次審核／拓展最多等多久', '審核或拓展的子代理超過這個時間還沒結論，就不等了，照目前這版繼續。0＝一直等。', num('review_timeout', 0, 3600, 30, '秒'))}
+    ${row('flCtx', '附前文最多幾字', '你在對話中接著說（例如「0分」「不夠好 多想」）時，規劃、拓展、審核會一起看到之前在做什麼：你最近說的話，加上一輪回覆的結尾。中文一個字大約一個 token。0＝不附，只看這一句。', num('context_chars', 0, 20000, 500, '字'))}
     ${row('flGoal', '/goal 也照對話選的模式走', '開著：對話選了方案模式時，/goal 先審核或拓展再做；放著讓它自己跑，打回到上限或你沒回應都照最後一版做。關掉：/goal 直接拆步驟做，做完一樣驗收。', `<span class="sw${f.goal_gate ? ' on' : ''}" data-flgoal></span>`)}
     <div class="pm-ex"><span>依目前設定，一個方案最多審核 ${f.plan_rounds} 次、驗收 ${worst - f.plan_rounds} 次；加上等待上限，不會無限來回。</span></div>
   </div>
