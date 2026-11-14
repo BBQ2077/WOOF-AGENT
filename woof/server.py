@@ -2311,6 +2311,23 @@ async def _resume_turn(sid: str) -> None:
     await _close_or_resume(sid, status, _resume_turn)
 
 
+async def _gated_send(sid: str, blocks: list[dict], text: str, gate: str, extra: str = "") -> bool:
+    """方案模式下的一則要求：存進對話，交給方案流程（拓展／審核 → 照做 → 驗收）。成功開始回 True。"""
+    from .agent import tasks as _tasks
+
+    m = store.add_message(sid, "user", blocks)
+    await broadcast({"type": "message", "session_id": sid, "message": m})
+    s_new = store.auto_title(sid, text)
+    if s_new:
+        await broadcast({"type": "session_updated", "session": s_new})
+    try:
+        _tasks.start_gated(sid, text, broadcast, gate, extra=extra)
+        return True
+    except RuntimeError as e:
+        await broadcast({"type": "error", "session_id": sid, "text": str(e)})
+        return False
+
+
 async def _continue_turn(sid: str, reason: str) -> None:
     await broadcast({"type": "run_start", "session_id": sid})
     status = await _guarded(sid, lambda: _continue_session(sid, reason), "接續失敗")
@@ -2617,10 +2634,21 @@ async def ws_endpoint(ws: WebSocket):
                     _tasksq.skip_ask(sid, (msg.get("text") or "").strip() or "（使用者直接回話，沒有文字內容）")
                     await broadcast({"type": "notice", "session_id": sid, "text": "已用你這則訊息回答剛才的提問"})
                     continue
+                switch_from = None
                 async with TURN_LOCK:
                     running = sid in RUNS and not RUNS[sid].done()
                     agent_running = (not running) and sid in AGENT_RUNS
-                    if running or agent_running:
+                    gate = ((store.get_session(sid) or {}).get("engine_state") or {}).get("gate") or "off"
+                    from woof.agent import tasks as _tasks
+
+                    if (running and gate in ("human", "model", "expand") and (msg.get("text") or "").strip()
+                            and not _tasks.is_running(sid)):
+                        # 一般回合在跑、中途切成方案模式後送出要求：停下這一回合，這則交給方案流程，
+                        # 不然會被當插話塞進一般回合，整段沒有拓展也沒有審核
+                        steered = False
+                        switch_from = RUNS[sid]
+                        switch_from.cancel()
+                    elif running or agent_running:
                         # 有提問卡在等：使用者這次送訊息就當成回答，先把它結掉，
                         # 否則回合會卡在等那張卡（插話也要等這一步結束才送得進去）
                         from woof.agent import tasks as _tasksx
@@ -2635,26 +2663,32 @@ async def ws_endpoint(ws: WebSocket):
                                              "text": "已把追加要求送給子代理，它這一步跑完就會看到"})
                     else:
                         steered = False
-                        gate = ((store.get_session(sid) or {}).get("engine_state") or {}).get("gate") or "off"
                         if gate in ("human", "model", "expand") and (msg.get("text") or "").strip():
-                            from woof.agent import tasks as _tasks
-
                             if _tasks.is_running(sid):
                                 # 已經有方案在跑：不要存這則也不要開新的（原本會存進去再被擋下，看起來像沒反應）
                                 await ws.send_json({"type": "notice", "session_id": sid,
                                                     "text": "方案／目標還在跑：要回答它的提問直接打字送，要中止按停止。這則沒有送出去"})
                                 continue
-                            m = store.add_message(sid, "user", blocks)
-                            await broadcast({"type": "message", "session_id": sid, "message": m})
-                            s_new = store.auto_title(sid, msg["text"].strip())
-                            if s_new:
-                                await broadcast({"type": "session_updated", "session": s_new})
-                            try:
-                                _tasks.start_gated(sid, msg["text"].strip(), broadcast, gate)
-                            except RuntimeError as e:
-                                await ws.send_json({"type": "error", "session_id": sid, "text": str(e)})
+                            await _gated_send(sid, blocks, msg["text"].strip(), gate)
                         else:
                             RUNS[sid] = asyncio.create_task(_turn(sid, blocks))
+                if switch_from is not None:
+                    await broadcast({"type": "notice", "session_id": sid,
+                                     "text": "已切到方案模式：先停下目前這一回合，這則交給方案流程（規劃 → 審核 → 照做 → 驗收）"})
+                    await asyncio.wait({switch_from}, timeout=30)
+                    async with TURN_LOCK:
+                        if sid in RUNS and not RUNS[sid].done():
+                            await ws.send_json({"type": "error", "session_id": sid,
+                                                "text": "上一回合停不下來，這則沒有送出，稍後再送一次"})
+                            continue
+                        from woof.agent.loop import clear_interrupted as _clr
+
+                        text0 = msg["text"].strip()
+                        note = _tasks.progress_note(sid, "你中途切到方案模式")
+                        s2 = _clr(sid)
+                        if s2:
+                            await broadcast({"type": "session_updated", "session": s2})
+                        await _gated_send(sid, blocks, text0, gate, note)
                 if steered:
                     await broadcast({"type": "steer", "session_id": sid, "content": blocks})
                     await broadcast({"type": "notice", "session_id": sid, "text": "已插入，這一步結束後送給模型"})
@@ -2672,6 +2706,20 @@ async def ws_endpoint(ws: WebSocket):
                     if _tasks.resume_goal(sid, broadcast, reason):
                         # 方案做到一半被打斷：接回整個流程（做完中斷那步再往下），不是只續一回合就斷掉
                         continue
+                    gate = es.get("gate") or "off"
+                    if gate in ("human", "model", "expand"):
+                        # 方案模式但沒有方案可接（這段是一般回合做的、或流程已結束）：重走方案流程，只排還沒做完的
+                        try:
+                            r = _tasks.continue_gated(sid, broadcast, gate, reason)
+                        except RuntimeError as e:
+                            await ws.send_json({"type": "error", "session_id": sid, "text": str(e)})
+                            continue
+                        if r == "started":
+                            continue
+                        if r == "cancelled":
+                            await ws.send_json({"type": "notice", "session_id": sid,
+                                                "text": "這個方案你按過取消，沒有自動做；要做就再送一次要求"})
+                            continue
                     RUNS[sid] = asyncio.create_task(_continue_turn(sid, reason))
             elif t == "rerun" and sid:
                 mid = int(msg.get("from_id") or 0)
@@ -2688,6 +2736,17 @@ async def ws_endpoint(ws: WebSocket):
                 async with TURN_LOCK:
                     if sid in RUNS and not RUNS[sid].done():
                         await ws.send_json({"type": "error", "session_id": sid, "text": "還在執行中，先停止再重送"})
+                        continue
+                    from woof.agent import tasks as _tasks
+
+                    gate = ((store.get_session(sid) or {}).get("engine_state") or {}).get("gate") or "off"
+                    if gate in ("human", "model", "expand") and text.strip():
+                        if _tasks.is_running(sid):
+                            await ws.send_json({"type": "error", "session_id": sid, "text": "方案／目標還在跑，先停止再重送"})
+                            continue
+                        store.delete_from(sid, mid)
+                        await broadcast({"type": "truncated", "session_id": sid, "from_id": mid})
+                        await _gated_send(sid, blocks, text.strip(), gate)
                         continue
                     store.delete_from(sid, mid)
                     RUNS[sid] = asyncio.create_task(_turn(sid, blocks))

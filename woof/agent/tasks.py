@@ -244,7 +244,7 @@ def _recent_report(session_id: str, limit: int = 8) -> str:
     return "\n".join(reversed(parts)) or "（沒有紀錄）"
 
 
-def resume_digest(session_id: str, tools: int = 8) -> str:
+def resume_digest(session_id: str, tools: int = 8, ask: bool = True) -> str:
     """「繼續」時把已經做過的事交給模型，省掉它從頭逛一遍專案（list_tree、重讀每個檔）。"""
     s = store.get_session(session_id) or {}
     out: list[str] = []
@@ -264,9 +264,9 @@ def resume_digest(session_id: str, tools: int = 8) -> str:
     # 「這次要做的事」取最後一則不是接續訊息的使用者訊息；拿接續訊息當任務會一層套一層
     last = next((m for m in reversed(store.get_messages(session_id))
                  if m["role"] == "user" and (m.get("meta") or {}).get("internal") != "resume"), None)
-    ask = "".join(b.get("text", "") for b in (last or {}).get("content", []) if b.get("type") == "text").strip()
-    if ask:
-        out.append("這次要做的事：" + ask[:300])
+    ask_t = "".join(b.get("text", "") for b in (last or {}).get("content", []) if b.get("type") == "text").strip()
+    if ask and ask_t:
+        out.append("這次要做的事：" + ask_t[:300])
     recent = _recent_report(session_id, tools)
     if recent and recent != "（沒有紀錄）":
         out.append("最近做過（最舊→最新）：\n" + recent[-2500:])
@@ -469,7 +469,7 @@ def resume_goal(session_id: str, emit, reason: str) -> bool:
     if not g.get("steps"):
         # 還沒排出方案就被打斷：照原本的模式從規劃重來（拓展、審核都會再跑一次）
         GOAL_TASKS[session_id] = _track(session_id, run_gated(session_id, g["objective"], emit, g["gate"],
-                                                              auto=bool(g.get("auto"))), emit)
+                                                              auto=bool(g.get("auto")), extra=g.get("extra") or ""), emit)
         return True
     GOAL_TASKS[session_id] = _track(session_id, run_goal(session_id, g["objective"], emit, steps=list(g["steps"]),
                                                          start=int(g.get("idx") or 0), resume_reason=reason,
@@ -669,7 +669,7 @@ async def expand_plan(parent, objective: str, steps: list[str], feedback: str = 
     return [], ""
 
 
-async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool = False) -> None:
+async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool = False, extra: str = "") -> None:
     """先提方案：規劃（1～5 步）→ 人工核准／模型審核／思維拓展 → 照步驟做 → 最後對抗檢查。
 
     gate：human（人工核准）、model（模型審核只擋漏步驟與不可逆損害）、expand（先補成完整的一套再做）。
@@ -689,7 +689,7 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
     feedback, steps, notes = "", None, ""
     rounds = flow_settings()["plan_rounds"]
     raw_objective = objective   # 存檔用原句：「繼續」從規劃重來時會再附一次前文，不能疊兩層
-    objective = _with_context(session_id, objective)
+    objective = _with_context(session_id, objective) + extra
 
     try:
         approved, base, prev = False, None, None
@@ -697,7 +697,7 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
         for rnd in range(1, rounds + 1):
             # gate／since 存著：規劃、拓展、審核途中被打斷（程式重開、停止），「繼續」會從規劃重來，不會變成沒有審核的一般接續
             _save(session_id, goal={"objective": raw_objective, "status": "planning", "at": time.time(),
-                                    "gate": gate, "auto": auto, "since": since})
+                                    "gate": gate, "auto": auto, "since": since, "extra": extra})
             if gate != "expand" or base is None:
                 # 拓展模式只規劃一次；被打回時拿原本的步驟照審核意見重新拓展
                 base = await plan_steps(model_cfg, objective, "" if gate == "expand" else feedback)
@@ -752,7 +752,8 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
                 approved = True
                 break
             if "取消" in ans:
-                _save(session_id, goal={"objective": raw_objective, "status": "stopped", "at": time.time()})
+                _save(session_id, goal={"objective": raw_objective, "status": "cancelled", "at": time.time(),
+                                        "since": _last_mid(session_id)})
                 await emit({"type": "notice", "session_id": session_id, "text": "已取消，沒有動手"})
                 return
             feedback = "使用者要換一個做法"
@@ -766,7 +767,8 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
                 notes = (notes + "\n" if notes else "") + NO_REPLY_PLAN + "\n" + fix_note
                 await emit({"type": "notice", "session_id": session_id, "text": "你沒回應，交給模型自己判斷，照最後這版繼續"})
             elif "取消" in ans:
-                _save(session_id, goal={"objective": raw_objective, "status": "stopped", "at": time.time()})
+                _save(session_id, goal={"objective": raw_objective, "status": "cancelled", "at": time.time(),
+                                        "since": _last_mid(session_id)})
                 await emit({"type": "notice", "session_id": session_id, "text": "已取消，沒有動手"})
                 return
             elif "照做" not in ans and "照最後" not in ans:
@@ -794,11 +796,42 @@ def is_running(session_id: str) -> bool:
     return bool(t and not t.done())
 
 
-def start_gated(session_id: str, objective: str, emit, gate: str) -> None:
+def start_gated(session_id: str, objective: str, emit, gate: str, extra: str = "") -> None:
     t = GOAL_TASKS.get(session_id)
     if t and not t.done():
         raise RuntimeError("這個對話已經有目標或方案在執行，先按停止")
-    GOAL_TASKS[session_id] = _track(session_id, run_gated(session_id, objective, emit, gate), emit)
+    GOAL_TASKS[session_id] = _track(session_id, run_gated(session_id, objective, emit, gate, extra=extra), emit)
+
+
+def continue_gated(session_id: str, emit, gate: str, reason: str) -> str:
+    """方案模式下按「繼續」，但沒有做到一半的方案可接（流程已結束、或這段是一般回合做的）：
+    整個重走方案流程（規劃 → 拓展／審核 → 照做 → 驗收），規劃時附上已經做過的事，只排還沒做完的。
+    回 started＝已開始；cancelled＝你按過取消、之後沒再下指令，不自動做；空字串＝找不到要做的事，照一般接續。"""
+    g = _state(session_id).get("goal") or {}
+    msgs = store.get_messages(session_id)
+    last = next((m for m in reversed(msgs)
+                 if m["role"] == "user" and not (m.get("meta") or {}).get("internal")), None)
+    if g.get("status") == "cancelled" and (last is None or int(last["id"]) <= int(g.get("since") or 0)):
+        return "cancelled"
+    ask_text = "".join(b.get("text", "") for b in (last or {}).get("content", []) if b.get("type") == "text").strip()
+    if not ask_text:
+        return ""
+    from woof.agent.loop import clear_interrupted
+
+    s2 = clear_interrupted(session_id)
+    if s2:
+        asyncio.get_running_loop().create_task(emit({"type": "session_updated", "session": s2}))
+    start_gated(session_id, ask_text, emit, gate, extra=progress_note(session_id, reason))
+    return "started"
+
+
+def progress_note(session_id: str, reason: str) -> str:
+    """接在方案目標後面的現況：上一回合中途停下前已經做過的事（只排還沒做完的）。前文與這次的要求由方案流程自己附。"""
+    digest = resume_digest(session_id, ask=False)
+    if not digest:
+        return ""
+    return (f"\n\n【現況】上一回合中途停下（{reason}），之前已經做了一部分。"
+            "規劃前先看這段，做完的不要重做；這次的要求和之前不同時，以這次為準。\n" + digest)
 
 
 _WRITE_OK = ("已寫入 ", "已修改 ")
