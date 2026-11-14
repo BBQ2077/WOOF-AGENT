@@ -27,9 +27,8 @@ DIFF = {
     "normal": ("set", "認真下：自己能連五就下，對方要連五一定擋，再顧攻守。"),
     "hard": ("top", "全力下：先看自己能不能連五、做活四或雙三，再看對方有沒有活三、衝四或雙重威脅要擋，想清楚再落子。"),
 }
-# 一手最多想多久（秒）：超過就改用他的模型最快的檔位馬上再想一次，棋局不會卡住
-THINK_S = {"easy": 45, "normal": 75, "hard": 150}
-QUICK_S = 45
+# 一手最多想多久（秒）：思考偶爾會停不下來，超過就用同一個檔位重想一次（不降檔）
+THINK_S = {"easy": 60, "normal": 90, "hard": 150}
 TIMEOUT = 90   # 開局、悔棋、輸贏時他回一句話
 # 預先思考中的請求：猜錯或你在寵物欄講話後就作廢，直接取消，不跟真正那一手搶模型
 SPEC: dict = {}
@@ -159,13 +158,12 @@ async def _ask(pet, c, model, prompt: str, max_out: int, diff: str = "normal", t
 
 
 async def _think(pet, c, model, prompt: str, diff: str) -> str:
-    """下一手：照難度想；想超過時間就改最快的檔位再想一次（思考有時會停不下來）。"""
+    """下一手：照難度想；思考停不下來、超過時間就用同一個檔位重想一次。"""
+    lim = THINK_S.get(diff, THINK_S["normal"])
     try:
-        return await _ask(pet, c, model, prompt, 200, diff, THINK_S.get(diff, THINK_S["normal"]))
+        return await _ask(pet, c, model, prompt, 200, diff, lim)
     except asyncio.TimeoutError:
-        if diff == "easy":
-            raise
-        return await _ask(pet, c, model, prompt + "\n時間到了，這手直接決定，不要再算。", 200, "easy", QUICK_S)
+        return await _ask(pet, c, model, prompt, 200, diff, lim)
 
 
 def register(woof):

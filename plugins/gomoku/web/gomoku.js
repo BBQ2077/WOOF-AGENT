@@ -3,8 +3,8 @@
    棋由寵物的模型下、台詞也是他講，用的是他平常的記憶；他說的話出現在右邊寵物欄（這頁不另外放對話）。
    這裡只管規則（落點合不合法、誰連成五）與畫面，不會把任何程式算的候選點給模型。
 
-   預先思考：輪到你的時候，先猜你最可能下的幾個點（你滑鼠停住的那一格、加上程式猜的兩個），
-   用「你下在那裡之後」的完整棋面各問一次模型。你真的下在那裡，就直接用他已經想好的那一手；
+   預先思考：輪到你的時候，照棋子附近的威脅排出你可能下的點（最多 30 個，滑鼠停住的那一格插隊），
+   同時開 2～4 個，用「你下在那裡之後」的完整棋面各問一次模型，想完一個接下一個。你真的下在那裡，就直接用他已經想好的那一手；
    問的就是那個確切的棋面，所以不會不即時。沒猜中就照常問。這些猜測只用來決定要先問哪幾格，模型看不到。
    預先想的結果只有真的用到才寫進他的紀錄；你在寵物欄跟他講了話，先想好的就作廢重想（他要看到最新的對話）。 */
 (function () {
@@ -15,8 +15,9 @@
   const PLUGIN = 'gomoku';
   const SIZE = 15, N = SIZE * SIZE, EMPTY = 0, BLACK = 1, WHITE = 2;
   const DIRS = [[1, 0], [0, 1], [1, 1], [1, -1]];
-  const ASK_MS = 215000;  // 一次最多等多久（後端：照難度想，超時改最快的檔位再想一次，最多約 195 秒）
-  const SPEC_MAX = 3;     // 每一手最多先替你想幾個點
+  const ASK_MS = 320000;  // 一次最多等多久（後端：照難度想，超時用同一檔重想一次，最多約 300 秒）
+  const PRE_MAX = 30;     // 每一手最多先替你想幾個點（棋子附近、照威脅排）
+  const PARS = [0, 2, 3, 4];   // 預先思考同時想幾個（0＝關）
   const LETTERS = 'ABCDEFGHIJKLMNO';
   // 難度：想多久照他目前模型自己有的檔位（簡單＝最低、普通＝寵物設定、高手＝最高），再加上下法的說法
   const DIFF = {
@@ -93,15 +94,19 @@
     over: false, winner: 0, line: null, thinking: false, stuck: '', hover: null, rev: 0,
     diff: localStorage.getItem('woof.gomoku.diff') || 'normal',
     nextPet: localStorage.getItem('woof.gomoku.first') === 'pet',   // 下一局誰先（換了不會打斷這一局）
-    pre: localStorage.getItem('woof.gomoku.pre') !== '0',
+    par: (() => {
+      const v = localStorage.getItem('woof.gomoku.par');
+      if (v !== null && PARS.includes(+v)) return +v;
+      return localStorage.getItem('woof.gomoku.pre') === '0' ? 0 : 3;
+    })(),
     score: { u: 0, p: 0, d: 0 }, rst: false, rstT: 0, t0: 0, took: 0,
     px: 0, pad: 16, cell: 30, hoverT: 0, q: null, recorded: new Set(), lastUser: '',
   };
-  const SP = { map: new Map(), live: 0, n: 0, seq: 0 };   // 預先思考：棋面 → 模型的回答（Promise）
+  const SP = { map: new Map(), live: 0, n: 0, seq: 0, queue: [], gen: 0 };   // 預先思考：棋面 → 模型的回答（Promise）
   // 作廢預先思考：前端丟掉，後端也取消還在跑的（keep＝猜中、正在用的那個）
   function dropSpec(keep) {
     const had = SP.map.size;
-    SP.map.clear(); SP.n = 0;
+    SP.map.clear(); SP.n = 0; SP.queue = []; SP.live = 0; SP.gen++;
     if (had) W.act(PLUGIN, 'drop', { keep: keep || '' }).catch(() => {});
   }
   const petColor = () => other(G.human);
@@ -130,7 +135,7 @@
       '    <span class="gk-tb gk-gear" data-gk="menu" title="設定">' + ico('gear') + '</span>' +
       '    <div class="gk-pop">' +
       '      <div class="gk-row"><span>先手<small class="gk-next"></small></span><div class="gk-seg"><b data-gk="side" data-v="me">你先</b><b data-gk="side" data-v="pet">他先</b></div></div>' +
-      '      <label class="gk-row gk-pre"><span>預先思考<small>先猜你會下哪，你下在那就秒回；token 多花 2～3 倍</small></span><span class="gk-sw"></span></label>' +
+      '      <div class="gk-row"><span>預先思考<small>你在想時他先想你可能下的點（最多 30 個），下在想好的點就秒回；思考強度不變，同時越多 token 越多</small></span><div class="gk-seg">' + PARS.map((n) => '<b data-gk="par" data-v="' + n + '">' + (n ? '同時 ' + n : '關') + '</b>').join('') + '</div></div>' +
       '      <div class="gk-rule">先手從下一局開始換・15×15・連五即勝・無禁手</div>' +
       '    </div>' +
       '  </div>' +
@@ -138,7 +143,7 @@
     const q = (s) => el.querySelector(s);
     G.el = el; G.cv = q('.gk-cv'); G.ctx = G.cv.getContext('2d');
     G.ui = { turn: q('.gk-turn'), took: q('.gk-took'), over: q('.gk-over'), rtxt: q('.gk-rtxt'), rsub: q('.gk-rsub'),
-      undo: q('[data-gk="undo"]'), resign: q('[data-gk="resign"]'), rsl: q('.gk-rsl'), retry: q('.gk-retry'), pre: q('.gk-pre'),
+      undo: q('[data-gk="undo"]'), resign: q('[data-gk="resign"]'), rsl: q('.gk-rsl'), retry: q('.gk-retry'),
       stage: q('.gk-stage'), me: q('.gk-me'), pet: q('.gk-pet'), mec: q('.gk-mec'), pc: q('.gk-pc'), pn: q('.gk-pn'),
       su: q('.gk-su'), sp: q('.gk-sp'), next: q('.gk-next'), av: q('.gk-av'), pop: q('.gk-pop'), gear: q('.gk-gear'), mid: q('.gk-mid') };
     el.addEventListener('click', onClick);
@@ -198,7 +203,7 @@
     u.resign.classList.toggle('danger', G.rst);
     u.pop.classList.toggle('on', !!G.menu);
     u.gear.classList.toggle('on', !!G.menu);
-    u.pre.classList.toggle('on', G.pre);
+    G.el.querySelectorAll('[data-gk="par"]').forEach((b) => b.classList.toggle('on', +b.dataset.v === G.par));
     G.el.querySelectorAll('[data-gk="side"]').forEach((b) => b.classList.toggle('on', (b.dataset.v === 'pet') === G.nextPet));
     G.el.querySelectorAll('[data-gk="diff"]').forEach((b) => b.classList.toggle('on', b.dataset.v === G.diff));
     u.next.textContent = G.nextPet !== petFirst() ? '下一局換成' + (G.nextPet ? name + '先' : '你先') : '';
@@ -299,7 +304,7 @@
     if ((G.hover && h && G.hover.x === h.x && G.hover.y === h.y) || (!G.hover && !h)) return;
     G.hover = h; draw();
     clearTimeout(G.hoverT);
-    if (h) G.hoverT = setTimeout(() => speculate(h.x, h.y), HOVER_MS);
+    if (h) G.hoverT = setTimeout(() => speculate(h.x, h.y, true), HOVER_MS);
   }
   function onClick(e) {
     const b = e.target.closest('[data-gk]');
@@ -311,16 +316,15 @@
       else if (k === 'undo') undo();
       else if (k === 'resign') resign();
       else if (k === 'retry') petTurn(null);
+      else if (k === 'par' && PARS.includes(+b.dataset.v)) {
+        G.par = +b.dataset.v; localStorage.setItem('woof.gomoku.par', String(G.par)); updateUI();
+        if (!G.par) dropSpec(); else if (canPlay()) { pump(); guessAhead(); }
+      }
       else if (k === 'diff' && DIFF[b.dataset.v] && b.dataset.v !== G.diff) {
         G.diff = b.dataset.v; localStorage.setItem('woof.gomoku.diff', G.diff); updateUI();
         dropSpec(); if (canPlay()) guessAhead();   // 先想好的是舊難度的，重想
       }
       return;
-    }
-    if (e.target.closest('.gk-pre')) {
-      G.pre = !G.pre; localStorage.setItem('woof.gomoku.pre', G.pre ? '1' : '0');
-      if (!G.pre) SP.map.clear(); else if (canPlay()) guessAhead();
-      updateUI();
     }
   }
 
@@ -344,27 +348,42 @@
   const usable = (r, b) => r && Array.isArray(r.move) && inb(r.move[0], r.move[1]) && b[ix(r.move[0], r.move[1])] === EMPTY;
   const keyOf = (b) => G.diff + ':' + b.join('');
 
-  // 預先思考：假設你下在 (x,y)，先用那個棋面問模型
-  function speculate(x, y) {
-    if (!G.pre || !canPlay() || G.board[ix(x, y)] !== EMPTY) return;
-    if (SP.n >= SPEC_MAX) return;
+  // 預先思考：你在想的時候，他同時先想 G.par 個「你下在這裡之後」他要怎麼應；
+  // 想完一個就接著想排隊的下一個（棋子附近、照威脅排，最多 PRE_MAX 個）。滑鼠停住的那一格插隊。
+  function speculate(x, y, front) {
+    if (!G.par || !canPlay() || G.board[ix(x, y)] !== EMPTY) return;
     const b = G.board.slice(); b[ix(x, y)] = G.human;
     if (winLine(b, x, y, G.human)) return;   // 你下這裡就贏了，不用先想
-    const key = keyOf(b);
-    if (SP.map.has(key)) return;
-    SP.n++;
-    const moves = G.moves.concat([{ x, y, p: G.human }]);
-    const id = 's' + (++SP.seq);
-    const pr = callMove(b, moves, '', id).catch((e) => ({ error: e.message }));
-    SP.map.set(key, { pr, id, t0: performance.now() });
+    if (SP.map.has(keyOf(b))) return;
+    const i = SP.queue.findIndex((p) => p.x === x && p.y === y);
+    if (i >= 0) SP.queue.splice(i, 1);
+    else if (!front && SP.n + SP.queue.length >= PRE_MAX) return;
+    if (front) SP.queue.unshift({ x, y }); else SP.queue.push({ x, y });
+    pump();
+  }
+  function pump() {
+    const gen = SP.gen;
+    while (SP.live < G.par && SP.queue.length && canPlay()) {
+      const { x, y } = SP.queue.shift();
+      if (G.board[ix(x, y)] !== EMPTY) continue;
+      const b = G.board.slice(); b[ix(x, y)] = G.human;
+      const key = keyOf(b);
+      if (SP.map.has(key)) continue;
+      SP.n++; SP.live++;
+      const id = 's' + (++SP.seq);
+      const moves = G.moves.concat([{ x, y, p: G.human }]);
+      const pr = callMove(b, moves, '', id).catch((e) => ({ error: e.message }))
+        .then((r) => { if (gen === SP.gen) { SP.live--; pump(); } return r; });
+      SP.map.set(key, { pr, id, t0: performance.now() });
+    }
   }
   function guessAhead() {
-    if (!G.pre || !G.moves.length) return;
+    if (!G.par || !G.moves.length) return;
     const rev = G.rev;
     // 等紀錄寫好再問，他才看得到自己剛剛那句
     (G.q || Promise.resolve()).then(() => {
       if (rev !== G.rev || !canPlay()) return;
-      for (const g of guessHuman(G.board, G.human, 2)) speculate(g.x, g.y);
+      for (const g of guessHuman(G.board, G.human, PRE_MAX)) speculate(g.x, g.y);
     });
   }
 
@@ -519,5 +538,5 @@
     },
   });
   // 測試、除錯用：看棋局狀態（不改棋局）
-  W.gomoku = { state: () => ({ moves: G.moves.slice(), over: G.over, winner: G.winner, turn: G.turn, human: G.human, thinking: G.thinking, stuck: G.stuck, diff: G.diff, pre: G.pre, spec: [...SP.map.keys()].length, took: G.took, lastUser: G.lastUser }) };
+  W.gomoku = { state: () => ({ moves: G.moves.slice(), over: G.over, winner: G.winner, turn: G.turn, human: G.human, thinking: G.thinking, stuck: G.stuck, diff: G.diff, par: G.par, spec: SP.map.size, live: SP.live, queued: SP.queue.length, took: G.took, lastUser: G.lastUser }) };
 })();

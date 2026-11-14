@@ -76,9 +76,4 @@ html.dark .gk-cv{background:
 .gk-seg b{font-weight:500;font-size:12.5px;padding:4px 11px;border-radius:7px;cursor:pointer;color:var(--dim);user-select:none}
 .gk-seg b:hover{color:var(--text)}
 .gk-seg b.on{background:var(--panel2);color:var(--acc);box-shadow:0 1px 3px rgb(0 0 0 / .12)}
-.gk-pre{cursor:pointer;user-select:none}
-.gk-sw{flex:none;width:32px;height:18px;border-radius:9px;background:var(--line2);position:relative;transition:background .15s}
-.gk-sw::after{content:"";position:absolute;left:2px;top:2px;width:14px;height:14px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgb(0 0 0 / .2);transition:left .15s}
-.gk-pre.on .gk-sw{background:var(--acc)}
-.gk-pre.on .gk-sw::after{left:16px}
 .gk-rule{font-size:11.5px;color:var(--faint);border-top:1px solid var(--line);padding-top:8px}
