@@ -15,7 +15,7 @@
   const PLUGIN = 'gomoku';
   const SIZE = 15, N = SIZE * SIZE, EMPTY = 0, BLACK = 1, WHITE = 2;
   const DIRS = [[1, 0], [0, 1], [1, 1], [1, -1]];
-  const ASK_MS = 190000;  // 一次最多等多久（後端自己會在 180 秒放棄；思考開越高越久）
+  const ASK_MS = 215000;  // 一次最多等多久（後端：照難度想，超時改最快的檔位再想一次，最多約 195 秒）
   const SPEC_MAX = 3;     // 每一手最多先替你想幾個點
   const LETTERS = 'ABCDEFGHIJKLMNO';
   // 難度：想多久照他目前模型自己有的檔位（簡單＝最低、普通＝寵物設定、高手＝最高），再加上下法的說法
@@ -97,7 +97,13 @@
     score: { u: 0, p: 0, d: 0 }, rst: false, rstT: 0, t0: 0, took: 0,
     px: 0, pad: 16, cell: 30, hoverT: 0, q: null, recorded: new Set(), lastUser: '',
   };
-  const SP = { map: new Map(), live: 0, n: 0 };   // 預先思考：棋面 → 模型的回答（Promise）
+  const SP = { map: new Map(), live: 0, n: 0, seq: 0 };   // 預先思考：棋面 → 模型的回答（Promise）
+  // 作廢預先思考：前端丟掉，後端也取消還在跑的（keep＝猜中、正在用的那個）
+  function dropSpec(keep) {
+    const had = SP.map.size;
+    SP.map.clear(); SP.n = 0;
+    if (had) W.act(PLUGIN, 'drop', { keep: keep || '' }).catch(() => {});
+  }
   const petColor = () => other(G.human);
   const petFirst = () => petColor() === BLACK;
   if (!DIFF[G.diff]) G.diff = 'normal';
@@ -154,7 +160,7 @@
     setTimeout(updateUI, 0);   // 換了寵物（名字、頭像、模型能選的思考檔位）就跟著換
     if (!Array.isArray(ev.history) || !SP.map.size) return;
     const last = [...ev.history].reverse().find((m) => m.role !== 'pet');
-    if (last && last.kind !== 'game' && last.id !== G.lastUser) { G.lastUser = last.id; SP.map.clear(); SP.n = 0; if (canPlay()) guessAhead(); }
+    if (last && last.kind !== 'game' && last.id !== G.lastUser) { G.lastUser = last.id; dropSpec(); if (canPlay()) guessAhead(); }
   }
   // 寫紀錄、讓他回話：照順序一件一件來，紀錄才不會亂
   function queue(fn) { G.q = (G.q || Promise.resolve()).then(fn).catch(() => {}); return G.q; }
@@ -307,7 +313,7 @@
       else if (k === 'retry') petTurn(null);
       else if (k === 'diff' && DIFF[b.dataset.v] && b.dataset.v !== G.diff) {
         G.diff = b.dataset.v; localStorage.setItem('woof.gomoku.diff', G.diff); updateUI();
-        SP.map.clear(); SP.n = 0; if (canPlay()) guessAhead();   // 先想好的是舊難度的，重想
+        dropSpec(); if (canPlay()) guessAhead();   // 先想好的是舊難度的，重想
       }
       return;
     }
@@ -329,10 +335,10 @@
     return Promise.race([p, new Promise((_, rej) => { t = setTimeout(() => rej(new Error('他想太久了')), ms); })])
       .finally(() => clearTimeout(t));
   }
-  function callMove(b, moves, note) {
+  function callMove(b, moves, note, spec) {
     return withTimeout(W.act(PLUGIN, 'move', {
       board: grid(b), moves: moves.slice(-16).map((m) => [m.x, m.y, m.p]),
-      pet: petColor(), human: G.human, diff: G.diff, retry_note: note || '',
+      pet: petColor(), human: G.human, diff: G.diff, retry_note: note || '', spec: spec || '',
     }), ASK_MS);
   }
   const usable = (r, b) => r && Array.isArray(r.move) && inb(r.move[0], r.move[1]) && b[ix(r.move[0], r.move[1])] === EMPTY;
@@ -348,8 +354,9 @@
     if (SP.map.has(key)) return;
     SP.n++;
     const moves = G.moves.concat([{ x, y, p: G.human }]);
-    const pr = callMove(b, moves, '').catch((e) => ({ error: e.message }));
-    SP.map.set(key, { pr, t0: performance.now() });
+    const id = 's' + (++SP.seq);
+    const pr = callMove(b, moves, '', id).catch((e) => ({ error: e.message }));
+    SP.map.set(key, { pr, id, t0: performance.now() });
   }
   function guessAhead() {
     if (!G.pre || !G.moves.length) return;
@@ -378,7 +385,12 @@
       const note = !i ? '' : taken ? `上一次你選的 ${taken} 已經有子了，換一個空點。` : '上一次的回覆看不懂，這次只回 JSON。';
       try { r = await callMove(G.board, G.moves, note); } catch (e) { r = { error: e.message }; }
       if (rev !== G.rev) return;
-      if (!usable(r, G.board)) { err = (r && r.error) || '回覆不合法'; taken = (r && r.taken) || ''; r = null; }
+      if (!usable(r, G.board)) {
+        err = (r && r.error) || '回覆不合法'; taken = (r && r.taken) || '';
+        const slow = r && (r.timeout || r.error === '他想太久了');
+        r = null;
+        if (slow) break;   // 後端已經改最快的檔位再想過一次，再問也一樣，交給「再想一次」
+      }
     }
     G.thinking = false;
     G.took = performance.now() - G.t0;
@@ -415,8 +427,12 @@
     const r = place(x, y, G.human);
     updateUI(); draw();
     const spec = SP.map.get(keyOf(G.board));
-    SP.map.clear(); SP.n = 0;   // 沒猜中的那幾個不要了
+    dropSpec(spec && spec.id);   // 沒猜中的那幾個不要了，後端也停掉
     if (r !== null) return;
+    // 你這手馬上寫進他的紀錄：他想的時候你在寵物欄講話，順序才不會亂
+    const hm = G.moves[G.moves.length - 1];
+    G.recorded.add(hm);
+    record({ human: [hm.x, hm.y] });
     petTurn(spec || null);
   }
 
@@ -428,7 +444,7 @@
 
   function endGame(w, line, reason) {
     G.over = true; G.winner = w; G.line = line || null; G.thinking = false; G.hover = null;
-    SP.map.clear(); SP.n = 0;
+    dropSpec();
     if (w === 0) G.score.d++; else if (w === G.human) G.score.u++; else G.score.p++;
     G.ui.rtxt.textContent = w === 0 ? '和棋' : w === G.human ? '你贏了！' : petName() + '贏了';
     G.ui.rsub.textContent = (reason === 'resign' ? '你認輸了・' : '') + '比分 你 ' + G.score.u + '：' + G.score.p + ' ' + petName();
@@ -446,7 +462,7 @@
     G.board = new Int8Array(N); G.moves = []; G.turn = BLACK; G.human = byPet ? WHITE : BLACK;
     G.over = false; G.winner = 0; G.line = null; G.thinking = false; G.stuck = ''; G.hover = null; G.took = 0;
     G.rst = false; clearTimeout(G.rstT); G.recorded = new Set();
-    SP.map.clear(); SP.n = 0;
+    dropSpec();
     updateUI(); draw();
     if (G.turn !== G.human) petTurn(null);
     else react('start');
@@ -456,7 +472,7 @@
     if (G.over || !G.moves.some((m) => m.p === G.human)) return;
     G.rev++;
     G.thinking = false; G.stuck = '';
-    SP.map.clear(); SP.n = 0;
+    dropSpec();
     const pop = () => { const m = G.moves.pop(); G.board[ix(m.x, m.y)] = EMPTY; return m; };
     if (G.moves[G.moves.length - 1].p === petColor()) pop();
     if (G.moves.length && G.moves[G.moves.length - 1].p === G.human) pop();
@@ -498,7 +514,7 @@
       window.removeEventListener('woof:event', onWoof);
       document.removeEventListener('mousedown', G.outside);
       if (G.ro) G.ro.disconnect();
-      SP.map.clear(); SP.n = 0;
+      dropSpec();
       G.el = null; G.cv = null; G.ctx = null; G.ro = null; G.thinking = false;
     },
   });

@@ -27,7 +27,12 @@ DIFF = {
     "normal": ("set", "認真下：自己能連五就下，對方要連五一定擋，再顧攻守。"),
     "hard": ("top", "全力下：先看自己能不能連五、做活四或雙三，再看對方有沒有活三、衝四或雙重威脅要擋，想清楚再落子。"),
 }
-TIMEOUT = 180
+# 一手最多想多久（秒）：超過就改用他的模型最快的檔位馬上再想一次，棋局不會卡住
+THINK_S = {"easy": 45, "normal": 75, "hard": 150}
+QUICK_S = 45
+TIMEOUT = 90   # 開局、悔棋、輸贏時他回一句話
+# 預先思考中的請求：猜錯或你在寵物欄講話後就作廢，直接取消，不跟真正那一手搶模型
+SPEC: dict = {}
 
 
 def _pet():
@@ -146,11 +151,21 @@ def _diff_effort(model: dict, c: dict, diff: str) -> str:
     return graded[-1] if graded else es[-1]
 
 
-async def _ask(pet, c, model, prompt: str, max_out: int, diff: str = "normal") -> str:
+async def _ask(pet, c, model, prompt: str, max_out: int, diff: str = "normal", timeout: float = TIMEOUT) -> str:
     m = pet._params(model, {**c, "effort": _diff_effort(model, c, diff)})
     return await asyncio.wait_for(
         pet._call(m, pet.build_system(c, "game", GAME), pet.game_messages(c, prompt), max_out),
-        timeout=TIMEOUT)
+        timeout=timeout)
+
+
+async def _think(pet, c, model, prompt: str, diff: str) -> str:
+    """下一手：照難度想；想超過時間就改最快的檔位再想一次（思考有時會停不下來）。"""
+    try:
+        return await _ask(pet, c, model, prompt, 200, diff, THINK_S.get(diff, THINK_S["normal"]))
+    except asyncio.TimeoutError:
+        if diff == "easy":
+            raise
+        return await _ask(pet, c, model, prompt + "\n時間到了，這手直接決定，不要再算。", 200, "easy", QUICK_S)
 
 
 def register(woof):
@@ -181,12 +196,23 @@ def register(woof):
             + "move 一定要是空點。回覆格式：" + fmt
         )
         t0 = time.time()
+        sid = str(body.get("spec") or "")
+        task = asyncio.ensure_future(_think(pet, c, model, prompt, diff))
+        if sid:
+            SPEC[sid] = task
         try:
-            raw = await _ask(pet, c, model, prompt, 200, diff)
+            raw = await task
+        except asyncio.CancelledError:
+            if task.cancelled() and not asyncio.current_task().cancelling():
+                return {"error": "已取消", "cancelled": True}
+            raise
         except asyncio.TimeoutError:
-            return {"error": "他想太久了"}
+            return {"error": "他想太久了", "timeout": True}
         except Exception as e:
             return {"error": f"模型呼叫失敗：{str(e)[:120]}"}
+        finally:
+            if sid:
+                SPEC.pop(sid, None)
         got = _json(raw)
         mv = xy(got.get("move"))
         if mv is None:
@@ -248,6 +274,16 @@ def register(woof):
             await pet.game_log("", say, _face(got.get("face")), emit=_emit())
         return {"say": say, "face": _face(got.get("face"))}
 
+    async def drop(body: dict) -> dict:
+        """作廢預先思考：除了 keep 那個（猜中、正在用的）以外全部取消。"""
+        keep, n = str(body.get("keep") or ""), 0
+        for k, t in list(SPEC.items()):
+            if k != keep and not t.done():
+                t.cancel()
+                n += 1
+        return {"dropped": n}
+
     woof.add_action("move", move)
+    woof.add_action("drop", drop)
     woof.add_action("record", record)
     woof.add_action("react", react)
