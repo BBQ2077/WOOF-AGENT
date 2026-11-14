@@ -739,6 +739,20 @@ function onEvent(ev) {
       break;
     case 'ask_done': {
       const a = S.asks[ev.id];
+      if (ev.record || ev.tool) {
+        const s = S.sessions.find((x) => x.id === sid);
+        if (ev.record && s) {
+          const es = s.engine_state = { ...(s.engine_state || {}) };
+          es.asks = [...(es.asks || []).filter((x) => x.id !== ev.id), {
+            id: ev.id, question: ev.question || (a && a.question) || '', options: ev.options || [], answer: ev.answer || '',
+            skipped: !!ev.skipped, timed_out: !!ev.timed_out, waited: ev.waited || 0, at: ev.at, after: ev.after || 0,
+          }].slice(-50);
+        }
+        delete S.asks[ev.id];
+        if (sid === S.sid) renderChat();
+        renderTaskBar();
+        break;
+      }
       if (!a && !ev.answer) { delete S.asks[ev.id]; renderTaskBar(); break; }
       (S.askDone[sid] = S.askDone[sid] || []).push({
         question: (a && a.question) || ev.question || '',
@@ -1659,6 +1673,16 @@ function errPreview(name, out) {
 }
 
 function toolCard(call, result) {
+  if (call.name === 'ask_user' && result && !result.is_error) {
+    const out = String(result.output || '');
+    const d = { id: call.id, question: (call.args || {}).question || '' };
+    const w = out.match(/等了 (?:(\d+) 分(?: (\d+) 秒)?(?:鐘)?|(\d+) 秒)都沒回/);
+    if (out.startsWith(NO_REPLY_TAG)) { d.timedOut = true; d.waited = w ? (Number(w[1] || 0) * 60 + Number(w[2] || 0) + Number(w[3] || 0)) : 0; }
+    else { d.answer = out.replace(/^使用者回答：/, ''); d.skipped = d.answer === ASK_SKIP || /^（?略過/.test(d.answer); }
+    const el = askDoneCard(d, '問你');
+    el.dataset.id = call.id;
+    return el;
+  }
   const live = S.tools[call.id] || {};
   const running = !result && live.running;
   const out = result ? result.output : live.output != null ? live.output : live.out || '';
@@ -1949,6 +1973,7 @@ $('#taskBar').addEventListener('click', (e) => {
   else if (e.target.closest('[data-resume-x]')) { const r = resumeInfo(); if (r) S.resumeHide[S.sid] = r.key; renderTaskBar(); }
 });
 const ASK_SKIP = '（略過這題，你自己判斷決定）';
+const NO_REPLY_TAG = '（使用者沒有回應';   // 後端 no_reply_text 的開頭：提問逾時自動略過
 // 問題卡片的倒數：時間到後端會自動略過；點了卡片的輸入框就停止倒數
 // 生成速度：每一步的 out_tok／gen_s（woof/agent/loop.py _speed）。一次整段吐出來的（gen_s 太短）不算速度
 function stepRate(s) { return s.gen_s >= 0.3 ? s.out_tok / s.gen_s : null; }
@@ -1991,6 +2016,26 @@ function askHold(id) {
   const el = document.querySelector(`[data-askcd="${CSS.escape(id)}"]`);
   if (el) { el.textContent = '已停止倒數，慢慢想，回答或按略過才會繼續'; el.classList.remove('soon'); }
   api('POST', `/api/asks/${id}/hold`).catch(() => {});
+}
+// 已結束的提問：留在對話紀錄裡（方案流程的提問存在 engine_state.asks；ask_user 從工具結果還原）
+function askDoneText(d) {
+  const ans = String(d.answer || '');
+  if (d.timedOut || d.timed_out) return `你 ${esc(askSpan(d.waited || 0))}沒回應，已自動略過，讓模型自己判斷繼續`;
+  if (/直接回話，跳過這個問題/.test(ans)) return '你直接回話，跳過這題';
+  if (d.skipped) return '已略過';
+  return ans ? '已回答：' + esc(ans) : '已停止';
+}
+function askDoneCard(d, tag) {
+  const el = document.createElement('div');
+  el.className = 'askcard askdone kept';
+  const q = String(d.question || '');
+  const long = q.length > 240 || q.split(NL).length > 6;
+  const tk = 'ask-' + (d.id || '');
+  el.innerHTML = `<div class="ktag">${ico('help')}${esc(tag)}</div>`
+    + (long ? `<details class="qd" data-tk="${esc(tk)}"${THINK_OPEN.has(tk) ? ' open' : ''}><summary class="q">${esc(q.split(NL)[0].slice(0, 90))}</summary><div class="q qfull">${esc(q)}</div></details>`
+      : `<div class="q">${esc(q)}</div>`)
+    + `<div class="a">${askDoneText(d)}</div>`;
+  return el;
 }
 async function answerAsk(id, text) {
   try { await api('POST', `/api/asks/${id}`, { answer: text }); } catch (e) { notify('error', '回答送出失敗', e.message); return; }
@@ -2117,6 +2162,20 @@ function renderChat(scrollBottom) {
   // 剛從「思考中」變成正式訊息的那一則：沿用使用者原本的展開狀態，不要一 commit 就收起來
   const carry = S.thinkCarry; S.thinkCarry = null;
   const groups = [];
+  // 方案流程問過的問題：放在當時最後一則訊息後面
+  const kept = ((curS && curS.engine_state) || {}).asks || [];
+  const keptAt = {}, keptShown = new Set();
+  for (const d of kept) (keptAt[d.after || 0] = keptAt[d.after || 0] || []).push(d);
+  const putKept = (list) => {
+    for (const d of list || []) {
+      if (keptShown.has(d.id)) continue;
+      keptShown.add(d.id); group = null;
+      const div = document.createElement('div'); div.className = 'msg bot askmsg';
+      div.appendChild(askDoneCard(d, '方案流程問你'));
+      chat.appendChild(div);
+    }
+  };
+  let lastShown = 0;
   // 壓縮分隔線：畫在「被摘要的最後一則」之後；點開看摘要內容（原始訊息照樣顯示，只是送模型時改用摘要）
   const sum = ((curS && curS.engine_state) || {}).summary;
   const sumThrough = sum && sum.text ? Number(sum.through) || 0 : 0;
@@ -2206,8 +2265,11 @@ function renderChat(scrollBottom) {
       }
       if (m.meta && m.meta.stopped) group.insertAdjacentHTML('beforeend', '<div class="stopped">已停止</div>');
     }
+    if (typeof m.id === 'number') { lastShown = m.id; putKept(keptAt[m.id]); }
   }
   if (!sumDone) putSummary();
+  // 還沒有下一則訊息（剛答完）或當時那一則已經不在了：接在最後面
+  putKept(kept.filter((d) => (d.after || 0) >= lastShown));
   if (running || (S.errors[S.sid] || []).length) {
     if (!group) newGroup({ model: (cur() || {}).model });
     if (running) {

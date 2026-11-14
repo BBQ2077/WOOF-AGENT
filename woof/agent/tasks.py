@@ -124,8 +124,12 @@ def timed_out(answer: str) -> bool:
     return str(answer).startswith(NO_REPLY)
 
 
-async def ask(turn, question: str, options: list[str] | None = None, timeout: float | None = None) -> str:
+async def ask(turn, question: str, options: list[str] | None = None, timeout: float | None = None,
+              record: bool = True) -> str:
+    """問使用者。record＝答完把問答記進對話（engine_state 的 asks），之後打開對話還看得到；
+    ask_user 工具不用記，工具呼叫和結果本來就存在訊息裡。"""
     aid = uuid.uuid4().hex[:12]
+    after = _last_mid(turn.session_id) if record else 0
     opts = [str(o) for o in (options or []) if str(o).strip()][:6]
     limit = ask_timeout() if timeout is None else max(0, int(timeout))
     t0 = time.time()
@@ -155,9 +159,16 @@ async def ask(turn, question: str, options: list[str] | None = None, timeout: fl
         a = ASKS.pop(aid, None) or {}
         if not fut.done():
             fut.cancel()
-        await turn.emit({"type": "ask_done", "session_id": turn.session_id, "id": aid,
-                         "answer": str(answer), "skipped": bool(a.get("skipped")),
-                         "timed_out": bool(a.get("timed_out")), "waited": int(time.time() - t0)})
+        done = {"id": aid, "question": question, "options": opts, "answer": str(answer),
+                "skipped": bool(a.get("skipped")), "timed_out": bool(a.get("timed_out")),
+                "waited": int(time.time() - t0), "at": time.time(), "after": after}
+        if record and str(answer):
+            try:
+                _save(turn.session_id, asks=((_state(turn.session_id).get("asks") or [])[-49:] + [done]))
+            except Exception:
+                pass
+        await turn.emit({"type": "ask_done", "session_id": turn.session_id, **done,
+                         "record": bool(record and str(answer)), "tool": not record})
 
 
 def touch_ask(aid: str) -> float:

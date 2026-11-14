@@ -25,7 +25,7 @@ def register(woof):
         q = str(args.get("question") or "").strip()
         if turn is None or not q:
             return {"output": "需要 question，且只能在對話中使用", "is_error": True}
-        answer = await tasks.ask(turn, q, args.get("options") or [])
+        answer = await tasks.ask(turn, q, args.get("options") or [], record=False)
         if tasks.timed_out(answer):
             return {"output": answer}
         return {"output": f"使用者回答：{answer}"}
