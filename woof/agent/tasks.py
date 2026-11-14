@@ -904,7 +904,7 @@ async def review_changes(session_id: str, emit) -> dict:
         blocks.append(f"### {p}\n```\n{txt}\n```")
     report = "\n\n".join(blocks)
     request = last_text(session_id, "user") or "（沒有找到使用者的要求）"
-    ctx = TurnContext(session, model_cfg, model_cfg.get("default_effort"), emit)
+    ctx = TurnContext(session, model_cfg, session.get("effort") or model_cfg.get("default_effort"), emit)
     ok, reason = await review(ctx, f"本對話改動的檔案（{len(paths)} 個）。使用者要求：{request[:600]}", report)
     text = f"【改動審核】{'通過' if ok else '未通過'}：{reason}\n\n審查範圍：" + "、".join(paths)
     m = store.add_message(session_id, "assistant", [{"type": "text", "text": text}])
@@ -924,7 +924,7 @@ async def review_last(session_id: str, emit) -> dict:
     if not report:
         raise RuntimeError("這個對話還沒有助手的回覆可以審核")
     request = last_text(session_id, "user") or "（沒有找到使用者的要求）"
-    ctx = TurnContext(session, model_cfg, model_cfg.get("default_effort"), emit)
+    ctx = TurnContext(session, model_cfg, session.get("effort") or model_cfg.get("default_effort"), emit)
     ok, reason = await review(ctx, f"上一則使用者要求：{request[:600]}", report)
     text = f"【子代理審核】{'通過' if ok else '未通過'}：{reason}"
     m = store.add_message(session_id, "assistant", [{"type": "text", "text": text}])
