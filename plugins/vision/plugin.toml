@@ -1,10 +1,20 @@
 name = "vision"
 version = "0.1.0"
 kinds = ["tool"]
-description = "讓 agent 看本機圖片：讀取圖片檔，交給支援看圖的模型描述"
+description = "讓 agent 看圖：本機或網址圖片（vision_analyze）、網頁與 HTML／SVG 截圖（view_page）"
 enabled = true
 
 [settings.max_px]
 type = "number"
 default = 1568
 label = "送出前最長邊縮小到幾個像素"
+
+[settings.max_shots]
+type = "number"
+default = 6
+label = "view_page 一次最多截幾張"
+
+[settings.browser]
+type = "text"
+default = ""
+label = "view_page 用的瀏覽器路徑（空白＝自動找 Chrome，沒有就用 Edge）"

@@ -17,7 +17,7 @@ const EFFORT_LABEL = { none: '關', off: '關', on: '開', minimal: '最小', lo
 const EFFORT_SCALE = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 const EFFORT_HINT = { on: '開啟思考，先推理再回答', off: '不思考，最快', none: '不思考，最快', minimal: '幾乎不思考', low: '快速回答', medium: '一般難度', high: '仔細推理', xhigh: '更深入推理', max: '想得更久', ultra: '想最久，慢但最完整' };
 const TOOL_ICON = { delegate_task: '🤖', terminal: '⌨️', read_file: '📄', write_file: '✏️', patch: '🩹', search_files: '🔎', list_tree: '🗂️', skill_view: '📘',
-  skills_list: '📚', web_search: '🌐', web_extract: '🌐', vision_analyze: '👁️', Bash: '⌨️', Read: '📄', Write: '✏️',
+  skills_list: '📚', web_search: '🌐', web_extract: '🌐', vision_analyze: '👁️', view_page: '🖼️', Bash: '⌨️', Read: '📄', Write: '✏️',
   Edit: '🩹', Grep: '🔎', Glob: '🔎', WebSearch: '🌐', WebFetch: '🌐', Task: '🤖', TodoWrite: '📝' };
 const BACKEND_LABEL = { openai_compat: 'OpenAI 相容 API', anthropic: 'Anthropic', claude_cli: 'Claude Code CLI' };
 const TOOL_POOL_LABEL = { firecrawl: 'Firecrawl', tavily: 'Tavily' };

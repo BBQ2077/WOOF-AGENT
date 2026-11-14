@@ -17,6 +17,7 @@ import hashlib
 import itertools
 import json
 import logging
+import os
 import threading
 import time
 import uuid
@@ -435,8 +436,88 @@ def _clip(text: str, call_id: str) -> str:
             f"需要時用 read_file 讀取）…\n\n{tail}")
 
 
+# 同一回合的多個工具怎麼跑：只讀、查詢類的一起跑；寫檔看路徑，跟同一批的讀寫不重疊才一起跑；
+# 跑指令、MCP、會改檔的子代理、不認得的工具照順序，一個做完才開始下一個。
+# （模型同時發「截圖」和「看圖」時，看圖要等截圖完成，不然看到的是舊圖或沒圖）
+PARALLEL_SAFE = {"read_file", "search_files", "list_tree", "vision_analyze", "view_page", "skill_view", "skills_list",
+                 "current_time", "system_info", "session_search", "tool_search", "tool_describe", "memory_view",
+                 "web_search", "web_extract", "image_generate", "video_generate", "delegate_task"}
+_SCOPED_READERS = {"read_file", "search_files", "list_tree", "vision_analyze", "view_page"}
+_SCOPED_WRITERS = {"write_file", "patch"}
+
+
+def _call_scope(name: str, args: dict, cwd: str | None) -> Path | None:
+    raw = args.get("path")
+    if not raw and name in ("search_files", "list_tree"):
+        raw = "."
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    p = Path(raw.strip()).expanduser()
+    if not p.is_absolute():
+        p = Path(cwd or ".") / p
+    try:
+        p = p.resolve()
+    except OSError:
+        p = Path(os.path.abspath(p))
+    if name == "view_page":
+        p = p.parent   # 網頁會一起載入旁邊的 js、css、圖：整個資料夾都算它在讀
+    return Path(os.path.normcase(str(p)))
+
+
+def _overlap(a: Path, b: Path) -> bool:
+    return a == b or a in b.parents or b in a.parents
+
+
+def plan_segments(calls: list[dict], cwd: str | None) -> list[tuple[str, list[int]]]:
+    """把一回合的工具呼叫切成依序執行的段落：("parallel", [索引…]) 一起跑、("seq", [索引…]) 一個一個跑。
+    順序不會跨過前面的屏障，結果和全部照順序跑一樣，只是能一起的一起。"""
+    segs: list[tuple[str, list[int]]] = []
+    cur: list[int] = []
+    held: list[tuple[Path, bool]] = []
+
+    def seq(ix: list[int]) -> None:
+        if segs and segs[-1][0] == "seq":
+            segs[-1][1].extend(ix)
+        else:
+            segs.append(("seq", list(ix)))
+
+    def close() -> None:
+        nonlocal cur, held
+        if len(cur) >= 2:
+            segs.append(("parallel", cur))
+        elif cur:
+            seq(cur)
+        cur, held = [], []
+
+    for i, c in enumerate(calls):
+        name, args = c.get("name") or "", c.get("args")
+        if not isinstance(args, dict) or "_raw" in args:
+            close(); seq([i]); continue
+        if name in _SCOPED_READERS or name in _SCOPED_WRITERS:
+            p = _call_scope(name, args, cwd)
+            if p is None:
+                if name in _SCOPED_WRITERS or name in ("read_file",):
+                    close(); seq([i]); continue
+                cur.append(i); continue   # 看網址的圖、網頁：不碰本機檔
+            w = name in _SCOPED_WRITERS
+            if any((w or hw) and _overlap(p, h) for h, hw in held):
+                close()
+            held.append((p, w)); cur.append(i); continue
+        if name == "delegate_task":
+            tasks = [args] + [t for t in (args.get("tasks") or []) if isinstance(t, dict)]
+            if any(t.get("mode") == "write" for t in tasks):
+                close(); seq([i]); continue
+        if name == "memory" and str(args.get("action") or "") == "list":
+            cur.append(i); continue
+        if name in PARALLEL_SAFE:
+            cur.append(i); continue
+        close(); seq([i])
+    close()
+    return segs
+
+
 # 「先問我」模式下不用確認的唯讀工具
-SAFE_TOOLS = {"read_file", "search_files", "list_tree", "web_search", "web_extract", "vision_analyze", "skill_view", "skills_list",
+SAFE_TOOLS = {"read_file", "search_files", "list_tree", "web_search", "web_extract", "vision_analyze", "view_page", "skill_view", "skills_list",
               # 工具延遲載入的橋接：tool_call 拆開後每一筆照常確認
               "tool_search", "tool_describe", "tool_call"}
 _approvals: dict[str, dict] = {}
@@ -974,7 +1055,14 @@ async def run_model_loop(ctx: TurnContext) -> None:
                 continue
             return
         try:
-            results = await asyncio.gather(*[_run_tool(c, ctx) for c in calls])
+            results: list = [None] * len(calls)
+            for kind, idx in plan_segments(calls, ctx.cwd):
+                if kind == "parallel":
+                    for i, r in zip(idx, await asyncio.gather(*[_run_tool(calls[i], ctx) for i in idx])):
+                        results[i] = r
+                else:
+                    for i in idx:
+                        results[i] = await _run_tool(calls[i], ctx)
         except asyncio.CancelledError:
             # 工具階段被停止：前面那則 assistant（模型剛說的話）要標成已停止，前端才會顯示
             store.mark_message_stopped(m["id"])

@@ -1,12 +1,19 @@
-"""看圖：本機圖片或網址圖片，可指定裁切區域。
+"""看圖：本機圖片或網址圖片，可指定裁切區域；網頁、SVG 截圖（view_page）。
 
-使用者貼上的圖由模型直接看；這個工具讓 agent 自己讀取圖片。
-圖片先裁切（若有 region）再縮小，描述由支援看圖的模型產生。
+使用者貼上的圖由模型直接看；這兩個工具讓 agent 自己看圖、看自己做的頁面。
+圖片先裁切（若有 region）再縮小；主模型能看圖就直接放進它的上下文，不能看就交給看圖模型轉成文字。
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
+import json
+import os
+import shutil
+import subprocess
+import tempfile
+import time
 import uuid
 from pathlib import Path
 
@@ -68,6 +75,221 @@ def _native_model(woof, turn_model: dict | None) -> dict | None:
     if not cfg.get("vision") or caps.down(cfg["id"]) or cfg.get("provider") not in ("openai_compat", "anthropic"):
         return None
     return cfg
+
+
+# ── view_page：無頭瀏覽器開頁面，截圖直接看 ─────────────────────────────
+
+def _find_browser(setting: str) -> str | None:
+    if setting and Path(setting).is_file():
+        return setting
+    la = os.environ.get("LOCALAPPDATA", "")
+    for p in (r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+              r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+              os.path.join(la, r"Google\Chrome\Application\chrome.exe") if la else "",
+              r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+              r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"):
+        if p and Path(p).is_file():
+            return p
+    for n in ("chrome", "google-chrome", "chromium", "msedge"):
+        if shutil.which(n):
+            return shutil.which(n)
+    return None
+
+
+class _CDP:
+    """最小的 Chrome DevTools 連線：送指令等回應，事件收進清單。"""
+
+    def __init__(self, ws):
+        self.ws, self.n, self.pending, self.events, self.waiters = ws, 0, {}, [], []
+
+    async def pump(self) -> None:
+        async for raw in self.ws:
+            m = json.loads(raw)
+            if "id" in m:
+                f = self.pending.pop(m["id"], None)
+                if f and not f.done():
+                    f.set_result(m)
+                continue
+            self.events.append(m)
+            for meth, f in list(self.waiters):
+                if m.get("method") == meth and not f.done():
+                    f.set_result(m)
+
+    async def call(self, method: str, params: dict | None = None, timeout: float = 30) -> dict:
+        self.n += 1
+        f = asyncio.get_running_loop().create_future()
+        self.pending[self.n] = f
+        await self.ws.send(json.dumps({"id": self.n, "method": method, "params": params or {}}))
+        r = await asyncio.wait_for(f, timeout)
+        if "error" in r:
+            raise RuntimeError(f"{method}：{r['error'].get('message')}")
+        return r.get("result") or {}
+
+    def expect(self, method: str):
+        f = asyncio.get_running_loop().create_future()
+        self.waiters.append((method, f))
+        return f
+
+
+def _page_errors(events: list[dict]) -> list[str]:
+    out: list[str] = []
+    for e in events:
+        m, p = e.get("method"), e.get("params") or {}
+        line = ""
+        if m == "Runtime.exceptionThrown":
+            d = p.get("exceptionDetails") or {}
+            line = "例外：" + str((d.get("exception") or {}).get("description") or d.get("text") or "")
+        elif m == "Runtime.consoleAPICalled" and p.get("type") in ("error", "assert", "warning"):
+            line = f"console.{p['type']}：" + " ".join(str(a.get("value", a.get("description", ""))) for a in p.get("args") or [])
+        elif m == "Log.entryAdded" and (p.get("entry") or {}).get("level") in ("error", "warning"):
+            en = p["entry"]
+            line = f"{en.get('source', '')}：{en.get('text', '')}" + (f"（{en['url']}）" if en.get("url") else "")
+        line = line.strip()[:400]
+        if line and line not in out:
+            out.append(line)
+    return out
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    # 只殺外層會留下 renderer／GPU 子程序：整棵樹一起結束
+    if proc.poll() is None:
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        try:
+            proc.wait(5)
+        except Exception:
+            proc.kill()
+
+
+async def _shoot_page(exe: str, url: str, shots: list[dict], first_wait: int, max_px: int) -> tuple[list[dict], list[str]]:
+    """開頁面依序截每一張；回傳 [{png(b64), w, h, sw, sh, desc, js}…] 和頁面錯誤。"""
+    import httpx
+    from websockets.asyncio.client import connect
+
+    udd = tempfile.mkdtemp(prefix="woof_page_")
+    proc = subprocess.Popen(
+        [exe, "--headless=new", "--remote-debugging-port=0", f"--user-data-dir={udd}", "--no-first-run",
+         "--no-default-browser-check", "--disable-extensions", "--hide-scrollbars", "--mute-audio",
+         "--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--allow-file-access-from-files", "about:blank"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    pump = None
+    try:
+        port_file = Path(udd) / "DevToolsActivePort"
+        t0 = time.time()
+        while not (port_file.is_file() and port_file.read_text(errors="ignore").strip()):
+            if proc.poll() is not None:
+                raise RuntimeError(f"瀏覽器啟動後馬上結束（{exe}）")
+            if time.time() - t0 > 20:
+                raise RuntimeError("瀏覽器 20 秒內沒啟動完成")
+            await asyncio.sleep(0.1)
+        port = port_file.read_text().split()[0]
+        async with httpx.AsyncClient(timeout=10) as cl:
+            pages = (await cl.get(f"http://127.0.0.1:{port}/json/list")).json()
+        page = next(p for p in pages if p.get("type") == "page")
+        async with connect(page["webSocketDebuggerUrl"], max_size=None, open_timeout=10) as ws:
+            cdp = _CDP(ws)
+            pump = asyncio.create_task(cdp.pump())
+            for m in ("Page.enable", "Runtime.enable", "Log.enable"):
+                await cdp.call(m)
+            vw, vh = shots[0]["width"], shots[0]["height"]
+            await cdp.call("Emulation.setDeviceMetricsOverride", {"width": vw, "height": vh, "deviceScaleFactor": 1, "mobile": False})
+            loaded = cdp.expect("Page.loadEventFired")
+            nav = await cdp.call("Page.navigate", {"url": url})
+            if nav.get("errorText"):
+                raise RuntimeError(f"頁面打不開：{nav['errorText']}")
+            notes: list[str] = []
+            try:
+                await asyncio.wait_for(loaded, 30)
+            except asyncio.TimeoutError:
+                notes.append("頁面 30 秒內沒有載完，照當下的畫面截")
+            await asyncio.sleep(first_wait / 1000)
+            out = []
+            for s in shots:
+                if (s["width"], s["height"]) != (vw, vh):
+                    vw, vh = s["width"], s["height"]
+                    await cdp.call("Emulation.setDeviceMetricsOverride", {"width": vw, "height": vh, "deviceScaleFactor": 1, "mobile": False})
+                js_out = None
+                if s.get("js"):
+                    r = await cdp.call("Runtime.evaluate", {"expression": s["js"], "awaitPromise": True, "returnByValue": True}, timeout=60)
+                    if r.get("exceptionDetails"):
+                        d = r["exceptionDetails"]
+                        js_out = "js 出錯：" + str((d.get("exception") or {}).get("description") or d.get("text"))[:600]
+                    else:
+                        v = (r.get("result") or {}).get("value")
+                        js_out = None if v is None else json.dumps(v, ensure_ascii=False)[:1500]
+                if s.get("wait_ms"):
+                    await asyncio.sleep(s["wait_ms"] / 1000)
+                scale = s.get("scale") or 1
+                clip, desc = None, f"視窗 {vw}×{vh}"
+                if s.get("selector"):
+                    r = await cdp.call("Runtime.evaluate", {"returnByValue": True, "expression":
+                        "(()=>{const e=document.querySelector(" + json.dumps(s["selector"]) + ");if(!e)return null;"
+                        "const r=e.getBoundingClientRect();return [r.left+scrollX,r.top+scrollY,r.width,r.height]})()"})
+                    box = (r.get("result") or {}).get("value")
+                    if not box or box[2] < 1 or box[3] < 1:
+                        out.append({"error": f"找不到元素或大小是 0：{s['selector']}", "desc": desc, "js": js_out})
+                        continue
+                    clip = {"x": box[0], "y": box[1], "width": box[2], "height": box[3]}
+                    desc += f"，元素 {s['selector']}（頁面座標 {[round(v) for v in box]}，x, y, 寬, 高）"
+                elif s.get("region"):
+                    x1, y1, x2, y2 = s["region"]
+                    clip = {"x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1}
+                    desc += f"，區塊 {s['region']}（頁面座標）"
+                elif s.get("full_page"):
+                    lm = await cdp.call("Page.getLayoutMetrics")
+                    cs = lm.get("cssContentSize") or lm.get("contentSize") or {}
+                    clip = {"x": 0, "y": 0, "width": max(1, cs.get("width", vw)), "height": min(16384, max(1, cs.get("height", vh)))}
+                    desc += f"，整頁 {round(clip['width'])}×{round(clip['height'])}"
+                elif scale != 1:
+                    clip = {"x": 0, "y": 0, "width": vw, "height": vh}
+                params = {"format": "png", "captureBeyondViewport": clip is not None}
+                if clip:
+                    params["clip"] = {**clip, "scale": scale}
+                if scale != 1:
+                    desc += f"，放大 {scale}×"
+                data = (await cdp.call("Page.captureScreenshot", params, timeout=90))["data"]
+                im = Image.open(io.BytesIO(base64.b64decode(data)))
+                ow, oh = im.size
+                media, b64 = _shrink(im, max_px, None)
+                sw, sh = _shrink.last
+                out.append({"media": media, "png": b64, "w": ow, "h": oh, "sw": sw, "sh": sh, "desc": desc, "js": js_out})
+            return out, notes + _page_errors(cdp.events)
+    finally:
+        if pump:
+            pump.cancel()
+        await asyncio.to_thread(_kill_tree, proc)
+        for _ in range(5):
+            shutil.rmtree(udd, ignore_errors=True)
+            if not Path(udd).exists():
+                break
+            await asyncio.sleep(0.4)
+
+
+def _norm_shots(raw, limit: int) -> list[dict]:
+    """shots 參數整理成固定欄位；不合法拋 ValueError。"""
+    raw = raw if isinstance(raw, list) and raw else [{}]
+    if len(raw) > limit:
+        raise ValueError(f"一次最多 {limit} 張，這次給了 {len(raw)} 張")
+    out = []
+    for i, s in enumerate(raw, 1):
+        if not isinstance(s, dict):
+            raise ValueError(f"第 {i} 張的設定要是物件")
+        n = {"label": str(s.get("label") or ""), "js": str(s.get("js") or ""), "selector": str(s.get("selector") or ""),
+             "full_page": bool(s.get("full_page")),
+             "width": max(200, min(3840, int(s.get("width") or 1280))),
+             "height": max(200, min(2400, int(s.get("height") or 800))),
+             "wait_ms": max(0, min(30000, int(s.get("wait_ms") or 0))),
+             "scale": max(0.25, min(4.0, float(s.get("scale") or 1)))}
+        if s.get("region") is not None:
+            r = s["region"]
+            if not (isinstance(r, (list, tuple)) and len(r) == 4):
+                raise ValueError(f"第 {i} 張的 region 要是 [x1, y1, x2, y2]")
+            x1, y1, x2, y2 = (float(v) for v in r)
+            if not (0 <= x1 < x2 and 0 <= y1 < y2):
+                raise ValueError(f"第 {i} 張的 region 要 0≤x1<x2 且 0≤y1<y2")
+            n["region"] = [x1, y1, x2, y2]
+        out.append(n)
+    return out
 
 
 def register(woof):
@@ -158,11 +380,101 @@ def register(woof):
         tried = f"（{'；'.join(errs)}，改用 {who}）" if errs else ""
         return {"output": f"（{who}）{note}{tried}\n{size}\n{text or '（模型沒有回覆）'}"}
 
+    async def view_page(args: dict, ctx) -> dict:
+        raw = (args.get("path") or "").strip()
+        url = (args.get("url") or "").strip()
+        if bool(raw) == bool(url):
+            return {"output": "path 與 url 要給一個（只能一個）", "is_error": True}
+        if raw:
+            p = Path(raw).expanduser()
+            if not p.is_absolute():
+                p = Path(ctx.cwd or ".") / p
+            if not p.is_file():
+                return {"output": f"找不到檔案：{p}", "is_error": True}
+            url, src = p.resolve().as_uri(), str(p)
+        else:
+            if not url.lower().startswith(("http://", "https://", "file:///")):
+                return {"output": "url 只接受 http://、https:// 或 file:///", "is_error": True}
+            src = url
+        exe = _find_browser(str(woof.settings.get("browser") or "").strip())
+        if not exe:
+            return {"output": "找不到 Chrome 或 Edge：在「設定 → 插件 → vision」填瀏覽器路徑", "is_error": True}
+        try:
+            shots = _norm_shots(args.get("shots"), max(1, int(woof.settings.get("max_shots") or 6)))
+        except (TypeError, ValueError) as e:
+            return {"output": str(e), "is_error": True}
+        max_px = max(256, int(woof.settings.get("max_px") or 1568))
+        first_wait = max(0, min(30000, int(args.get("wait_ms") if args.get("wait_ms") is not None else 1000)))
+        try:
+            res, errs = await asyncio.wait_for(_shoot_page(exe, url, shots, first_wait, max_px), 300)
+        except asyncio.TimeoutError:
+            return {"output": "截圖超過 300 秒沒完成，已關掉瀏覽器", "is_error": True}
+        except Exception as e:
+            return {"output": f"截圖失敗：{type(e).__name__}: {e}", "is_error": True}
+        question = (args.get("question") or "看這幾張截圖，描述畫面並指出明顯的問題（錯位、重疊、縫隙、破圖、文字被切掉）。").strip()
+        lines, pics = [], []
+        for i, (r, s) in enumerate(zip(res, shots), 1):
+            head = f"第 {i} 張" + (f"「{s['label']}」" if s["label"] else "")
+            if r.get("error"):
+                lines.append(f"{head}：{r['error']}" + (f"；js 回傳 {r['js']}" if r.get("js") else ""))
+                continue
+            size = f"截圖 {r['w']}×{r['h']}" + ("" if (r["sw"], r["sh"]) == (r["w"], r["h"])
+                                               else f"，縮成 {r['sw']}×{r['sh']} 給你看（座標乘 {r['w'] / r['sw']:.2f} 換回截圖）")
+            lines.append(f"{head}：{r['desc']}；{size}" + (f"；js 回傳 {r['js']}" if r.get("js") else ""))
+            pics.append(r)
+        if errs:
+            lines.append(f"頁面錯誤（{len(errs)}）：\n" + "\n".join(errs[:20]))
+        info = f"（來源：{src}）\n" + "\n".join(lines)
+        if not pics:
+            return {"output": info, "is_error": True}
+        turn = getattr(ctx, "turn", None)
+        tm = _native_model(woof, turn.model_cfg if turn is not None else None)
+        if tm is not None:
+            from woof.uploads import DIR
+            DIR.mkdir(parents=True, exist_ok=True)
+            imgs = []
+            for r in pics:
+                pic = DIR / f"{uuid.uuid4().hex[:12]}.png"
+                pic.write_bytes(base64.b64decode(r["png"]))
+                imgs.append({"type": "image", "path": str(pic), "media_type": r["media"]})
+            return {"output": f"{len(imgs)} 張截圖已依序放進你的上下文。{info}\n細節看不清就用 region 加 scale 放大再截。直接用你自己的視覺看圖回答：{question}",
+                    "images": imgs}
+        from woof.agent.loop import complete, vision_chain
+        from woof.config import DATA
+        from woof.prompts import get as _prompt
+        chain = vision_chain(turn.model_cfg if turn is not None else None)
+        if not chain:
+            return {"output": info + "\n沒有可用的看圖模型：在「設定 → 模型用途 → 看圖」選一個能看圖的模型", "is_error": True}
+        tmp = DATA / "tmp"
+        tmp.mkdir(exist_ok=True)
+        files = []
+        for k, r in enumerate(pics):
+            f = tmp / f"page_{ctx.call_id}_{k}.png"
+            f.write_bytes(base64.b64decode(r["png"]))
+            files.append(f)
+        errs2, text, model = [], None, None
+        try:
+            for model in chain[:3]:
+                try:
+                    text = await complete(model, _prompt("vision"), [{"role": "user", "content": [
+                        *[{"type": "image", "path": str(f), "media_type": "image/png"} for f in files],
+                        {"type": "text", "text": f"{info}\n\n{question}"}]}])
+                    break
+                except Exception as e:
+                    errs2.append(f"{model.get('label') or model['id']}：{str(e)[:200]}")
+                    model = None
+        finally:
+            for f in files:
+                f.unlink(missing_ok=True)
+        if model is None:
+            return {"output": info + "\n看圖失敗：\n" + "\n".join(errs2), "is_error": True}
+        return {"output": f"（{model.get('label') or model['id']}）{info}\n{text or '（模型沒有回覆）'}"}
+
     woof.add_tool(
         "vision_analyze",
         "看一張圖片。你能看圖時，圖會直接放進你的上下文，由你自己看；不能看圖時交給看圖模型轉成文字。可給本機路徑（path）或網址（url，http/https）。"
         "整張圖會縮小，細節（接縫、對齊、錯位、小字）容易看漏：先看整張找可疑的地方，再用 region 裁切放大看。"
-        "互不相干的幾塊可以在同一回合各叫一次一起看。使用者直接貼上的圖不用這個工具。",
+        "互不相干的幾塊可以在同一回合各叫一次一起看。要看網頁、HTML、SVG 的畫面用 view_page（截圖和看圖一步完成）。使用者直接貼上的圖不用這個工具。",
         {"type": "object", "properties": {
             "path": {"type": "string", "description": "本機圖片檔的絕對路徑（與 url 二選一）"},
             "url": {"type": "string", "description": "圖片網址，http 或 https（與 path 二選一）"},
@@ -171,4 +483,32 @@ def register(woof):
             "question": {"type": "string", "description": "要問的問題；空白則描述整張圖"},
         }},
         vision_analyze,
+    )
+
+    woof.add_tool(
+        "view_page",
+        "開網頁或本機 HTML／SVG 檔截圖，截圖直接放進你的上下文（你不能看圖時交給看圖模型轉成文字）："
+        "截圖和看圖一步完成，不用先跑指令截圖、再叫 vision_analyze。shots 一次可截好幾張：不同視窗大小、整頁、某個元素（selector）"
+        "或某塊區域（region，可加 scale 放大看細節）。每張截之前可以先跑一段 js（轉視角、捲動、點按鈕、讀尺寸位置），"
+        "效果會留給下一張，js 的回傳值也會給你。頁面的錯誤（console 錯誤、資源載入失敗）會一起回報。",
+        {"type": "object", "properties": {
+            "path": {"type": "string", "description": "本機 HTML、SVG 或圖片檔（與 url 二選一；相對路徑以工作目錄為準）"},
+            "url": {"type": "string", "description": "網址：http、https 或 file:///（與 path 二選一）"},
+            "shots": {"type": "array", "description": "依序要截的畫面，省略則截一張 1280×800。同一頁依序截，前一張 js 的效果會保留",
+                      "items": {"type": "object", "properties": {
+                          "label": {"type": "string", "description": "這張的名稱，例如「正面」「手機寬度」"},
+                          "width": {"type": "integer", "description": "視窗寬，預設 1280"},
+                          "height": {"type": "integer", "description": "視窗高，預設 800"},
+                          "js": {"type": "string", "description": "截圖前在頁面執行的 js（可 await），回傳值會給你"},
+                          "wait_ms": {"type": "integer", "description": "跑完 js 後等幾毫秒再截（動畫、轉場），預設 0"},
+                          "selector": {"type": "string", "description": "只截這個元素（CSS 選擇器）"},
+                          "region": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4,
+                                     "description": "只截這塊 [x1, y1, x2, y2]，頁面 CSS 像素"},
+                          "full_page": {"type": "boolean", "description": "截整頁（含捲動才看得到的部分）"},
+                          "scale": {"type": "number", "description": "放大倍率 0.25～4，搭配 region／selector 看細節，預設 1"},
+                      }}},
+            "wait_ms": {"type": "integer", "description": "頁面載入後先等幾毫秒再開始截（WebGL、字型、動畫），預設 1000"},
+            "question": {"type": "string", "description": "要檢查什麼；空白則描述畫面並指出明顯的問題"},
+        }},
+        view_page,
     )

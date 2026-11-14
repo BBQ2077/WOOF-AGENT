@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 
 CATS = {
-    "read": ("讀取", "讀檔、搜尋檔案、看圖、讀 Skill"),
+    "read": ("讀取", "讀檔、搜尋檔案、看圖、網頁截圖、讀 Skill"),
     "write": ("寫入檔案", "建立、修改檔案，寫 Skill"),
     "exec": ("執行指令", "terminal、背景程序"),
     "network": ("網路", "網頁搜尋、讀網頁、生成圖片影片"),
@@ -44,7 +44,7 @@ TABLE = {
 DEFAULT_CUSTOM = dict(TABLE["ask"])
 
 TOOL_CAT = {
-    "read_file": "read", "search_files": "read", "list_tree": "read", "vision_analyze": "read", "skill_view": "read", "skills_list": "read",
+    "read_file": "read", "search_files": "read", "list_tree": "read", "vision_analyze": "read", "view_page": "read", "skill_view": "read", "skills_list": "read",
     "current_time": "read", "system_info": "read", "todo": "read", "ask_user": "read",
     "tool_search": "read", "tool_describe": "read", "tool_call": "read", "session_search": "read",
     "write_file": "write", "patch": "write", "skill_write": "write", "Write": "write", "Edit": "write",
