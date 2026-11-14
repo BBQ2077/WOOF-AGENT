@@ -1,12 +1,14 @@
 """五子棋：跟寵物下棋。
 
-棋由寵物的模型下、台詞也是他講（同一個模型、同一份角色檔）；程式只管規則：
-落點合不合法、誰連成五。不給模型任何程式算出來的候選點或提示。
+棋由寵物的模型下、台詞也是他講：同一個模型、同一份角色檔、同一份記憶（他的對話紀錄）。
+你下了哪裡、他回了什麼都寫進他的紀錄，寵物欄即時看得到，之後聊天他也記得這局。
+程式只管規則：落點合不合法、誰連成五。不給模型任何程式算出來的候選點或提示。
 
 前端（web/gomoku.js）呼叫兩個動作：
-  move   看棋面下一手。前端在你還在想的時候，會先用「你可能下的那一手之後」的完整棋面來問（預先思考），
-         你真的下在那裡就直接用；問的就是那個確切的棋面，所以不會不即時
-  react  悔棋、認輸、你贏了、開新局這些時候讓他講一句
+  move    看棋面下一手（不寫紀錄）。前端在你還在想的時候，會先用「你可能下的那一手之後」的完整棋面來問（預先思考），
+          你真的下在那裡就直接用；問的就是那個確切的棋面，所以不會不即時
+  record  真的下了：把你那一手和他那句寫進紀錄（沒用到的預先思考不會進他的記憶）
+  react   開新局、悔棋、認輸、輸贏、和棋：寫進紀錄並讓他回一句
 """
 from __future__ import annotations
 
@@ -17,25 +19,19 @@ import time
 
 SIZE = 15
 LETS = "ABCDEFGHIJKLMNO"
-# 難度＝思考強度＋下法。這類端點每秒吐的字有限，思考越多一手越久（實測關掉思考約 6 秒、低約 14 秒、高超過 50 秒）
+# 難度只管下法；思考強度另外選（預設跟寵物設定），思考越多一手越久
 DIFF = {
-    "easy": ("off", "隨性下，像陪玩，偶爾放水；但對方下一手就要連五時一定要擋。"),
-    "normal": ("off", "認真下：自己能連五就下，對方要連五一定擋，再顧攻守。"),
-    "hard": ("low", "全力下：先看清楚雙方的四、活三和雙重威脅，再決定落點。"),
+    "easy": "隨性下，像陪玩，偶爾放水；但對方下一手就要連五時一定要擋。",
+    "normal": "認真下：自己能連五就下，對方要連五一定擋，再顧攻守。",
+    "hard": "全力下：先看清楚雙方的四、活三和雙重威脅，再決定落點。",
 }
-TIMEOUT = 60
+TIMEOUT = 180
 
 
 def _pet():
     from woof import pet
     c = pet.cfg()
-    model = pet.pick_model(c)
-    who = pet.name_of(c)
-    base = pet.persona(c.get("char")).strip()
-    first = base.split("\n", 1)
-    if first and first[0].startswith("# "):
-        base = f"# {who}" + ("\n" + first[1] if len(first) > 1 else "")
-    return pet, c, model, who, base
+    return pet, c, pet.pick_model(c)
 
 
 def _faces() -> list[str]:
@@ -43,17 +39,18 @@ def _faces() -> list[str]:
     return list(getattr(pet, "FACES", []))
 
 
-def _system(who: str, base: str) -> str:
-    # 整局都一樣的開頭放前面，服務商的提示詞快取才吃得到
-    return (
-        base + "\n\n"
-        f"## 現在在做什麼\n你（{who}）正在跟使用者下五子棋，邊下邊聊。\n"
-        "規則：15×15，黑先，橫、直、斜連成五子（含以上）就贏，沒有禁手。\n"
-        "座標：橫軸 A–O（左到右）、縱軸 1–15（上到下），H8 是正中央。\n"
-        "說話照你平常的個性和口氣，一句、十五字內，一律繁體中文（台灣用語），不要提到你是模型或 AI。\n"
-        "表情（face）從這些挑一個：" + ", ".join(_faces()) + "。\n"
-        "只輸出一個 JSON 物件，不要 markdown、不要解釋。"
-    )
+# 放進他平常的提示詞（同一份角色檔、記得的事）；整局不變，快取吃得到
+GAME = (
+    "- 你正在跟他下五子棋，邊下邊聊。對話紀錄裡「（五子棋）」開頭的是棋局裡發生的事，這局之前你們聊過的也都算數，可以接著聊。\n"
+    "- 規則：15×15，黑先，橫、直、斜連成五子（含以上）就贏，沒有禁手。座標：橫軸 A–O（左到右）、縱軸 1–15（上到下），H8 是正中央。\n"
+    "- 說話照你平常的個性和口氣，一句、十五字內；可以聊棋，也可以順著你們剛剛聊的事講。\n"
+    "- 每次最後會給你目前的棋盤，照那一段的格式只輸出一個 JSON 物件，不要 markdown、不要解釋。"
+)
+
+
+def _emit():
+    from woof.server import broadcast
+    return broadcast
 
 
 def coord(x: int, y: int) -> str:
@@ -115,6 +112,8 @@ def _json(txt: str) -> dict:
 
 def _say(v) -> str:
     from woof.pet import to_tw
+    if isinstance(v, (list, tuple)):   # 他平常的回覆格式是 say 陣列，偶爾照那樣回
+        v = " ".join(str(x).strip() for x in v if str(x).strip())
     s = str(v or "").strip().replace("\n", " ")[:80]
     return to_tw(s) if s else ""
 
@@ -124,24 +123,17 @@ def _face(v) -> str:
     return v if v in _faces() else ""
 
 
-def _effort(pet, model: dict, c: dict, want: str) -> dict:
-    """關掉思考：模型清單沒有「關」這一檔，但介面本身能關（DeepSeek、NIM 這類）就直接送關；其餘照一般規則往下找。"""
-    m = pet._params(model, {**c, "effort": want})
-    if want == "off" and m.get("effort") != "off" and (m.get("effort_style") or "") in ("deepseek", "nim"):
-        m["effort"] = "off"
-    return m
-
-
-async def _ask(pet, c, model, diff: str, system: str, prompt: str, max_out: int) -> str:
-    m = _effort(pet, model, c, DIFF.get(diff, DIFF["normal"])[0])
+async def _ask(pet, c, model, effort: str, prompt: str, max_out: int) -> str:
+    # effort 空白＝照寵物設定；有給就用那一檔（模型沒有那一檔就往下找最近的）
+    m = pet._params(model, {**c, "effort": effort} if effort else c)
     return await asyncio.wait_for(
-        pet._call(m, system, [{"role": "user", "content": [{"type": "text", "text": prompt}]}], max_out),
+        pet._call(m, pet.build_system(c, "game", GAME), pet.game_messages(c, prompt), max_out),
         timeout=TIMEOUT)
 
 
 def register(woof):
     async def move(body: dict) -> dict:
-        pet, c, model, who, base = _pet()
+        pet, c, model = _pet()
         if not model:
             return {"error": "沒有可用的模型，先到「設定 → 寵物」挑一個"}
         try:
@@ -150,6 +142,7 @@ def register(woof):
         except Exception as e:
             return {"error": str(e)[:80]}
         diff = str(body.get("diff") or "normal")
+        effort = str(body.get("effort") or "")
         hist = ""
         for mv in list(body.get("moves") or [])[-16:]:
             try:
@@ -158,16 +151,16 @@ def register(woof):
                 continue
         fmt = '{"move":"H8","say":"一句話","face":"表情"}'
         prompt = (
-            f"輪到你，你執{'黑' if me == 1 else '白'}子（X），對方執{'黑' if you == 1 else '白'}子（O）。\n"
+            f"（五子棋・目前棋盤）輪到你，你執{'黑' if me == 1 else '白'}子（X），對方執{'黑' if you == 1 else '白'}子（O）。\n"
             "棋盤（·＝空點）：\n" + _grid(rows, me) + "\n"
             + (f"最近的落子：{hist}\n" if hist else "")
-            + DIFF.get(diff, DIFF["normal"])[1] + "\n"
+            + DIFF.get(diff, DIFF["normal"]) + "\n"
             + (str(body.get("retry_note") or "")[:120] + "\n" if body.get("retry_note") else "")
             + "move 一定要是空點。回覆格式：" + fmt
         )
         t0 = time.time()
         try:
-            raw = await _ask(pet, c, model, diff, _system(who, base), prompt, 200)
+            raw = await _ask(pet, c, model, effort, prompt, 200)
         except asyncio.TimeoutError:
             return {"error": "他想太久了"}
         except Exception as e:
@@ -185,34 +178,54 @@ def register(woof):
         return {"move": mv, "say": _say(got.get("say")), "face": _face(got.get("face")),
                 "ms": int((time.time() - t0) * 1000)}
 
+    def _pt(v) -> str:
+        p = xy(v)
+        return coord(*p) if p else ""
+
+    async def record(body: dict) -> dict:
+        """真的下了：我那一手（可能沒有，例如他先手）＋他那一手和那句話，寫進他的紀錄。"""
+        from woof import pet
+        h = _pt(body.get("human"))
+        note = "（五子棋）" + "，".join(x for x in [
+            "開了新的一局，你先下" if body.get("opening") else "",
+            f"我下 {h}" if h else "",
+        ] if x) if (h or body.get("opening")) else ""
+        say = _say(body.get("say"))
+        await pet.game_log(note, say, _face(body.get("face")), emit=_emit())
+        return {"ok": True}
+
     EVENTS = {
-        "start": "新的一局剛擺好，{first}。打個招呼。",
-        "undo": "對方剛悔棋，把最後一步收回去了（第 {ply} 手）。回應一下。",
-        "lose": "對方剛連成五子，你輸了（比分 你 {p}：對方 {u}）。",
-        "resign": "對方認輸了，這局算你贏（比分 你 {p}：對方 {u}）。",
-        "draw": "棋盤下滿了，和棋。",
+        "start": "（五子棋）開了新的一局，我先下",
+        "undo": "（五子棋）我悔了一手",
+        "lose": "（五子棋）我下 {mv}，連成五子，我贏了（比分 我 {u}：你 {p}）",
+        "win": "（五子棋）你連成五子，你贏了（比分 我 {u}：你 {p}）",
+        "resign": "（五子棋）我認輸了，這局算你贏（比分 我 {u}：你 {p}）",
+        "draw": "（五子棋）棋盤下滿了，和棋",
     }
 
     async def react(body: dict) -> dict:
-        pet, c, model, who, base = _pet()
+        pet, c, model = _pet()
         if not model:
             return {"error": "沒有可用的模型"}
         ev = str(body.get("event") or "")
         if ev not in EVENTS:
             return {"error": "不認得的事件"}
         sc = body.get("score") or {}
-        text = EVENTS[ev].format(first="你先下" if body.get("pet_first") else "對方先下",
-                                 ply=int(body.get("ply") or 0), p=int(sc.get("p") or 0), u=int(sc.get("u") or 0))
-        prompt = text + '\n回覆格式：{"say":"一句話","face":"表情"}'
+        note = EVENTS[ev].format(mv=_pt(body.get("move")) or "最後一手", p=int(sc.get("p") or 0), u=int(sc.get("u") or 0))
+        await pet.game_log(note, emit=_emit())   # 先寫進紀錄，寵物欄馬上看得到；他就照著紀錄回
+        prompt = '（五子棋）回他一句。回覆格式：{"say":"一句話","face":"表情"}'
         try:
-            raw = await _ask(pet, c, model, "easy", _system(who, base), prompt, 120)
+            raw = await _ask(pet, c, model, str(body.get("effort") or ""), prompt, 120)
         except asyncio.TimeoutError:
             return {"error": "他想太久了"}
         except Exception as e:
             return {"error": f"模型呼叫失敗：{str(e)[:120]}"}
         got = _json(raw)
         say = _say(got.get("say") or ("" if got else raw))
+        if say:
+            await pet.game_log("", say, _face(got.get("face")), emit=_emit())
         return {"say": say, "face": _face(got.get("face"))}
 
     woof.add_action("move", move)
+    woof.add_action("record", record)
     woof.add_action("react", react)

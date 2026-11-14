@@ -125,7 +125,7 @@ function renderTabbar() {
     return `<div class="tab${i === S.tab ? ' on' : ''}" data-tab="${i}" title="${esc(title)}">`
       + (run ? '<i class="run"></i>' : wait ? '<i class="wait"></i>' : '')
       + `<span class="tt">${esc(title)}</span><span class="tx" data-tabx="${i}" title="關閉分頁">${ico('x')}</span></div>`;
-  }).join('') + '<span class="tabnew" data-tabnew title="開新分頁：新對話或插件頁面">＋</span>'
+  }).join('') + '<span class="tabnew" data-tabnew title="開新分頁：新對話，或挑一個對話">＋</span>'
     + `<span class="tabsp${S.split ? ' on' : ''}" data-split title="並排另一個對話">${ico('split')}</span>`;
 }
 // 切到某個分頁：第一次或換過對話才抓訊息，之後整組重畫
@@ -289,11 +289,17 @@ function leavePage() {
   if (S.tabs.length < TAB_MAX || !chats.length) { S.tabs.push(tabNew(null)); S.tab = S.tabs.length - 1; return; }
   S.tab = chats[chats.length - 1];
 }
-// 分頁列的 ＋：新對話，或插件提供的頁面
+// 分頁列的 ＋：新對話，或挑一個還沒開的對話開成新分頁（最近的在上面）；
+// 插件頁面沒有放在寵物選單（pet_menu）的，也列在這裡
 function tabMenu(anchor) {
   const r = anchor.getBoundingClientRect();
   const items = [{ icon: 'new', label: '新對話', hint: 'Ctrl N', run: newTab }];
-  const pages = uiPlugins();
+  const ids = new Set(S.sessions.map((s) => s.id));
+  const open = new Set(S.tabs.map((t) => t.sid).filter(Boolean));
+  const recent = S.sessions.filter((s) => !s.archived && !(s.parent && ids.has(s.parent)) && !open.has(s.id))
+    .sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || (b.updated || b.created || 0) - (a.updated || a.created || 0)).slice(0, 12);
+  if (recent.length) items.push('-', ...recent.map((s) => ({ icon: s.pinned ? 'pin' : 'chat', label: (s.title || '新對話').slice(0, 30), run: () => openInTab(s.id) })));
+  const pages = uiPlugins().filter((p) => !p.ui.pet_menu);
   if (pages.length) items.push('-', ...pages.map((p) => ({ icon: 'puzzle', label: pageLabel(p.ui.page), run: () => openPage(p.ui.page) })));
   ctxMenu(r.left, r.bottom + 4, items);
 }
@@ -304,7 +310,16 @@ window.WOOF = {
   act: (plugin, action, body) => api('POST', `/api/plugins/${encodeURIComponent(plugin)}/act/${encodeURIComponent(action)}`, body || {}),
   notify: (kind, title, body) => notify(kind, title, body),
   lang: () => uiLang(),
-  pet: { name: () => (PET.st && PET.st.name) || '沃夫', face: (f) => petSprite(f) },
+  pet: {
+    name: () => (PET.st && PET.st.name) || '沃夫',
+    face: (f) => petSprite(f),
+    // 寵物目前的模型能選的思考檔位與目前的設定（插件要讓使用者選思考強度時用）
+    thinking: () => {
+      const c = PET.cfg || {}, m = (S.models || []).find((x) => x.id === c.model) || {};
+      return { cur: String(c.effort || '').toLowerCase(), efforts: (m.efforts || []).map((e) => String(e).toLowerCase()), label: m.label || '' };
+    },
+  },
+  effortLabel: (e) => EFFORT_LABEL[e] || e,
   page(def) {
     if (!def || !def.id || typeof def.mount !== 'function') return;
     PAGES[def.id] = def;
@@ -737,6 +752,8 @@ function renderBgRun() {
 }
 setInterval(renderBgRun, 1000);
 function onEvent(ev) {
+  // 插件頁面可以聽 window 的 woof:event 拿到同一份即時事件（例如寵物紀錄更新）
+  try { window.dispatchEvent(new CustomEvent('woof:event', { detail: ev })); } catch {}
   const sid = ev.session_id;
   noteAct(ev);
   if (typeof ev.busy === 'boolean' && sid) {
@@ -7328,6 +7345,8 @@ function petPokeLabel(m) {
 }
 function petRow(m) {
   if (m.role !== 'pet' && m.kind === 'poke') return `<div class="pnote">${esc(petPokeLabel(m))}</div>`;
+  // 遊戲裡你做了什麼（例如五子棋「我下 H8」），一行小字
+  if (m.role !== 'pet' && m.kind === 'game') return `<div class="pnote pgame">${esc(String(m.text || '').replace(/^（五子棋）/, '五子棋 · '))}</div>`;
   if (m.role !== 'pet') {
     return `<div class="pmsg u">${petAttHtml(m)}${m.text ? `<div class="petline">${esc(m.text)}</div>` : ''}${petRx(m)}</div>`;
   }

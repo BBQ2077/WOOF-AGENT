@@ -438,14 +438,15 @@ def build_system(c: dict | None = None, mode: str = "glance", hint: str = "") ->
              "- 不要條列、不要標題、不要用星號或括號寫旁白（角色檔特別允許的除外）、不要提到你是模型或 AI。",
              "- 一律繁體中文（台灣用語），一個簡體字都不行。",
              "- 不要編造他沒說過、片段裡沒有的事；不確定就不要提。",
-             "- 角色檔的「示範」只是語氣參考，不要照抄裡面的句子；每次用自己的話。",
-             "",
+             "- 角色檔的「示範」只是語氣參考，不要照抄裡面的句子；每次用自己的話。"]
+    if mode != "game":
+        lines += ["",
              "## 按表情（像 LINE／Telegram 的訊息反應）",
              f"- react 是你對他剛剛那句按的表情，只能從這幾個挑：{' '.join(pal)}。",
              f"- 好笑→😂；累、難過→🥺；好消息、做完了→🔥 或 👍；很貼心、在撒嬌→❤️；嚇一跳→😮；說要睡→😴；{sig} 是你的招牌，偶爾才用。",
              "- 大多數時候不用按，留空字串。只有他那句真的讓你有感覺才按；說話時大概四五句才按一次。",
-             "- 只按表情、不說話也是一種回覆：他只回「好」「嗯」「哈哈」時，按一個表情、say 給空陣列就好。",
-             "",
+             "- 只按表情、不說話也是一種回覆：他只回「好」「嗯」「哈哈」時，按一個表情、say 給空陣列就好。"]
+    lines += ["",
              "## 表情與心情",
              f"- face 只能從這些挑一個：{', '.join(FACES)}。",
              "- face 跟你現在的心情一致：安慰他→comfort 或 gentle，捨不得→sad，撒嬌→clingy，"
@@ -463,6 +464,12 @@ def build_system(c: dict | None = None, mode: str = "glance", hint: str = "") ->
         if MODES[c.get("mode") or "mix"]["peek"]:
             lines.append("- 左邊工作區的片段只是你偷瞄到的素材，不要接著回答裡面的技術問題；"
                          "他在討拍就陪他，他問你想法才順口點一下你瞄到的東西。")
+    elif mode == "game":
+        # 跟他玩遊戲（例如五子棋）：玩法和輸出格式由遊戲給；不放會一直變的「現在」，整局的提示詞前段不變，快取吃得到
+        lines += ["", "## 這次", hint]
+        if memo:
+            lines += ["", "## 你記得的事", memo]
+        return "\n".join(lines)
     elif mode == "nudge":
         lines += ["", "## 這次",
                   "- 他沒有找你，是你自己想找他講話（像傳一則訊息給他）。為什麼是現在，看下面「現在」那段。",
@@ -849,6 +856,32 @@ async def _say(session_id, got: dict, emit, kind: str) -> dict:
             pass
     await maybe_compress(emit=emit)
     return st
+
+
+def game_messages(c: dict, prompt: str) -> list:
+    """玩遊戲時送給模型的訊息：他自己的對話紀錄（記得你們聊過什麼、這局講過什麼）＋最後這次的棋面。
+    最後這段只是這次問的，不寫進紀錄。"""
+    msgs = _own_messages(c)
+    if msgs and msgs[-1]["role"] == "user":
+        msgs[-1] = {"role": "user", "content": [{"type": "text", "text": msgs[-1]["content"][0]["text"] + "\n\n" + prompt}]
+                    + msgs[-1]["content"][1:]}
+    else:
+        msgs.append({"role": "user", "content": [{"type": "text", "text": prompt}]})
+    return msgs
+
+
+async def game_log(note: str, say: str = "", face: str = "", emit=None) -> dict:
+    """遊戲裡發生的事寫進他的紀錄：你這邊做了什麼（note，寵物欄顯示成一行小字），他回了什麼（say）。
+    之後不管是繼續玩還是聊天，他都記得。"""
+    d = _load()
+    if note:
+        d.setdefault("msgs", []).append({"id": _mid(), "role": "user", "text": str(note)[:300], "at": time.time(), "kind": "game"})
+        _save(d)
+    if not say:
+        return await _emit(emit)
+    got = {"say": to_tw(str(say))[:400], "face": face if face in FACES else (d.get("face") or "happy"),
+           "mood": d.get("mood") or "", "sug": [], "react": ""}
+    return await _say(None, got, emit, "game")
 
 
 def poke_text(n: int) -> str:

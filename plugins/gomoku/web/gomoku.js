@@ -1,11 +1,12 @@
 /* 五子棋（跟寵物下一局）── gomoku 插件的前端頁面
    由 WOOF 載入後呼叫 window.WOOF.page() 註冊，開在分頁列的 ＋ 或寵物選單。
-   棋由寵物的模型下、台詞也是他講；這裡只管規則（落點合不合法、誰連成五）與畫面，
-   不會把任何程式算的候選點給模型。
+   棋由寵物的模型下、台詞也是他講，用的是他平常的記憶；他說的話出現在右邊寵物欄（這頁不另外放對話）。
+   這裡只管規則（落點合不合法、誰連成五）與畫面，不會把任何程式算的候選點給模型。
 
    預先思考：輪到你的時候，先猜你最可能下的幾個點（你滑鼠停住的那一格、加上程式猜的兩個），
    用「你下在那裡之後」的完整棋面各問一次模型。你真的下在那裡，就直接用他已經想好的那一手；
-   問的就是那個確切的棋面，所以不會不即時。沒猜中就照常問。這些猜測只用來決定要先問哪幾格，模型看不到。 */
+   問的就是那個確切的棋面，所以不會不即時。沒猜中就照常問。這些猜測只用來決定要先問哪幾格，模型看不到。
+   預先想的結果只有真的用到才寫進他的紀錄；你在寵物欄跟他講了話，先想好的就作廢重想（他要看到最新的對話）。 */
 (function () {
   'use strict';
   const W = window.WOOF;
@@ -15,11 +16,11 @@
   const SIZE = 15, N = SIZE * SIZE, EMPTY = 0, BLACK = 1, WHITE = 2;
   const DIRS = [[1, 0], [0, 1], [1, 1], [1, -1]];
   const DIFF = {
-    easy: { label: '簡單', hint: '不思考、隨性下，偶爾放水' },
-    normal: { label: '普通', hint: '不思考、認真下（大約 5～8 秒一手）' },
-    hard: { label: '高手', hint: '會先思考再下，比較強也比較慢（大約 10～20 秒一手）' },
+    easy: { label: '簡單', hint: '隨性下，像陪玩，偶爾放水' },
+    normal: { label: '普通', hint: '認真下，攻守都顧' },
+    hard: { label: '高手', hint: '全力下，先看清楚雙方的威脅再決定' },
   };
-  const ASK_MS = 70000;   // 一次最多等多久（後端自己也會在 60 秒放棄）
+  const ASK_MS = 190000;  // 一次最多等多久（後端自己會在 180 秒放棄；思考開越高越久）
   const SPEC_MAX = 3;     // 每一手最多先替你想幾個點
   const HOVER_MS = 450;   // 滑鼠在一格停多久就開始先想
 
@@ -89,9 +90,10 @@
     board: new Int8Array(N), moves: [], turn: BLACK, human: BLACK,
     over: false, winner: 0, line: null, thinking: false, stuck: '', hover: null, rev: 0,
     diff: localStorage.getItem('woof.gomoku.diff') || 'normal',
+    eff: localStorage.getItem('woof.gomoku.eff') || '',
     pre: localStorage.getItem('woof.gomoku.pre') !== '0',
     score: { u: 0, p: 0, d: 0 }, rst: false, rstT: 0, t0: 0, took: 0,
-    px: 0, pad: 16, cell: 30, hoverT: 0,
+    px: 0, pad: 16, cell: 30, hoverT: 0, q: null, recorded: new Set(), lastUser: '',
   };
   if (!DIFF[G.diff]) G.diff = 'normal';
   const SP = { map: new Map(), live: 0, n: 0 };   // 預先思考：棋面 → 模型的回答（Promise）
@@ -107,9 +109,9 @@
       '    <span class="gk-grow"></span>' +
       '    <label class="gk-pre" title="輪到你時，先替你最可能下的幾個點各問一次模型；你下在那裡就馬上回。問的是那個確切的棋面，不會不即時；token 大約多花 2～3 倍">' +
       '      <span class="gk-sw"></span><span>預先思考</span></label>' +
+      '    <div class="gk-seg gk-eff" title="他想多久：預設跟「設定 → 寵物」的思考強度；越高下得越好，也越慢"></div>' +
       '    <div class="gk-seg">' + Object.keys(DIFF).map((k) => '<b data-gk="diff" data-v="' + k + '" title="' + esc(DIFF[k].hint) + '">' + DIFF[k].label + '</b>').join('') + '</div>' +
       '  </div>' +
-      '  <div class="gk-top"><span class="gk-av"></span><div class="gk-bub"><span class="gk-say"></span></div></div>' +
       '  <div class="gk-stage"><div class="gk-wrap"><canvas class="gk-cv"></canvas>' +
       '    <div class="gk-over"><b class="gk-rtxt"></b><span class="btn primary" data-gk="new">再來一局</span></div></div></div>' +
       '  <div class="gk-bar">' +
@@ -125,8 +127,7 @@
       '</div></div>';
     const q = (s) => el.querySelector(s);
     G.el = el; G.cv = q('.gk-cv'); G.ctx = G.cv.getContext('2d');
-    G.ui = { sub: q('.gk-sub'), turn: q('.gk-turn'), score: q('.gk-score'), took: q('.gk-took'), say: q('.gk-say'),
-      av: q('.gk-av'), over: q('.gk-over'), rtxt: q('.gk-rtxt'), undo: q('[data-gk="undo"]'), resign: q('[data-gk="resign"]'),
+    G.ui = { sub: q('.gk-sub'), turn: q('.gk-turn'), score: q('.gk-score'), took: q('.gk-took'), over: q('.gk-over'), rtxt: q('.gk-rtxt'), undo: q('[data-gk="undo"]'), resign: q('[data-gk="resign"]'),
       side: q('.gk-side'), retry: q('.gk-retry'), pre: q('.gk-pre'), stage: q('.gk-stage') };
     el.addEventListener('click', onClick);
     G.cv.addEventListener('click', onBoard);
@@ -135,20 +136,19 @@
     G.ro = new ResizeObserver(() => resize());
     G.ro.observe(G.ui.stage);
     G.tick = setInterval(() => { if (G.thinking) updateUI(); }, 200);
-    face('happy');
+    window.addEventListener('woof:event', onWoof);
   }
 
-  function face(name) {
-    const el = G.ui.av; if (!el) return;
-    let u = '';
-    try { u = W.pet.face(name || 'happy'); } catch (e) { u = ''; }
-    el.innerHTML = u ? '<img alt="" draggable="false" src="' + esc(u) + '">' : '🐾';
+  // 你在寵物欄跟他講了話：先想好的棋是照舊的對話想的，作廢
+  function onWoof(e) {
+    const ev = e.detail;
+    if (!ev || ev.type !== 'pet' || !Array.isArray(ev.history) || !SP.map.size) return;
+    const last = [...ev.history].reverse().find((m) => m.role !== 'pet');
+    if (last && last.kind !== 'game' && last.id !== G.lastUser) { G.lastUser = last.id; SP.map.clear(); SP.n = 0; if (canPlay()) guessAhead(); }
   }
-  function say(text) {
-    const t = String(text || '').trim();
-    G.ui.say.textContent = t;
-    G.ui.say.parentElement.classList.toggle('on', !!t);
-  }
+  // 寫紀錄、讓他回話：照順序一件一件來，紀錄才不會亂
+  function queue(fn) { G.q = (G.q || Promise.resolve()).then(fn).catch(() => {}); return G.q; }
+  function record(body) { return queue(() => W.act(PLUGIN, 'record', body)); }
 
   function updateUI() {
     if (!G.el) return;
@@ -156,7 +156,7 @@
     u.sub.textContent = '跟' + name + '下一局';
     if (G.over) u.turn.textContent = G.winner === 0 ? '和棋' : G.winner === G.human ? '你贏了' : name + '贏了';
     else if (G.thinking) u.turn.textContent = name + '在想… ' + ((performance.now() - G.t0) / 1000).toFixed(1) + ' 秒';
-    else if (G.stuck) u.turn.textContent = name + '卡住了';
+    else if (G.stuck) u.turn.textContent = name + '卡住了：' + G.stuck;
     else u.turn.textContent = G.turn === G.human ? '輪到你' : name + '的回合';
     u.score.textContent = '你 ' + G.score.u + '：' + G.score.p + ' ' + name + (G.score.d ? '・和 ' + G.score.d : '');
     u.took.textContent = G.took ? '上一手想了 ' + (G.took / 1000).toFixed(1) + ' 秒' : '';
@@ -169,6 +169,18 @@
     u.retry.hidden = !G.stuck;
     u.pre.classList.toggle('on', G.pre);
     G.el.querySelectorAll('[data-gk="diff"]').forEach((b) => b.classList.toggle('on', b.dataset.v === G.diff));
+    // 思考：跟寵物設定，或寵物目前的模型有的每一檔
+    let th = { cur: '', efforts: [] };
+    try { th = W.pet.thinking(); } catch (e) { /* 舊版沒有 */ }
+    if (G.eff && !th.efforts.includes(G.eff)) G.eff = '';
+    const lab = (e) => { try { return W.effortLabel(e); } catch (x) { return e; } };
+    const opts = [['', '跟寵物' + (th.cur ? '（' + lab(th.cur) + '）' : '')]].concat(th.efforts.map((e) => [e, lab(e)]));
+    const sig = JSON.stringify([opts, G.eff]);
+    const box = G.el.querySelector('.gk-eff');
+    if (box.dataset.sig !== sig) {
+      box.dataset.sig = sig;
+      box.innerHTML = '<i>思考</i>' + opts.map((o) => '<b data-gk="eff" data-v="' + esc(o[0]) + '" class="' + (o[0] === G.eff ? 'on' : '') + '">' + esc(o[1]) + '</b>').join('');
+    }
     G.ui.over.classList.toggle('on', G.over);
   }
 
@@ -265,6 +277,7 @@
       else if (k === 'resign') resign();
       else if (k === 'retry') petTurn(null);
       else if (k === 'diff' && DIFF[b.dataset.v]) { G.diff = b.dataset.v; localStorage.setItem('woof.gomoku.diff', G.diff); updateUI(); }
+      else if (k === 'eff') { G.eff = b.dataset.v || ''; localStorage.setItem('woof.gomoku.eff', G.eff); updateUI(); }
       return;
     }
     if (e.target.closest('.gk-pre')) {
@@ -288,11 +301,11 @@
   function callMove(b, moves, note) {
     return withTimeout(W.act(PLUGIN, 'move', {
       board: grid(b), moves: moves.slice(-16).map((m) => [m.x, m.y, m.p]),
-      pet: petColor(), human: G.human, diff: G.diff, retry_note: note || '',
+      pet: petColor(), human: G.human, diff: G.diff, effort: G.eff, retry_note: note || '',
     }), ASK_MS);
   }
   const usable = (r, b) => r && Array.isArray(r.move) && inb(r.move[0], r.move[1]) && b[ix(r.move[0], r.move[1])] === EMPTY;
-  const keyOf = (b) => G.diff + ':' + b.join('');
+  const keyOf = (b) => G.diff + ':' + G.eff + ':' + b.join('');
 
   // 預先思考：假設你下在 (x,y)，先用那個棋面問模型
   function speculate(x, y) {
@@ -309,14 +322,21 @@
   }
   function guessAhead() {
     if (!G.pre || !G.moves.length) return;
-    for (const g of guessHuman(G.board, G.human, 2)) speculate(g.x, g.y);
+    const rev = G.rev;
+    // 等紀錄寫好再問，他才看得到自己剛剛那句
+    (G.q || Promise.resolve()).then(() => {
+      if (rev !== G.rev || !canPlay()) return;
+      for (const g of guessHuman(G.board, G.human, 2)) speculate(g.x, g.y);
+    });
   }
 
   async function petTurn(spec) {
     if (G.over || !G.el) return;
     const rev = G.rev;
     G.thinking = true; G.stuck = ''; G.turn = petColor(); G.t0 = performance.now();
-    face('think'); updateUI(); draw();
+    updateUI(); draw();
+    await (G.q || Promise.resolve());   // 前一句還在寫進紀錄就先等
+    if (rev !== G.rev) return;
     let r = null, err = '', taken = '';
     if (spec) {
       r = await spec.pr;
@@ -333,16 +353,18 @@
     G.took = performance.now() - G.t0;
     if (!r) {
       G.stuck = err || '沒有回應';
-      face('confused');
-      say('（' + petName() + '卡住了：' + G.stuck + '）');
       updateUI(); draw();
       return;
     }
+    const hm = [...G.moves].reverse().find((m) => m.p === G.human);
+    const opening = !G.moves.length;
     const res = place(r.move[0], r.move[1], petColor());
     updateUI(); draw();
-    if (r.say) say(r.say);
-    face(r.face || (res === petColor() ? 'proud' : 'happy'));
-    if (res === null) guessAhead();
+    record({ human: hm && !G.recorded.has(hm) ? [hm.x, hm.y] : null, pet: r.move, say: r.say || '', face: r.face || '', opening });
+    if (hm) G.recorded.add(hm);
+    if (res === petColor()) react('win');
+    else if (res === 0) react('draw');
+    else guessAhead();
   }
 
   function place(x, y, p) {
@@ -367,17 +389,10 @@
     petTurn(spec || null);
   }
 
-  // 悔棋、認輸、輸贏、開新局：讓他自己講一句（不用罐頭台詞）
-  async function react(event, extra) {
-    const rev = G.rev;
-    say('…');
-    let r = null;
-    try {
-      r = await withTimeout(W.act(PLUGIN, 'react', Object.assign({ event, score: G.score, ply: G.moves.length, pet_first: petFirst() }, extra || {})), ASK_MS);
-    } catch (e) { r = null; }
-    if (rev !== G.rev) return;
-    say(r && r.say ? r.say : '');
-    if (r && r.face) face(r.face);
+  // 開新局、悔棋、認輸、輸贏：寫進他的紀錄，讓他自己回一句（不用罐頭台詞），寵物欄看得到
+  function react(event, extra) {
+    const body = Object.assign({ event, score: Object.assign({}, G.score), effort: G.eff }, extra || {});
+    return queue(() => withTimeout(W.act(PLUGIN, 'react', body), ASK_MS));
   }
 
   function endGame(w, line, reason) {
@@ -386,9 +401,11 @@
     if (w === 0) G.score.d++; else if (w === G.human) G.score.u++; else G.score.p++;
     G.ui.rtxt.textContent = reason === 'resign' ? petName() + '贏了（你認輸）' : w === 0 ? '和棋' : w === G.human ? '你贏了' : petName() + '贏了';
     G.rev++;
-    if (w === G.human) { face('sad'); react('lose'); }
-    else if (w === 0) react('draw');
-    else if (reason === 'resign') { face('proud'); react('resign'); }
+    const lm = G.moves[G.moves.length - 1];
+    if (w === G.human) react('lose', { move: lm ? [lm.x, lm.y] : null });
+    else if (reason === 'resign') react('resign');
+    else if (w === 0 && lm && lm.p === G.human) react('draw');
+    // 他贏、他下滿的和棋：等他那一手寫進紀錄後再說（petTurn 裡處理）
     updateUI(); draw();
   }
 
@@ -396,9 +413,8 @@
     G.rev++;
     G.board = new Int8Array(N); G.moves = []; G.turn = BLACK; G.human = byPet ? WHITE : BLACK;
     G.over = false; G.winner = 0; G.line = null; G.thinking = false; G.stuck = ''; G.hover = null; G.took = 0;
-    G.rst = false; clearTimeout(G.rstT);
+    G.rst = false; clearTimeout(G.rstT); G.recorded = new Set();
     SP.map.clear(); SP.n = 0;
-    face('happy'); say('');
     updateUI(); draw();
     if (G.turn !== G.human) petTurn(null);
     else react('start');
@@ -415,8 +431,9 @@
     G.line = null; G.hover = null;
     G.turn = G.moves.length ? other(G.moves[G.moves.length - 1].p) : BLACK;
     updateUI(); draw();
+    react('undo');
     if (G.turn === petColor()) petTurn(null);
-    else { face('curious'); react('undo'); guessAhead(); }
+    else guessAhead();
   }
 
   function resign() {
@@ -439,18 +456,19 @@
       G.score = { u: 0, p: 0, d: 0 };
       build(el);
       reset(false);
-      requestAnimationFrame(resize);
+      requestAnimationFrame(resize); setTimeout(resize, 0);   // 視窗在背景時 rAF 不會跑
     },
-    show() { G.px = 0; requestAnimationFrame(resize); },
+    show() { G.px = 0; requestAnimationFrame(resize); setTimeout(resize, 0); },
     hide() { G.hover = null; clearTimeout(G.hoverT); },
     unmount() {
       G.rev++;
       clearInterval(G.tick); clearTimeout(G.hoverT); clearTimeout(G.rstT);
+      window.removeEventListener('woof:event', onWoof);
       if (G.ro) G.ro.disconnect();
       SP.map.clear(); SP.n = 0;
       G.el = null; G.cv = null; G.ctx = null; G.ro = null; G.thinking = false;
     },
   });
   // 測試、除錯用：看棋局狀態（不改棋局）
-  W.gomoku = { state: () => ({ moves: G.moves.slice(), over: G.over, winner: G.winner, turn: G.turn, human: G.human, thinking: G.thinking, stuck: G.stuck, diff: G.diff, pre: G.pre, spec: [...SP.map.keys()].length, took: G.took }) };
+  W.gomoku = { state: () => ({ moves: G.moves.slice(), over: G.over, winner: G.winner, turn: G.turn, human: G.human, thinking: G.thinking, stuck: G.stuck, diff: G.diff, pre: G.pre, spec: [...SP.map.keys()].length, took: G.took, lastUser: G.lastUser }) };
 })();
