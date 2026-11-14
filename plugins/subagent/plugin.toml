@@ -18,6 +18,14 @@ label = "可指派的模型"
 default = ""
 help = "主代理派子代理時可以挑的模型（可多選）。都不勾＝一律用預設子代理模型。「設定 → 模型用途 → 子代理」也能改，兩邊是同一份。建議只勾便宜或免費的"
 
+[settings.effort]
+in_settings = "aux"
+type = "select"
+options = ["follow", "default", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+label = "思考強度"
+default = "follow"
+help = "主代理派的子代理用的思考強度。follow＝跟這個對話一樣；default＝子代理模型的預設；其餘是固定一檔，模型沒有那一檔就往下用最近的一檔。「設定 → 模型用途 → 子代理」也能改"
+
 [settings.max_per_turn]
 type = "number"
 label = "每回合最多派幾個"

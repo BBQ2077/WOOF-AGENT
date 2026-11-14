@@ -1213,8 +1213,15 @@ async def _prepare_subagent(parent: TurnContext, goal: str, context: str = "", m
     if model_cfg.get("provider") not in REG.providers:
         raise RuntimeError(f"「{model_cfg.get('label', model_cfg['id'])}」不能當子代理（需要 API 型連線），"
                            "請在「設定 → 輔助模型」指定子代理模型")
-    # 拓展／審核跟主對話同一個思考強度（依子代理模型的檔位向下兼容）；一般子代理用模型預設
-    want = (getattr(parent, "effort_want", None) or parent.session.get("effort")) if kind in SUB_KIND else None
+    # 思考強度：拓展／審核跟主對話一樣；一般子代理照「模型用途 → 子代理」的設定（跟隨主對話／模型預設／固定一檔）。
+    # 固定的檔位在 TurnContext 依子代理模型支援的檔位向下兼容
+    follow = getattr(parent, "effort_want", None) or parent.session.get("effort")
+    if kind in SUB_KIND:
+        want = follow
+    else:
+        sp = REG.plugins.get("subagent")
+        pick = str(((sp.settings if sp else None) or {}).get("effort") or "follow").strip().lower()
+        want = follow if pick == "follow" else (None if pick == "default" else pick)
     effort = want or model_cfg.get("default_effort")
     if session_id:
         # 接續同一個子代理：同一個對話、同一份上下文，不要再開新的

@@ -5732,6 +5732,17 @@ function auxFits(task, m) {
   if (task !== 'fallback' && (m.kind === 'image' || m.kind === 'video')) return false;
   return true;
 }
+// 一般子代理的思考強度（存在 subagent 插件的 effort）；拓展／審核固定跟隨主對話
+const SUB_EFFORT = () => [
+  { v: 'follow', label: '跟隨主對話', sub: '主對話選幾檔就用幾檔' },
+  { v: 'default', label: '模型預設', sub: '用子代理模型自己的預設強度' },
+  ...EFFORT_SCALE.map((e) => ({ v: e, label: EFFORT_LABEL[e], sub: (EFFORT_HINT[e] || '') + '（模型沒有這一檔就往下用最近的）' })),
+];
+function subEffortNow() {
+  const pl = (S.plugins || []).find((x) => x.name === 'subagent');
+  const v = String(((pl && pl.settings) || {}).effort || 'follow').toLowerCase();
+  return (SUB_EFFORT().find((x) => x.v === v) || SUB_EFFORT()[0]);
+}
 function subagentRowHtml(n, tag) {
   const pl = (S.plugins || []).find((x) => x.name === 'subagent');
   if (!pl) return '';
@@ -5743,7 +5754,9 @@ function subagentRowHtml(n, tag) {
     + `<span>　可指派：</span>${esc(names.length ? names.join('、') : '只用預設')}`;
   return `<div class="auxrow auxwide" data-f="aux:subagent"><div><b>${n}<i>${tag}</i></b>`
     + '<small>勾選子代理可以用的模型（可多選），主代理派工時依任務從勾選的裡面挑；沒指定時用標「預設」的那個，沒設預設就跟隨主模型。需要 API 型連線（Claude Code CLI 不行）。建議只勾便宜或免費的。</small>'
-    + `<div class="now">${now}</div></div>`
+    + `<div class="now">${now}</div>`
+    + `<div class="subeff"><button class="pill2" data-subeff><span class="pk">思考強度</span><b>${esc(subEffortNow().label)}</b><svg><use href="#i-down"/></svg></button>`
+    + '<small>拓展、審核一律跟隨主對話</small></div></div>'
     + mchkHtml('aux:subagent', list, {
       filter: (x) => auxFits('subagent', x), def,
       set: (sel, d) => {
@@ -5834,6 +5847,13 @@ function renderAux(box) {
   <div class="card">${auxRowHtml(...fb)}<div class="auxnote">這一項不受上面的「全部」影響；預設不設，出錯就停下來告訴你。</div></div>`;
   const mpl = (S.plugins || []).find((x) => x.name === 'media');
   gen.forEach((k) => renderGenParams(k, String(((mpl && mpl.settings) || {})[`${k}_model`] || '')));
+  const eb = box.querySelector('[data-subeff]');
+  if (eb) eb.onclick = () => openSpick(eb, SUB_EFFORT(), subEffortNow().v, (v) => {
+    const pl = (S.plugins || []).find((x) => x.name === 'subagent'); if (!pl) return;
+    pl.settings = { ...(pl.settings || {}), effort: v };
+    eb.querySelector('b').textContent = subEffortNow().label;
+    savePluginSetting('subagent', 'effort', v);
+  });
 }
 
 // ---- 一般
