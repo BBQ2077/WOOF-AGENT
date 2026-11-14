@@ -412,7 +412,9 @@ async def complete(model_cfg: dict, system: str, messages: list[dict], max_text:
         raise RuntimeError(f"「{model_cfg.get('label', model_cfg['id'])}」不能做輔助工作（{backend} 不是 API 型連線），"
                            "請在「設定 → 輔助模型」換一個")
     final = None
-    async for ev in provider.stream(model=model_cfg, system=system, messages=messages, tools=[], effort=None):
+    # 呼叫端可以在 model_cfg 放 effort（例如寵物、五子棋照自己的設定）；沒放就不送，用模型預設
+    async for ev in provider.stream(model=model_cfg, system=system, messages=messages, tools=[],
+                                    effort=model_cfg.get("effort")):
         if ev.get("type") == "message":
             final = ev
         elif ev.get("type") == "usage":

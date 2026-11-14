@@ -1339,7 +1339,7 @@ class Pet(unittest.TestCase):
         asyncio.run(p.user_react("p1", "😂"))  # 同一個再按＝收回
         self.assertNotIn("ureact", p.history()[-1])
         self.assertIn("error", asyncio.run(p.user_react("nope", "😂")))
-        # 牠看得到你按了什麼：寫在你下一句前面
+        # 他看得到你按了什麼：寫在你下一句前面
         d = p._load()
         d["msgs"][-1]["ureact"] = "❤️"
         d["msgs"].append({"id": "u2", "role": "user", "text": "好乖", "at": 3})

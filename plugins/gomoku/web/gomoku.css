@@ -1,0 +1,43 @@
+/* 五子棋插件的樣式（只作用在 .gk 底下） */
+.gk{--gk-grid:rgb(72 54 30 / .55);--gk-line:rgb(120 88 44 / .4);height:100%;display:flex;justify-content:center;box-sizing:border-box;padding:14px 18px 10px}
+html.dark .gk{--gk-grid:rgb(64 46 20 / .66);--gk-line:rgb(0 0 0 / .32)}
+.gk-in{width:100%;max-width:760px;display:flex;flex-direction:column;gap:10px;min-height:0}
+.gk-hd{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.gk-tx b{font-size:16px;display:block}
+.gk-tx small{font-size:12px;color:var(--dim)}
+.gk-grow{flex:1}
+.gk-seg{display:flex;padding:2px;border-radius:9px;background:var(--panel2);border:1px solid var(--line)}
+.gk-seg b{font-weight:500;font-size:12.5px;padding:4px 12px;border-radius:7px;cursor:pointer;color:var(--dim);user-select:none}
+.gk-seg b.on{background:var(--acc);color:#fff}
+.gk-pre{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--dim);cursor:pointer;user-select:none}
+.gk-sw{width:28px;height:16px;border-radius:8px;background:var(--line2);position:relative;transition:background .15s}
+.gk-sw::after{content:"";position:absolute;left:2px;top:2px;width:12px;height:12px;border-radius:50%;background:#fff;transition:left .15s}
+.gk-pre.on .gk-sw{background:var(--acc)}
+.gk-pre.on .gk-sw::after{left:14px}
+.gk-top{display:flex;align-items:flex-end;gap:10px;min-height:56px}
+.gk-av{width:52px;height:52px;flex:none;display:grid;place-items:center;font-size:30px}
+.gk-av img{width:100%;height:100%;object-fit:contain;image-rendering:auto}
+.gk-bub{position:relative;max-width:min(520px,80%);padding:7px 12px;border-radius:12px;background:var(--panel2);border:1px solid var(--line);
+  font-size:13px;line-height:1.5;opacity:0;transform:translateY(4px);transition:opacity .18s,transform .18s}
+.gk-bub.on{opacity:1;transform:none}
+.gk-bub::before{content:"";position:absolute;left:-6px;bottom:12px;width:10px;height:10px;background:inherit;border-left:1px solid var(--line);
+  border-bottom:1px solid var(--line);transform:rotate(45deg)}
+.gk-stage{position:relative;flex:1;min-height:240px;display:grid;place-items:center}
+.gk-wrap{position:relative}
+.gk-cv{display:block;border-radius:14px;border:1px solid var(--gk-line);background:radial-gradient(120% 90% at 28% 14%,#f6e7ca,#ecd6ae 56%,#e0c391);
+  box-shadow:inset 0 0 0 1px rgb(255 255 255 / .4),0 8px 20px rgb(70 45 10 / .12);cursor:pointer;touch-action:none}
+html.dark .gk-cv{background:radial-gradient(120% 90% at 28% 14%,#cdb48a,#b99c6e 56%,#a6875a)}
+.gk-over{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;gap:12px;
+  background:rgb(0 0 0 / .18);border-radius:14px;pointer-events:none}
+.gk-over.on{display:flex}
+.gk-over b{font-size:22px;padding:8px 18px;border-radius:12px;background:var(--panel);box-shadow:var(--shadow)}
+.gk-over .btn{pointer-events:auto}
+.gk-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12.5px;color:var(--dim)}
+.gk-turn{color:var(--text);font-weight:500;min-width:96px}
+.gk-took{color:var(--faint)}
+.gk-b{font-size:12.5px;padding:4px 12px}
+.gk-b.dis{opacity:.4;pointer-events:none}
+.gk-b.danger{background:var(--err,#d9534f);color:#fff;border-color:transparent}
+.gk-side{cursor:pointer;padding:4px 10px;border-radius:7px;border:1px dashed var(--line2);user-select:none}
+.gk-side:hover{color:var(--acc);border-color:var(--acc)}
+.gk-foot{font-size:11.5px;color:var(--faint);text-align:center}

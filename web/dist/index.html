@@ -49,6 +49,7 @@
   <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 7v6M12 16.5v.5" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></symbol>
   <symbol id="i-info" viewBox="0 0 24 24"><path d="M12 11v6M12 7.5v.5" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></symbol>
   <symbol id="i-agent" viewBox="0 0 24 24"><circle cx="12" cy="6" r="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="5.5" cy="18" r="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="18.5" cy="18" r="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 8.5v3M12 11.5l-5.2 4.3M12 11.5l5.2 4.3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+  <symbol id="i-smile" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M8.6 14.2c.8 1.2 2 1.9 3.4 1.9s2.6-.7 3.4-1.9" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><circle cx="9.3" cy="10" r="1.1" fill="currentColor"/><circle cx="14.7" cy="10" r="1.1" fill="currentColor"/></symbol>
   <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M9.6 9.5a2.5 2.5 0 1 1 3.4 2.3c-.6.3-1 .8-1 1.5v.4M12 16.6v.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
   <symbol id="i-more" viewBox="0 0 24 24"><circle cx="6" cy="12" r="1.5" fill="currentColor"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/><circle cx="18" cy="12" r="1.5" fill="currentColor"/></symbol>
   <symbol id="i-split" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 5v14" stroke="currentColor" stroke-width="1.7"/></symbol>
@@ -177,12 +178,12 @@
           <div class="pethist" id="petHist"></div>
           <div class="petstage">
             <div class="petbubs" id="petBub"></div>
-            <img id="petImg" alt="" draggable="false" data-pet="boop" title="摸摸牠">
+            <img id="petImg" alt="" draggable="false" data-pet="boop" title="摸摸他">
             <div class="petname"><b id="petName" class="noi18n">沃夫</b><span id="petMood"></span></div>
           </div>
           <div class="petsug" id="petSug"></div>
           <div class="petatts" id="petAtts"></div>
-          <div class="petin"><button class="petclip" data-pet="att" title="丟圖片或文件給牠（也可以拖進來、貼上）"><svg><use href="#i-plus"/></svg></button><input type="file" id="petAttIn" multiple hidden><textarea id="petIn" rows="1" placeholder="跟沃夫說話…"></textarea><button class="send go petSend" data-pet="say" title="送出"><svg><use href="#i-up"/></svg></button></div>
+          <div class="petin"><button class="petclip" data-pet="att" title="丟圖片或文件給他（也可以拖進來、貼上）"><svg><use href="#i-plus"/></svg></button><input type="file" id="petAttIn" multiple hidden><div class="petbox"><textarea id="petIn" rows="1" placeholder="跟沃夫說話…"></textarea><button class="petemo" data-pet="emo" title="表情符號"><svg><use href="#i-smile"/></svg></button></div><button class="send go petSend" data-pet="say" title="送出"><svg><use href="#i-up"/></svg></button></div>
         </div>
       </div>
       <div class="pane on" id="paneTasks"></div>

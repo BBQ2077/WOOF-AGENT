@@ -1,11 +1,11 @@
 """寵物：住在 WOOF 旁邊的角色，自己的對話窗、自己的檔、自己的壓縮。
 
 跟主對話完全分開：
-- 每個角色有自己的訊息歷史（`data/pet/chat-<角色>.json`），可以直接跟牠講話。
-- 每個角色有自己的檔（`data/pet/chars/<角色>.md`）：只寫「牠是誰」。
+- 每個角色有自己的訊息歷史（`data/pet/chat-<角色>.json`），可以直接跟他講話。
+- 每個角色有自己的檔（`data/pet/chars/<角色>.md`）：只寫「他是誰」。
   怎麼聊（長度、連發、表情反應、輸出格式）是共用規則，寫在 build_system。
-- 牠只看得到主對話的一小段（`peek`，預設 1500 tk），不是整份。
-- 牠有自己的模型、思考強度、輸出長度、上下文上限與壓縮門檻。
+- 他只看得到主對話的一小段（`peek`，預設 1500 tk），不是整份。
+- 他有自己的模型、思考強度、輸出長度、上下文上限與壓縮門檻。
 
 聊天的樣子照通訊軟體：
 - 回覆長度跟著使用者這句走（程式先算好，再告訴模型），大多數時候一兩句。
@@ -26,7 +26,7 @@ import uuid
 
 from .config import DATA, WEB_DIST
 from .pet_personas import PERSONAS
-from .zh_tw import to_tw
+from .zh_tw import to_tw as _to_tw
 
 DIR = DATA / "pet"
 CHARS_DIR = DIR / "chars"
@@ -47,12 +47,12 @@ CHARS = {
 # 雙方共用的表情列（像 Telegram 的快速反應），最後再補上角色的招牌表情
 REACTS = ["❤️", "😂", "🥺", "👍", "😮", "🔥", "😴"]
 
-# 使用者對牠的訊息按表情 → 牠當下的表情與心情（不叫模型，立刻反應）
+# 使用者對他的訊息按表情 → 他當下的表情與心情（不叫模型，立刻反應）
 FEEL = {"❤️": ("clingy", "害羞"), "😂": ("laugh", "得意"), "🥺": ("comfort", "心疼"),
         "👍": ("proud", "得意"), "😮": ("surprise", "嚇到"), "🔥": ("cheer", "興奮"),
         "😴": ("sleepy", "想睡"), "🐾": ("excited", "搖尾巴"), "🍚": ("happy", "有飯吃")}
 
-# 牠什麼都沒說也沒按的時候，依表情補一顆反應，不要讓使用者覺得被已讀不回
+# 他什麼都沒說也沒按的時候，依表情補一顆反應，不要讓使用者覺得被已讀不回
 FACE_REACT = {"laugh": "😂", "comfort": "🥺", "sad": "🥺", "worried": "🥺", "surprise": "😮",
               "cheer": "🔥", "excited": "🔥", "proud": "👍", "sleepy": "😴"}
 
@@ -68,7 +68,7 @@ DEFAULTS = {
     "peek": 1500,
     "speak_up": False,
     "quick": ["怎麼了？", "繼續說"],   # 固定的通用回覆，永遠在
-    "react_rate": "low",              # 牠說話時順便按表情的頻率：off／low／high
+    "react_rate": "low",              # 他說話時順便按表情的頻率：off／low／high
     "mode": "mix",                    # heart 情感／mix 混合／work 工作
     "nudge": "some",                  # 看時間自己找你：off／rare／some／often
     "quiet_from": 23,                 # 這段時間不主動找你（小時，跨午夜）
@@ -94,7 +94,7 @@ MODES = {
 NUDGE = {"off": None, "rare": (12 * 3600, 1), "some": (3 * 3600, 4), "often": (3600, 8)}
 NUDGE_MAX_UNANSWERED = 3
 
-# 說話時順便按表情：最近幾句你的話裡牠按過一次，就先不按（只按表情不說話的回覆不受限）
+# 說話時順便按表情：最近幾句你的話裡他按過一次，就先不按（只按表情不說話的回覆不受限）
 REACT_GAP = {"off": 10 ** 6, "low": 4, "high": 2}
 
 
@@ -290,7 +290,7 @@ ARCH_MAX = 3000   # 壓縮掉的舊紀錄最多留幾則給畫面往上捲（不
 
 
 def history() -> list:
-    """畫面用的完整紀錄：壓縮掉的舊紀錄（old=True，只給你看、牠已經不記得原文）＋目前的紀錄。"""
+    """畫面用的完整紀錄：壓縮掉的舊紀錄（old=True，只給你看、他已經不記得原文）＋目前的紀錄。"""
     d = _load()
     return [{**m, "old": True} for m in d.get("arch") or []] + (d.get("msgs") or [])
 
@@ -500,9 +500,9 @@ def build_system(c: dict | None = None, mode: str = "glance", hint: str = "") ->
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------- 附件（丟給牠的圖片、文件）
+# ---------------------------------------------------------------- 附件（丟給他的圖片、文件）
 ATT = DIR / "att"
-ATT_DOC_MAX = 6000      # 文件抽出的文字最多給牠幾個字
+ATT_DOC_MAX = 6000      # 文件抽出的文字最多給他幾個字
 ATT_FILE_MAX = 25 * 1024 * 1024
 ATT_IMG_TURNS = 2       # 只有最近幾則帶圖的訊息附圖本身，再早的只留「丟過一張圖」
 
@@ -585,7 +585,7 @@ def save_att(items: list) -> list[dict]:
 
 
 def _att_note(m: dict) -> str:
-    """附件寫成給牠看的文字：文件附抽出的內容，讀不了的照實講。"""
+    """附件寫成給他看的文字：文件附抽出的內容，讀不了的照實講。"""
     from pathlib import Path
 
     lines = []
@@ -634,8 +634,8 @@ def gc_att() -> int:
 
 
 def _own_messages(c: dict, vision: bool = False) -> list:
-    """自己的對話紀錄轉成模型訊息；使用者按的表情寫進他的下一句前面，讓牠知道。
-    vision：牠的模型能看圖時，最近 ATT_IMG_TURNS 則帶圖的訊息附上圖本身。"""
+    """自己的對話紀錄轉成模型訊息；使用者按的表情寫進他的下一句前面，讓他知道。
+    vision：他的模型能看圖時，最近 ATT_IMG_TURNS 則帶圖的訊息附上圖本身。"""
     d = _load()
     msgs = d.get("msgs") or []
     budget = int(c["ctx"])
@@ -690,6 +690,11 @@ def _own_messages(c: dict, vision: bool = False) -> list:
 
 
 # ---------------------------------------------------------------- 解析
+
+def to_tw(text: str) -> str:
+    """寵物說的話：轉繁體，稱呼一律用「他」。"""
+    return _to_tw(text).replace("牠", "他")
+
 
 def _one(x) -> str:
     return to_tw(re.sub(r"\s+", " ", str(x)).strip())
@@ -912,7 +917,7 @@ async def talk(text: str, session_id=None, emit=None, kind: str = "text", att: l
 
 
 async def user_react(mid: str, emoji: str, emit=None) -> dict:
-    """使用者對牠的某一則按表情（再按一次同一個就收回）。不叫模型，牠立刻換表情。"""
+    """使用者對他的某一則按表情（再按一次同一個就收回）。不叫模型，他立刻換表情。"""
     c = cfg()
     e = fit_react(emoji, c["char"])
     d = _load()
@@ -1079,7 +1084,7 @@ async def nudge(session_id: str = "", emit=None, force: bool = False):
     # 只留第一則：主動找人一次一句
     got["say"] = (got["say"] or "").split("\n")[0]
     if not got["say"] or any(got["say"].strip() == str(m.get("text") or "").strip() for m in mine):
-        # 牠覺得沒什麼好講：過一陣子再想，不要每次心跳都問
+        # 他覺得沒什麼好講：過一陣子再想，不要每次心跳都問
         d = _load()
         d["nudge_skip"] = time.time() + max(1800, (NUDGE.get(c["nudge"]) or (3600, 0))[0] / 2)
         _save(d)

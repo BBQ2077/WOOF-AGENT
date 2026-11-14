@@ -1,0 +1,12 @@
+name = "gomoku"
+version = "1.0.0"
+kinds = ["ui"]
+description = "跟寵物下五子棋：從分頁列的 ＋ 或寵物選單打開，開成一個分頁。棋和台詞都由寵物的模型決定。"
+enabled = true
+
+[ui]
+page = "gomoku"
+label = "五子棋"
+pet_menu = "跟他下五子棋"
+script = "gomoku.js"
+style = "gomoku.css"

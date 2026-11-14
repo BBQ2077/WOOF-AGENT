@@ -40,14 +40,15 @@ const S = {
 //      所以右側面板、TODO、額度、終端機一律跟著目前的分頁走，不會指錯對話。
 const TAB_MAX = 4;
 S.tabs = []; S.tab = 0;
-const tabNew = (sid) => ({ sid: sid || null, msgs: [], follow: true, attach: [], files: [], draft: {}, liveThink: null, top: 0, loaded: false, text: '' });
+// page：插件頁面的分頁（例如五子棋），這種分頁沒有對話
+const tabNew = (sid, page) => ({ sid: sid || null, page: page || '', msgs: [], follow: true, attach: [], files: [], draft: {}, liveThink: null, top: 0, loaded: false, text: '' });
 const tab = () => S.tabs[S.tab] || (S.tabs[S.tab] = tabNew(null));
 const tabOf = (sid) => (sid ? S.tabs.find((t) => t.sid === sid) : null);
 for (const k of ['sid', 'msgs', 'follow', 'attach', 'files', 'draft', 'liveThink']) {
   Object.defineProperty(S, k, { configurable: true, get: () => tab()[k], set: (v) => { tab()[k] = v; } });
 }
 function saveTabs() {
-  localStorage.setItem('woof.tabs', JSON.stringify(S.tabs.map((t) => t.sid || null)));
+  localStorage.setItem('woof.tabs', JSON.stringify(S.tabs.map((t) => (t.page ? 'page:' + t.page : t.sid || null))));
   localStorage.setItem('woof.tab', String(S.tab));
 }
 // 重開程式：把上次開的分頁放回來（對話已經被刪掉的丟掉），作用中的分頁不一定是第一個
@@ -55,7 +56,11 @@ function restoreTabs() {
   let arr = [];
   try { const raw = JSON.parse(localStorage.getItem('woof.tabs') || '[]'); if (Array.isArray(raw)) arr = raw; } catch { arr = []; }
   const ids = new Set(S.sessions.map((s) => s.id));
-  const tabs = arr.slice(0, TAB_MAX).map((sid) => tabNew(typeof sid === 'string' && ids.has(sid) ? sid : null));
+  const pages = new Set(uiPlugins().map((p) => p.ui.page));
+  const tabs = arr.slice(0, TAB_MAX)
+    .filter((sid) => !(typeof sid === 'string' && sid.startsWith('page:') && !pages.has(sid.slice(5))))
+    .map((sid) => (typeof sid === 'string' && sid.startsWith('page:') ? tabNew(null, sid.slice(5))
+      : tabNew(typeof sid === 'string' && ids.has(sid) ? sid : null)));
   S.tabs = tabs.length ? tabs : [tabNew(null)];
   const i = Number(localStorage.getItem('woof.tab'));
   S.tab = Number.isInteger(i) && i >= 0 && i < S.tabs.length ? i : 0;
@@ -114,13 +119,13 @@ function renderTabbar() {
   const bar = $('#tabbar'); if (!bar) return;
   bar.innerHTML = S.tabs.map((t, i) => {
     const s = t.sid ? S.sessions.find((x) => x.id === t.sid) : null;
-    const title = (t.sid && s && s.title) || '新對話';
+    const title = t.page ? pageLabel(t.page) : (t.sid && s && s.title) || '新對話';
     const run = !!(t.sid && S.running.has(t.sid));
     const wait = !!(t.sid && (Object.values(S.asks).some((a) => a.session_id === t.sid) || Object.values(S.approvals).some((a) => a.session_id === t.sid)));
     return `<div class="tab${i === S.tab ? ' on' : ''}" data-tab="${i}" title="${esc(title)}">`
       + (run ? '<i class="run"></i>' : wait ? '<i class="wait"></i>' : '')
       + `<span class="tt">${esc(title)}</span><span class="tx" data-tabx="${i}" title="關閉分頁">${ico('x')}</span></div>`;
-  }).join('') + '<span class="tabnew" data-tabnew title="新分頁">＋</span>'
+  }).join('') + '<span class="tabnew" data-tabnew title="開新分頁：新對話或插件頁面">＋</span>'
     + `<span class="tabsp${S.split ? ' on' : ''}" data-split title="並排另一個對話">${ico('split')}</span>`;
 }
 // 切到某個分頁：第一次或換過對話才抓訊息，之後整組重畫
@@ -151,7 +156,9 @@ async function switchTab(i) {
 }
 function closeTab(i) {
   if (!S.tabs[i]) return;
+  const gone = S.tabs[i].page;
   S.tabs.splice(i, 1);
+  if (gone) unmountPage(gone);
   if (!S.tabs.length) { S.tabs = [tabNew(null)]; S.tab = 0; }
   else if (S.tab > i) S.tab--;
   else if (S.tab >= S.tabs.length) S.tab = S.tabs.length - 1;
@@ -202,11 +209,116 @@ async function loadTab(t) {
 }
 function renderAll() {
   renderSessions(); renderTitle(); renderModelSelect(); renderChat(); renderComposer(); renderMeter(); renderFiles(); saveTabs();
+  applyPage();
 }
+
+// ------------------------------------------------------------------ 插件頁面
+// 插件在 plugin.toml 的 [ui] 宣告頁面（page、label、script、style、pet_menu）；前端檔從 /api/plugins/<名>/web/ 載入，
+// 載入後呼叫 window.WOOF.page({ id, label, mount(el), show(el), hide(el), unmount(el) }) 註冊，
+// 就會出現在分頁列 ＋ 的選單、開成一個分頁。切到別的分頁時頁面只是藏起來，狀態都還在；關掉分頁才 unmount。
+const PAGES = {};
+const PLUG_UI = new Set();
+function uiPlugins() { return (S.plugins || []).filter((p) => p.loaded && p.ui && p.ui.page); }
+function pageLabel(id) {
+  if (PAGES[id] && PAGES[id].label) return PAGES[id].label;
+  const p = uiPlugins().find((x) => x.ui.page === id);
+  return (p && p.ui.label) || id;
+}
+function loadPluginUI() {
+  if (PANE2) return;
+  for (const p of uiPlugins()) {
+    const key = `${p.name}@${p.version || ''}`;
+    if (PLUG_UI.has(key)) continue;
+    PLUG_UI.add(key);
+    const url = (f) => `${BASE}/api/plugins/${encodeURIComponent(p.name)}/web/${f}?token=${encodeURIComponent(TOKEN)}&v=${encodeURIComponent(p.version || '')}`;
+    if (p.ui.style) { const l = document.createElement('link'); l.rel = 'stylesheet'; l.href = url(p.ui.style); document.head.appendChild(l); }
+    if (p.ui.script) { const sc = document.createElement('script'); sc.src = url(p.ui.script); sc.dataset.plugin = p.name; document.body.appendChild(sc); }
+  }
+  // 插件被關掉：它開著的分頁收掉
+  if (!S.tabs.length) return;
+  const live = new Set(uiPlugins().map((p) => p.ui.page));
+  const dead = S.tabs.map((t, i) => (t.page && !live.has(t.page) ? i : -1)).filter((i) => i >= 0);
+  for (const i of dead.reverse()) closeTab(i);
+}
+function pageEl(id) {
+  let el = $$('#chatView > .pageview').find((x) => x.dataset.page === id);
+  if (!el) {
+    el = document.createElement('div'); el.className = 'pageview'; el.dataset.page = id; el.hidden = true;
+    $('#chatView').appendChild(el);
+  }
+  return el;
+}
+function applyPage() {
+  const id = (S.tabs[S.tab] && S.tabs[S.tab].page) || '';
+  $('#chatView').classList.toggle('onpage', !!id);
+  if (id) {
+    const el = pageEl(id), d = PAGES[id];
+    if (d && !el._mounted) {
+      el._mounted = true; el.textContent = '';
+      try { d.mount(el); } catch (e) { el.textContent = `「${pageLabel(id)}」載入失敗：${e.message}`; }
+    } else if (!d && !el._mounted) el.innerHTML = '<div class="pgload">載入中…</div>';
+  }
+  for (const el of $$('#chatView > .pageview')) {
+    const on = el.dataset.page === id;
+    if (el.hidden === !on) continue;
+    el.hidden = !on;
+    const d = PAGES[el.dataset.page];
+    if (d && el._mounted) { try { if (on && d.show) d.show(el); if (!on && d.hide) d.hide(el); } catch {} }
+  }
+}
+function unmountPage(id) {
+  const el = $$('#chatView > .pageview').find((x) => x.dataset.page === id);
+  if (!el) return;
+  const d = PAGES[id];
+  if (d && el._mounted && d.unmount) { try { d.unmount(el); } catch {} }
+  el.remove();
+}
+function openPage(id) {
+  const i = S.tabs.findIndex((t) => t.page === id);
+  if (i >= 0) { switchTab(i); return; }
+  if (S.tabs.length >= TAB_MAX) { notify('warn', `最多只能開 ${TAB_MAX} 個分頁`, '先關掉一個分頁再開。'); return; }
+  tab().text = input.value;
+  const prev = tab(); if (prev.sid) prev.top = $('#chat').scrollTop;
+  S.tabs.push(tabNew(null, id));
+  showTab(S.tabs.length - 1);
+}
+// 目前這個分頁是插件頁面：對話改開在別的分頁（有空位就開新的，滿了就借最後一個對話分頁）
+function leavePage() {
+  if (!tab().page) return;
+  const chats = S.tabs.map((t, k) => (t.page ? -1 : k)).filter((k) => k >= 0);
+  if (S.tabs.length < TAB_MAX || !chats.length) { S.tabs.push(tabNew(null)); S.tab = S.tabs.length - 1; return; }
+  S.tab = chats[chats.length - 1];
+}
+// 分頁列的 ＋：新對話，或插件提供的頁面
+function tabMenu(anchor) {
+  const r = anchor.getBoundingClientRect();
+  const items = [{ icon: 'new', label: '新對話', hint: 'Ctrl N', run: newTab }];
+  const pages = uiPlugins();
+  if (pages.length) items.push('-', ...pages.map((p) => ({ icon: 'puzzle', label: pageLabel(p.ui.page), run: () => openPage(p.ui.page) })));
+  ctxMenu(r.left, r.bottom + 4, items);
+}
+// 給插件前端用的介面
+window.WOOF = {
+  version: 1,
+  api: (method, path, body) => api(method, path, body),
+  act: (plugin, action, body) => api('POST', `/api/plugins/${encodeURIComponent(plugin)}/act/${encodeURIComponent(action)}`, body || {}),
+  notify: (kind, title, body) => notify(kind, title, body),
+  lang: () => uiLang(),
+  pet: { name: () => (PET.st && PET.st.name) || '沃夫', face: (f) => petSprite(f) },
+  page(def) {
+    if (!def || !def.id || typeof def.mount !== 'function') return;
+    PAGES[def.id] = def;
+    if (!S.tabs.length) return;
+    renderTabbar(); renderTitle();
+    if (S.tabs[S.tab] && S.tabs[S.tab].page === def.id) applyPage();
+  },
+  openPage: (id) => openPage(id),
+};
 $('#tabbar').addEventListener('click', (e) => {
   const x = e.target.closest('[data-tabx]');
   if (x) { closeTab(Number(x.dataset.tabx)); return; }
-  if (e.target.closest('[data-tabnew]')) { newTab(); return; }
+  const tn = e.target.closest('[data-tabnew]');
+  if (tn) { tabMenu(tn); return; }
   if (e.target.closest('[data-split]')) { toggleSplit(); return; }
   if (e.target.closest('[data-splitclose]')) { closeSplit(); return; }
   const t = e.target.closest('[data-tab]');
@@ -819,10 +931,11 @@ function onEvent(ev) {
       if ($('#cronView').classList.contains('on') && !document.querySelector('.modal-bg')) renderCronView(); else loadCron();
       break;
     case 'task_end': {
-      const ok = ev.exit_code === 0;
-      const title = ok ? '背景任務完成' : `背景任務結束（結束碼 ${ev.exit_code}）`;
+      // 被停掉（你按停止、或模型測完把自己開的伺服器關掉）不算失敗；只有自己跑完又回非 0 才是紅框
+      const ok = ev.exit_code === 0, stopped = !!ev.killed;
+      const title = ok ? '背景任務完成' : stopped ? '背景任務已停止' : `背景任務失敗（結束碼 ${ev.exit_code}）`;
       const body = `${ev.command.slice(0, 100)} · ${(ev.ms / 1000).toFixed(1)} 秒`;
-      notify(ok ? 'ok' : 'error', title, body);
+      notify(ok ? 'ok' : stopped ? 'info' : 'error', title, body);
       if (document.hidden || !document.hasFocus()) sysNotify(title, body);
       refreshTasks();
       break;
@@ -835,6 +948,7 @@ async function refreshState() {
   const st = await api('GET', '/api/state');
   S.models = st.models; S.vendors = st.vendors || []; S.backends = st.backends || [];
   S.plugins = st.plugins; S.keys = st.keys;
+  loadPluginUI();
   S.running = new Set(st.running);
   S.approvals = {}; for (const a of st.approvals || []) S.approvals[a.id] = a;
   if (st.profile) { S.profile = st.profile; if (!S.profList || !S.profList.length) refreshProf(); else renderProf(); }
@@ -867,6 +981,7 @@ async function openSession(sid) {
   // 側邊欄按一下：這個對話已經開在某個分頁就切過去，不然就用目前這個分頁開
   const open = tabOf(sid);
   if (open && open !== tab()) { await switchTab(S.tabs.indexOf(open)); return; }
+  leavePage();
   const t = tab();
   t.sid = sid; t.msgs = []; t.loaded = false; t.top = 0; t.follow = true;
   if (sid && !cur()) await loadSessions().catch(() => {});
@@ -880,6 +995,7 @@ async function openSession(sid) {
 
 function newSession() {
   // 分頁已滿：新對話直接取代目前分頁（原本那個對話仍然存在側邊欄，不會被刪掉）
+  leavePage();
   const t = tab();
   t.sid = null; t.msgs = []; t.loaded = true; t.top = 0; t.follow = true; t.attach = []; t.files = []; t.draft = {}; t.liveThink = null;
   localStorage.setItem('woof.sid', '');
@@ -1233,6 +1349,7 @@ function startRename(it) {
 $('#newBtn').onclick = newSession;
 
 function renderTitle() {
+  if (tab().page) { $('#tbTitle').textContent = pageLabel(tab().page); document.title = `${pageLabel(tab().page)} · WOOF`; return; }
   const s = cur();
   $('#tbTitle').textContent = s ? s.title || '新對話' : '新對話';
   document.title = s ? `${s.title} · WOOF` : 'WOOF';
@@ -4842,7 +4959,7 @@ const SECTIONS = [
   ['prompts', '提示詞與記憶', 'WOOF 寫給模型的內部提示詞，以及設定檔、人物檔、使用者檔、記憶檔。'],
   ['flow', '方案模式', '對話框左下「方案・人工／對抗／拓展」的次數上限、審核等多久，以及審核、拓展模型收到的提示詞。'],
   ['styles', '輸出風格', '每個對話可以選一種風格，內容會放進系統提示。'],
-  ['pet', '寵物', '陪你聊天的小角色。牠有自己的對話、記憶和角色檔，跟主對話分開；對你的對話只看不改——不會插話、不會用工具、不會動任何檔案。'],
+  ['pet', '寵物', '陪你聊天的小角色。他有自己的對話、記憶和角色檔，跟主對話分開；對你的對話只看不改——不會插話、不會用工具、不會動任何檔案。'],
   ['compress', '上下文壓縮', '對話變長時把較早的內容摘要起來，全文仍留在資料庫。'],
   ['perms', '權限', '模型要用工具時，依類別決定直接執行、先問你、或不允許。'],
   ['tools', '工具', '每個工具的總開關（含 Skill、記憶的讀和寫），依插件分組。停用後模型看不到該工具；整個插件的啟停、安裝在「插件」頁，單一對話在「上下文 → 本回合工具」。'],
@@ -7121,8 +7238,8 @@ if (PANE2) {
 }
 
 // ---- 寵物：側邊自己的對話窗（訊息、提示詞、壓縮都跟主對話分開）
-// 版面由上而下：對話紀錄 → 頭頂泡泡（牠最新的一則）→ 牠 → 一顆模型建議 → 固定回覆 → 輸入框
-// 雙方都能對對方的訊息按表情；牠一次可以連發幾則，前端一則一則冒出來。
+// 版面由上而下：對話紀錄 → 頭頂泡泡（他最新的一則）→ 他 → 一顆模型建議 → 固定回覆 → 輸入框
+// 雙方都能對對方的訊息按表情；他一次可以連發幾則，前端一則一則冒出來。
 const PET = { cfg: null, st: { face: 'happy', say: '', mood: '', at: 0 }, hist: [], older: [], more: true, stick: true, faces: [],
   busy: false, model: '', label: '', lastPetId: '', reveal: null, revealTimer: 0 };
 
@@ -7139,7 +7256,7 @@ function petReacts() {
 function petLines(m) {
   return String((m && m.text) || '').split('\n').map((x) => x.trim()).filter(Boolean);
 }
-// 最後一則是牠講的 → 放泡泡；其餘放紀錄
+// 最後一則是他講的 → 放泡泡；其餘放紀錄
 // 後端每次只回最近 40 則：新的一批進來時，被擠出去的舊的留在 PET.older，往上捲才看得到
 function petSetHist(h) {
   const ids = new Set(h.map((m) => m.id).filter(Boolean));
@@ -7148,7 +7265,7 @@ function petSetHist(h) {
   if (gone.length) PET.older = PET.older.concat(gone);
   PET.hist = h;
 }
-// 捲到紀錄頂端：跟後端要更早的（含壓縮掉、牠已經不記得原文的），補在上面且畫面不跳
+// 捲到紀錄頂端：跟後端要更早的（含壓縮掉、他已經不記得原文的），補在上面且畫面不跳
 async function petLoadOlder() {
   if (PET.oldBusy || PET.more === false) return;
   const all = [...PET.older, ...PET.hist];
@@ -7197,7 +7314,7 @@ function petMaybeReveal(animate) {
 
 const PET_DOTS = '<span class="dots"><i></i><i></i><i></i></span>';
 function petRx(m) {
-  // 訊息下面那顆小表情：使用者訊息顯示牠按的，牠的訊息顯示你按的
+  // 訊息下面那顆小表情：使用者訊息顯示他按的，他的訊息顯示你按的
   if (m.role === 'pet') {
     return m.ureact ? `<button class="rx mine" data-pet="unrx" data-mid="${esc(m.id || '')}" title="收回">${esc(m.ureact)}</button>` : '';
   }
@@ -7219,7 +7336,7 @@ function petRow(m) {
   return `<div class="pmsg p" data-mid="${esc(m.id || '')}">${lines.map((x) => `<div class="petline">${esc(x)}</div>`).join('')}`
     + (m.old ? '' : `<span class="rxadd" data-pet="rxpick" data-mid="${esc(m.id || '')}" title="按表情">☺</span>`) + `${petRx(m)}</div>`;
 }
-// 跟通訊軟體一樣：隔了一段時間才有下一則，就在中間標時間（看得出牠是隔多久自己找你的）
+// 跟通訊軟體一樣：隔了一段時間才有下一則，就在中間標時間（看得出他是隔多久自己找你的）
 function petWhen(t) {
   const d = new Date(t * 1000), now = new Date();
   const hm = `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
@@ -7231,10 +7348,10 @@ function petWhen(t) {
 function petRows(rows) {
   let prev = 0, wasOld = false;
   return rows.map((m) => {
-    const cut = wasOld && !m.old ? '<div class="pnote pcut">以上已壓縮成記憶，牠不記得原文了</div>' : '';
+    const cut = wasOld && !m.old ? '<div class="pnote pcut">以上已壓縮成記憶，他不記得原文了</div>' : '';
     wasOld = !!m.old;
     const at = Number(m.at) || 0;
-    const gap = at && (!prev || at - prev > 30 * 60) ? `<div class="pnote ptime">${esc(petWhen(at))}${m.kind === 'nudge' ? ' · 牠主動找你' : ''}</div>` : '';
+    const gap = at && (!prev || at - prev > 30 * 60) ? `<div class="pnote ptime">${esc(petWhen(at))}${m.kind === 'nudge' ? ' · 他主動找你' : ''}</div>` : '';
     if (at) prev = at;
     return cut + gap + petRow(m);
   }).join('');
@@ -7269,7 +7386,7 @@ function petPaintStage() {
   }
   bub.innerHTML = html;
   bub.classList.toggle('on', !!html);
-  // 牠講很長時，圖縮小讓位給泡泡；泡泡本身有最大高度，超過就在裡面捲
+  // 他講很長時，圖縮小讓位給泡泡；泡泡本身有最大高度，超過就在裡面捲
   const wrap = bub.closest('.petwrap');
   if (wrap) wrap.classList.toggle('long', size > 70);
   const b = bub.querySelector('.bub');
@@ -7312,8 +7429,8 @@ function petPaintHist() {
   h.innerHTML = rows.length || top || PET.busy
     ? (PET.more !== false && PET.older.length + PET.hist.length >= 40 ? '<div class="pnote pmore">往上捲載入更早的紀錄</div>' : '') + petRows(rows)
     : (PET.cfg && PET.cfg.on === false
-      ? '<div class="pethint">主動說話關著：牠不會自己開口。<br>想找牠，直接打字或摸摸牠就好。</div>'
-      : `<div class="pethint">${esc(PET_MODES[petMode()].hint)}<br>想找牠說話，直接打字就好。</div>`);
+      ? '<div class="pethint">主動說話關著：他不會自己開口。<br>想找他，直接打字或摸摸他就好。</div>'
+      : `<div class="pethint">${esc(PET_MODES[petMode()].hint)}<br>想找他說話，直接打字就好。</div>`);
   return h;
 }
 
@@ -7361,6 +7478,43 @@ function petEvent(p, hist) {
   petPaint();
 }
 
+// 寵物輸入框右邊的表情：點了插進游標位置，可以接著打字，按送出才送
+const EMOJI = ['😀', '😂', '🤣', '😊', '🥰', '😍', '😘', '😎', '🤔', '😅', '😭', '🥺', '😡', '😤', '😴', '🤯',
+  '😱', '😇', '🤗', '😏', '😬', '🙄', '😋', '🫠', '👍', '👎', '👏', '🙏', '💪', '👌', '✌️', '🤝',
+  '👀', '🙈', '❤️', '💔', '🔥', '✨', '🎉', '💯', '⭐', '💤', '💩', '🐶', '🐱', '🐟', '🍕', '🍰',
+  '☕', '🍺', '🎮', '🌙', '☀️', '🍀', '🌧️', '🎁'];
+function emoPick(btn) {
+  const old = $('.emopop');
+  if (old) { old.remove(); btn.classList.remove('on'); return; }
+  const inp = $('#petIn');
+  // 先記住游標位置：點表情時輸入框會失去焦點
+  let a = inp.selectionStart ?? inp.value.length, z = inp.selectionEnd ?? a;
+  const m = document.createElement('div');
+  m.className = 'emopop';
+  m.innerHTML = EMOJI.map((e) => `<b data-emo="${e}">${e}</b>`).join('');
+  document.body.appendChild(m);
+  const r = btn.getBoundingClientRect(), w = m.offsetWidth, h = m.offsetHeight;
+  m.style.left = `${Math.max(8, Math.min(r.right - w, innerWidth - w - 8))}px`;
+  m.style.top = `${Math.max(8, r.top - h - 6)}px`;
+  btn.classList.add('on');
+  const close = (ev) => {
+    if (ev && (m.contains(ev.target) || btn.contains(ev.target))) return;
+    m.remove(); btn.classList.remove('on');
+    document.removeEventListener('mousedown', close, true); document.removeEventListener('keydown', onKey, true);
+  };
+  const onKey = (ev) => { if (ev.key === 'Escape') { ev.stopPropagation(); close(); inp.focus(); } };
+  m.addEventListener('mousedown', (ev) => ev.preventDefault());   // 不搶輸入框的焦點
+  m.addEventListener('click', (ev) => {
+    const e = ev.target.closest('[data-emo]'); if (!e) return;
+    const v = inp.value;
+    inp.value = v.slice(0, a) + e.dataset.emo + v.slice(z);
+    a = z = a + e.dataset.emo.length;
+    inp.focus(); inp.setSelectionRange(a, a);
+    inp.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  setTimeout(() => { document.addEventListener('mousedown', close, true); document.addEventListener('keydown', onKey, true); }, 0);
+}
+
 function petGrow() {
   const inp = $('#petIn');
   if (!inp) return;
@@ -7398,7 +7552,7 @@ function petAttHtml(m) {
   if (!at.length) return '';
   return `<div class="patt">${at.map((a) => a.kind === 'image' || a.preview
     ? `<img src="${a.preview || fileUrl(a.path)}" alt="" data-pet="attimg" title="${esc(a.name || '')}（點一下看大圖）">`
-    : `<span class="pdoc" data-pet="attdoc" data-path="${esc(a.path || '')}" title="${esc((a.read === false ? '這種格式牠讀不到內容 · ' : '') + '點一下打開')}">📄 ${esc(a.name || '檔案')}</span>`).join('')}</div>`;
+    : `<span class="pdoc" data-pet="attdoc" data-path="${esc(a.path || '')}" title="${esc((a.read === false ? '這種格式他讀不到內容 · ' : '') + '點一下打開')}">📄 ${esc(a.name || '檔案')}</span>`).join('')}</div>`;
 }
 $('#petAttIn').onchange = (e) => { petAddFiles(e.target.files); e.target.value = ''; };
 $('#petIn').addEventListener('paste', (e) => {
@@ -7443,7 +7597,7 @@ async function petSay(forced) {
     PET.busy = false;
     if (att.length) { PET.att = att.concat(PET.att); petPaintAtt(); }
     petPaint();
-    notify('error', '牠沒聽到', e.message);
+    notify('error', '他沒聽到', e.message);
     inp.value = text;
   } finally {
     PET.busy = false; petGrow();
@@ -7506,7 +7660,7 @@ function petRxPick(anchor, mid) {
   }, 0);
 }
 
-// 點牠的圖＝摸頭：先動一下給回饋，連點會合併成「摸了 n 下」，停手 0.7 秒後才送
+// 點他的圖＝摸頭：先動一下給回饋，連點會合併成「摸了 n 下」，停手 0.7 秒後才送
 const PET_BOOP = { n: 0, t: 0 };
 function petBoop() {
   const img = $('#petImg');
@@ -7534,7 +7688,7 @@ function petBoop() {
       PET.hist.pop();
       PET.busy = false;
       petPaint();
-      notify('error', '牠沒反應', e.message);
+      notify('error', '他沒反應', e.message);
     }
   }, 700);
 }
@@ -7551,9 +7705,9 @@ async function petSave(patch) {
 }
 
 const PET_MODES = {
-  heart: { label: '情感', desc: '不看你的對話，單純陪你聊', hint: '情感模式：牠不看你的對話，會看時間偶爾找你聊兩句。' },
-  mix: { label: '混合', desc: '看著你的對話，也會聊心情', hint: '牠會看著你開著的對話，偶爾說一兩句。' },
-  work: { label: '工作', desc: '看著你的對話，只聊工作（個性不變）', hint: '工作模式：牠看著你的對話，只聊手上的事。' },
+  heart: { label: '情感', desc: '不看你的對話，單純陪你聊', hint: '情感模式：他不看你的對話，會看時間偶爾找你聊兩句。' },
+  mix: { label: '混合', desc: '看著你的對話，也會聊心情', hint: '他會看著你開著的對話，偶爾說一兩句。' },
+  work: { label: '工作', desc: '看著你的對話，只聊工作（個性不變）', hint: '工作模式：他看著你的對話，只聊手上的事。' },
 };
 function petMode() { const k = PET.cfg && PET.cfg.mode; return PET_MODES[k] ? k : 'mix'; }
 function petMenu(anchor) {
@@ -7568,9 +7722,10 @@ function petMenu(anchor) {
   m.innerHTML = '<div class="pm-hd">模式</div>'
     + Object.entries(PET_MODES).map(([k, x]) => `<div data-pm="mode" data-v="${k}" class="pm-mode${k === cur ? ' on' : ''}">`
       + `<span class="pm-tx"><b>${x.label}</b><small>${x.desc}</small></span><span class="pm-ck">${k === cur ? ico('check') : ''}</span></div>`).join('')
-    + `<div class="pm-sep"></div><div data-pm="on" class="pm-sw"><span class="pm-tx"><b>主動說話</b><small>${on ? '會自己找你講話' : '只在你找牠時回'}</small></span><span class="sw sm${on ? ' on' : ''}"></span></div>`
+    + `<div class="pm-sep"></div><div data-pm="on" class="pm-sw"><span class="pm-tx"><b>主動說話</b><small>${on ? '會自己找你講話' : '只在你找他時回'}</small></span><span class="sw sm${on ? ' on' : ''}"></span></div>`
+    + uiPlugins().filter((p) => p.ui.pet_menu).map((p, i) => `${i ? '' : '<div class="pm-sep"></div>'}<div data-pm="page" data-v="${esc(p.ui.page)}">${esc(p.ui.pet_menu)}</div>`).join('')
     + '<div class="pm-sep"></div><div data-pm="file">編輯寵物檔</div>'
-    + '<div data-pm="reset">清空牠的記憶</div><div data-pm="set">寵物設定</div>';
+    + '<div data-pm="reset">清空他的記憶</div><div data-pm="set">寵物設定</div>';
   document.body.appendChild(m);
   m.style.left = `${Math.max(8, r.right - 236)}px`;
   m.style.top = `${r.bottom + 6}px`;
@@ -7596,12 +7751,13 @@ function petMenu(anchor) {
       return;
     }
     if (k === 'on') { petSave({ on: !on }); return; }
+    if (k === 'page') { openPage(it.dataset.v); return; }
     if (k === 'set' || k === 'file') openSettings('pet');
     if (k === 'reset') {
-      confirmBox('清掉牠記得的事？', '牠自己的對話與摘要會清空。主對話完全不受影響。', { ok: '清空', danger: true })
+      confirmBox('清掉他記得的事？', '他自己的對話與摘要會清空。主對話完全不受影響。', { ok: '清空', danger: true })
         .then((ok) => ok && api('POST', '/api/pet/reset', {}).then((d) => {
           PET.st = d.state || PET.st; PET.hist = []; PET.older = []; PET.more = false; PET.lastPetId = ''; petPaint();
-          notify('ok', '牠忘記了', '重新開始。');
+          notify('ok', '他忘記了', '重新開始。');
         }));
     }
   });
@@ -7616,14 +7772,15 @@ $('#panePet').addEventListener('click', (e) => {
   if (k === 'menu') petMenu($('#panePet .petmore') || b);
   if (k === 'boop') petBoop();
   if (k === 'att') $('#petAttIn').click();
+  if (k === 'emo') emoPick(b);
   if (k === 'attx') { PET.att.splice(+b.dataset.i, 1); petPaintAtt(); }
   // 點附件：圖片開看圖器（跟對話裡的圖一樣），文件照副檔名在預覽開或交給系統預設程式
   if (k === 'attimg') openViewer(b);
-  if (k === 'attdoc') { if (b.dataset.path) openFileLink(b.dataset.path); else toast('還在送，等牠回完再點'); }
+  if (k === 'attdoc') { if (b.dataset.path) openFileLink(b.dataset.path); else toast('還在送，等他回完再點'); }
   if (k === 'rxpick') petRxPick(b, b.dataset.mid || '');
   if (k === 'unrx') { const m = PET.hist.find((x) => x.id === b.dataset.mid); if (m) petReact(m.id, m.ureact); }
 });
-// 雙擊牠的訊息＝按 ❤️（再雙擊收回），跟 Telegram 一樣
+// 雙擊他的訊息＝按 ❤️（再雙擊收回），跟 Telegram 一樣
 $('#panePet').addEventListener('dblclick', (e) => {
   const row = e.target.closest('.pmsg.p[data-mid]');
   if (!row || !row.dataset.mid || e.target.closest('[data-pet]')) return;
@@ -7638,9 +7795,9 @@ $('#panePet').addEventListener('keydown', (e) => {
 // 數字設定都是「拉桿＋數字框」，兩邊同步；改值只存檔、只更新說明，不重畫整頁（不會跳回頂端）
 const PET_NUM = {
   every_sec: { min: 3, max: 120, step: 1, unit: '秒', desc: (v) => `每 ${v} 秒瞄一眼你開著的對話，有新回覆才叫模型，放著不花錢。情感模式不看對話，這兩項不用。` },
-  peek: { min: 300, max: 8000, step: 100, unit: 'tk', desc: (v) => `從主對話抓最近約 ${Number(v).toLocaleString()} tokens 給牠看。越多越懂你在忙什麼，也越花錢。` },
-  max_out: { min: 40, max: 800, step: 20, unit: 'tk', desc: (v) => `單次最多 ${v} tokens。平常牠只講一兩句，用不到上限；只有你問想法、牠講長的時候才會碰到。太低會被截斷。` },
-  ctx: { min: 4000, max: 200000, step: 1000, unit: 'tk', desc: (v) => `${Number(v).toLocaleString()} tokens；超過八成牠會自己整理成筆記。` },
+  peek: { min: 300, max: 8000, step: 100, unit: 'tk', desc: (v) => `從主對話抓最近約 ${Number(v).toLocaleString()} tokens 給他看。越多越懂你在忙什麼，也越花錢。` },
+  max_out: { min: 40, max: 800, step: 20, unit: 'tk', desc: (v) => `單次最多 ${v} tokens。平常他只講一兩句，用不到上限；只有你問想法、他講長的時候才會碰到。太低會被截斷。` },
+  ctx: { min: 4000, max: 200000, step: 1000, unit: 'tk', desc: (v) => `${Number(v).toLocaleString()} tokens；超過八成他會自己整理成筆記。` },
   keep: { min: 2, max: 60, step: 1, unit: '則', desc: (v) => `整理筆記時保留最近 ${v} 則原文，更早的變成筆記。` },
 };
 function petNumRow(k, title, c) {
@@ -7651,7 +7808,7 @@ function petNumRow(k, title, c) {
 }
 function petQuietDesc(c) {
   const a = Number(c.quiet_from), b = Number(c.quiet_to);
-  return a === b ? '兩個一樣＝整天都可以找你。' : `${a} 點到${b < a ? '隔天 ' : ''}${b} 點不會看時間找你；你還在用、牠看到對話有新東西，照樣會說。`;
+  return a === b ? '兩個一樣＝整天都可以找你。' : `${a} 點到${b < a ? '隔天 ' : ''}${b} 點不會看時間找你；你還在用、他看到對話有新東西，照樣會說。`;
 }
 function renderPetSec(box) {
   if (!box.innerHTML.trim()) box.innerHTML = '<div class="blank">讀取中…</div>';
@@ -7670,19 +7827,19 @@ function renderPetSec(box) {
       const es = (m.efforts || []).map((e) => String(e).toLowerCase());
       if (!es.length) return row('pet_effort', '思考強度', `${esc(m.label || '這個模型')} 不能調思考強度。`, '');
       const cur = es.includes(String(c.effort || '').toLowerCase()) ? String(c.effort).toLowerCase() : (m.default_effort || es[es.length - 1]).toLowerCase();
-      return row('pet_effort', '思考強度', `照牠目前的模型（${esc(m.label || mid)}）能選的檔位。越高越慢、越花錢，聊天用最低的就夠。`,
+      return row('pet_effort', '思考強度', `照他目前的模型（${esc(m.label || mid)}）能選的檔位。越高越慢、越花錢，聊天用最低的就夠。`,
         `<div class="seg">${es.map((e) => `<b class="${e === cur ? 'on' : ''}" data-petseg="effort" data-v="${esc(e)}">${esc(EFFORT_LABEL[e] || e)}</b>`).join('')}</div>`);
     };
     box.innerHTML = `<div class="petset">
-    <div class="card"><div class="card-hd"><b>角色</b><small>每個角色有自己的角色檔、記憶與表情圖，切換不會共用。右上角的表情是牠的招牌。</small></div>
+    <div class="card"><div class="card-hd"><b>角色</b><small>每個角色有自己的角色檔、記憶與表情圖，切換不會共用。右上角的表情是他的招牌。</small></div>
       <div class="chargrid">${(d.chars || []).map(charCard).join('')}</div>
     </div>
-    <div class="card"><div class="card-hd"><b>模式</b><small>寵物欄右上 ⋯ 也能切。你跟牠說話、摸牠，三種模式都一定會回。</small></div>
+    <div class="card"><div class="card-hd"><b>模式</b><small>寵物欄右上 ⋯ 也能切。你跟他說話、摸他，三種模式都一定會回。</small></div>
       ${row('pet_mode', '聊什麼', '情感：不看你的對話，單純陪你聊。混合：看著對話，也聊心情。工作：看著對話，只聊手上的事，個性和口頭禪照舊。', seg('mode', [['heart', '情感'], ['mix', '混合'], ['work', '工作']]))}
     </div>
-    <div class="card"><div class="card-hd"><b>自己開口</b><small>牠自己開口有兩種：看到你的對話有新東西時說一句（情感模式沒有這個），或隔一段時間自己找你。</small></div>
-      ${row('pet_on', '主動說話', '關掉：牠不會自己開口，也不看你的對話；你找牠時照樣回。', sw('on'))}
-      ${row('pet_nudge', '看時間找你', '你一陣子沒找牠，或換到早上、中午、晚上時，牠會自己傳一句，優先接你之前提過的事。每多一則你沒回，就隔更久；連續三則沒回就不再找，等你先開口。', seg('nudge', [['off', '不找'], ['rare', '很少'], ['some', '偶爾'], ['often', '常常']]))}
+    <div class="card"><div class="card-hd"><b>自己開口</b><small>他自己開口有兩種：看到你的對話有新東西時說一句（情感模式沒有這個），或隔一段時間自己找你。</small></div>
+      ${row('pet_on', '主動說話', '關掉：他不會自己開口，也不看你的對話；你找他時照樣回。', sw('on'))}
+      ${row('pet_nudge', '看時間找你', '你一陣子沒找他，或換到早上、中午、晚上時，他會自己傳一句，優先接你之前提過的事。每多一則你沒回，就隔更久；連續三則沒回就不再找，等你先開口。', seg('nudge', [['off', '不找'], ['rare', '很少'], ['some', '偶爾'], ['often', '常常']]))}
       <div class="frow" data-f="pet_quiet"><div><b>安靜時段</b><small data-petquiet>${petQuietDesc(c)}</small></div>
         <div class="fctl quiet"><label class="numbox"><input type="number" min="0" max="23" step="1" value="${c.quiet_from}" data-petq="quiet_from"><i>點</i></label><span class="to">到</span><label class="numbox"><input type="number" min="0" max="23" step="1" value="${c.quiet_to}" data-petq="quiet_to"><i>點</i></label></div></div>
       <div class="petlook${c.mode === 'heart' ? ' off' : ''}" data-petlook>
@@ -7690,25 +7847,25 @@ function renderPetSec(box) {
       ${petNumRow('peek', '每次看多少', c)}
       </div>
     </div>
-    <div class="card"><div class="card-hd"><b>互動</b><small>點寵物欄裡牠的圖＝摸摸牠，牠會回應。</small></div>
-      ${row('pet_rx', '按表情', '牠一邊說話一邊對你的訊息按表情的頻率。你只回「好」「哈哈」時，牠只按表情不說話，這種不受限。', seg('react_rate', [['off', '不按'], ['low', '偶爾'], ['high', '常常']]))}
+    <div class="card"><div class="card-hd"><b>互動</b><small>點寵物欄裡他的圖＝摸摸他，他會回應。</small></div>
+      ${row('pet_rx', '按表情', '他一邊說話一邊對你的訊息按表情的頻率。你只回「好」「哈哈」時，他只按表情不說話，這種不受限。', seg('react_rate', [['off', '不按'], ['low', '偶爾'], ['high', '常常']]))}
       ${row('pet_quick', '固定回覆', '輸入框上方固定的幾顆，用 | 分隔，最多四個。上面那顆會變的是模型猜你想回的。', `<input data-petf="quick" value="${esc((c.quick || []).join('|'))}" placeholder="怎麼了？|繼續說">`)}
-      ${row('pet_speak', '在主對話留言', '預設關＝完全唯讀：看得到你的對話但寫不進去。打開後，牠主動說的話也會以招牌表情開頭出現在主對話。', sw('speak_up'))}
+      ${row('pet_speak', '在主對話留言', '預設關＝完全唯讀：看得到你的對話但寫不進去。打開後，他主動說的話也會以招牌表情開頭出現在主對話。', sw('speak_up'))}
     </div>
-    <div class="card"><div class="card-hd"><b>模型</b><small>牠用自己的模型，跟主對話分開算錢。聊天用便宜快速的就夠，例如 DeepSeek Flash。</small></div>
+    <div class="card"><div class="card-hd"><b>模型</b><small>他用自己的模型，跟主對話分開算錢。聊天用便宜快速的就夠，例如 DeepSeek Flash。</small></div>
       <div class="frow" data-f="pet_model"><div><b>服務商 → 模型</b><small>先選服務商，再選模型。不選就自動挑一個便宜的。</small></div>
         <div class="fctl">${mpPairHtml('pet:model', c.model || '', { filter: okModel, blank: '自動挑', set: (v) => petSave({ model: v }).then((r) => { if (r && r.cfg) c.model = r.cfg.model; renderPetSec(box); }) })}</div></div>
       ${petEffortRow(c, d.model, row)}
       ${petNumRow('max_out', '一次最多講多少', c)}
     </div>
-    <div class="card"><div class="card-hd"><b>記憶</b><small>牠自己的對話紀錄與筆記，跟主對話的壓縮完全分開。</small></div>
+    <div class="card"><div class="card-hd"><b>記憶</b><small>他自己的對話紀錄與筆記，跟主對話的壓縮完全分開。</small></div>
       ${petNumRow('ctx', '記憶上限', c)}
       ${petNumRow('keep', '整理後留幾則', c)}
-      ${row('pet_reset', `現在有 <span data-petcount>${d.state.msgs}</span> 則訊息`, '清掉不影響主對話，只是牠會忘記你們聊過什麼。', '<button class="btn" data-petf="reset">清空牠的記憶</button>')}
+      ${row('pet_reset', `現在有 <span data-petcount>${d.state.msgs}</span> 則訊息`, '清掉不影響主對話，只是他會忘記你們聊過什麼。', '<button class="btn" data-petf="reset">清空他的記憶</button>')}
     </div>
-    <div class="card"><div class="card-hd"><b>角色檔</b><small>只寫「牠是誰」：檔案、喜歡、討厭、小毛病、口頭禪、語氣、示範。怎麼聊（長度、按表情、輸出格式）是共用規則，不用寫在這裡。</small></div>
+    <div class="card"><div class="card-hd"><b>角色檔</b><small>只寫「他是誰」：檔案、喜歡、討厭、小毛病、口頭禪、語氣、示範。怎麼聊（長度、按表情、輸出格式）是共用規則，不用寫在這裡。</small></div>
       <div class="petfile"><textarea id="petFile" rows="14" class="mono" spellcheck="false" placeholder="讀取中…"></textarea>
-      <div class="petfile-ft"><small>存檔後，牠下一句就用新的。</small><button class="btn primary" data-petf="saveFile">儲存角色檔</button></div></div>
+      <div class="petfile-ft"><small>存檔後，他下一句就用新的。</small><button class="btn primary" data-petf="saveFile">儲存角色檔</button></div></div>
     </div></div>`;
     api('GET', '/api/pet/file').then((f) => { const t = $('#petFile'); if (t) t.value = f.text; });
     const saveQuiet = (patch) => petSave(patch).then((r) => {
@@ -7788,10 +7945,10 @@ function renderPetSec(box) {
         saveQuiet({ [k]: on });
       } else if (k === 'saveFile') {
         api('PUT', '/api/pet/file', { text: $('#petFile').value })
-          .then(() => notify('ok', '角色檔存好了', '牠下一句就用新的。'))
+          .then(() => notify('ok', '角色檔存好了', '他下一句就用新的。'))
           .catch((err) => notify('error', '存不起來', err.message));
       } else if (k === 'reset') {
-        confirmBox('清掉牠記得的事？', '牠自己的對話與筆記會清空，主對話不受影響。', { ok: '清空', danger: true })
+        confirmBox('清掉他記得的事？', '他自己的對話與筆記會清空，主對話不受影響。', { ok: '清空', danger: true })
           .then((ok) => ok && api('POST', '/api/pet/reset', {}).then(() => {
             PET.hist = []; PET.older = []; PET.lastPetId = ''; petLoad();
             const cnt = box.querySelector('[data-petcount]');

@@ -80,7 +80,7 @@ async def _watch_bg_tasks() -> None:
             done.add(t.id)
             if t.background:
                 await broadcast({"type": "task_end", "id": t.id, "command": t.command[:160],
-                                 "exit_code": t.exit_code, "session_id": t.session_id,
+                                 "exit_code": t.exit_code, "killed": bool(t.killed), "session_id": t.session_id,
                                  "ms": int((t.ended - t.started) * 1000)})
 
 
@@ -788,7 +788,7 @@ async def pet_glance(body: dict):
 
 @app.post("/api/pet/poke")
 async def pet_poke(body: dict):
-    """使用者點了牠的圖（摸頭）；連點幾下算一次，帶次數。"""
+    """使用者點了他的圖（摸頭）；連點幾下算一次，帶次數。"""
     from . import pet
 
     n = int((body or {}).get("n") or 1)
@@ -801,7 +801,7 @@ async def pet_poke(body: dict):
 
 @app.post("/api/pet/react")
 async def pet_react(body: dict):
-    """使用者對牠的某一則按表情；同一個再按一次就收回。"""
+    """使用者對他的某一則按表情；同一個再按一次就收回。"""
     from . import pet
 
     mid = str((body or {}).get("id") or "")
@@ -1752,6 +1752,30 @@ async def model_caps_forget(model_id: str):
     REG.refresh_discovered()
     await broadcast({"type": "state_changed"})
     return {"ok": True}
+
+
+@app.post("/api/plugins/{name}/act/{action}")
+async def plugin_act(name: str, action: str, body: dict):
+    """插件前端頁面呼叫插件後端（插件用 woof.add_action 註冊）。"""
+    fn = REG.actions.get((name, action))
+    if fn is None:
+        raise HTTPException(404, f"插件 {name} 沒有「{action}」（插件沒開或載入失敗）")
+    r = await fn(body or {})
+    return r if isinstance(r, dict) else {"result": r}
+
+
+@app.get("/api/plugins/{name}/web/{path:path}")
+async def plugin_web(name: str, path: str):
+    """插件 web/ 資料夾裡的前端檔（plugin.toml 的 [ui] script、style 指到這裡）。"""
+    info = REG.plugins.get(name)
+    if not info or not info.loaded:
+        raise HTTPException(404)
+    root = (info.path / "web").resolve()
+    f = (root / path).resolve()
+    if not f.is_relative_to(root) or not f.is_file():
+        raise HTTPException(404)
+    mime = {".js": "text/javascript", ".css": "text/css"}.get(f.suffix.lower()) or mimetypes.guess_type(f.name)[0]
+    return FileResponse(f, media_type=mime or "application/octet-stream", headers={"cache-control": "no-cache"})
 
 
 @app.post("/api/plugins/{name}")

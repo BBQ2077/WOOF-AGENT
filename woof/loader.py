@@ -90,6 +90,8 @@ class PluginInfo:
             "error": self.error,
             "settings_schema": self.manifest.get("settings", {}),
             "settings": self.settings,
+            # 插件自帶的前端頁面（plugin.toml 的 [ui]）：出現在分頁列 ＋ 的選單，開成一個分頁
+            "ui": self.manifest.get("ui") if isinstance(self.manifest.get("ui"), dict) else None,
         }
 
 
@@ -99,6 +101,7 @@ class Registry:
         self.tools: dict[str, Tool] = {}
         self.providers: dict[str, Any] = {}
         self.engines: dict[str, Any] = {}
+        self.actions: dict[tuple[str, str], Any] = {}   # (插件名, 動作名) → async fn(body) -> dict
         self.plugins: dict[str, PluginInfo] = {}
         self.config: dict = load_config()
         self.config["models"] = merge_models(self.config)
@@ -137,6 +140,7 @@ class Registry:
         self.tools.clear()
         self.providers.clear()
         self.engines.clear()
+        self.actions.clear()
         self.events.hooks.clear()
         for name in list(sys.modules):
             if name.startswith("woof_plugins."):
@@ -181,6 +185,7 @@ class Registry:
         self.tools = {k: v for k, v in self.tools.items() if v.plugin != plugin}
         self.providers = {k: v for k, v in self.providers.items() if getattr(v, "_woof_plugin", None) != plugin}
         self.engines = {k: v for k, v in self.engines.items() if getattr(v, "_woof_plugin", None) != plugin}
+        self.actions = {k: v for k, v in self.actions.items() if k[0] != plugin}
         self.events.remove_plugin(plugin)
 
     # ------------------------------------------------------------ 模型
@@ -266,6 +271,10 @@ class PluginAPI:
     def add_engine(self, name: str, engine: Any) -> None:
         engine._woof_plugin = self.name
         self._reg.engines[name] = engine
+
+    def add_action(self, name: str, fn) -> None:
+        """給插件自己的前端頁面呼叫：POST /api/plugins/<插件>/act/<name>，fn 是 async (body: dict) -> dict。"""
+        self._reg.actions[(self.name, name)] = fn
 
     def on(self, hook: str, fn, order: int = 100) -> None:
         self._reg.events.on(hook, fn, self.name, order)
