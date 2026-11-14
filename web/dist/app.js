@@ -1907,6 +1907,7 @@ function resumeInfo() {
 function continueRun() {
   if (!S.sid) { notify('warn', '先開一個對話'); return; }
   if (S.running.has(S.sid)) { notify('warn', '還在執行中'); return; }
+  if (flowBusy(S.sid)) { notify('info', '方案還在跑，不用按繼續'); renderTaskBar(); return; }
   const r = resumeInfo();
   wsSend({ type: 'continue', session_id: S.sid, reason: r ? r.reason : '' });
 }

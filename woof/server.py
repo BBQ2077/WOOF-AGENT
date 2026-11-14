@@ -2708,6 +2708,10 @@ async def ws_endpoint(ws: WebSocket):
                     AUTO_RESUMED.pop(sid, None)
                     from woof.agent import tasks as _tasks
 
+                    if _tasks.is_running(sid):
+                        # 方案／目標本來就在跑（例如從還沒刷新的「繼續」列按的）：不用接，也不要報錯
+                        await ws.send_json({"type": "notice", "session_id": sid, "text": "方案還在跑，不用按繼續"})
+                        continue
                     if _tasks.resume_goal(sid, broadcast, reason):
                         # 方案做到一半被打斷：接回整個流程（做完中斷那步再往下），不是只續一回合就斷掉
                         continue
