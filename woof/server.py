@@ -2442,6 +2442,14 @@ async def touch_ask(aid: str):
     return {"ok": dl >= 0, "deadline": max(dl, 0)}
 
 
+@app.post("/api/asks/{aid}/hold")
+async def hold_ask(aid: str):
+    """使用者點了問題卡片的輸入框：停止倒數，等他慢慢想。"""
+    from woof.agent import tasks
+
+    return {"ok": tasks.hold_ask(aid)}
+
+
 @app.get("/api/sessions/{sid}/tasks")
 async def session_tasks(sid: str):
     st = (store.get_session(sid) or {}).get("engine_state") or {}

@@ -170,6 +170,16 @@ def touch_ask(aid: str) -> float:
     return a["deadline"]
 
 
+def hold_ask(aid: str) -> bool:
+    """使用者點了卡片的輸入框：這一題不再倒數，一直等到他回答或按略過。"""
+    a = ASKS.get(aid)
+    if not a or a["future"].done():
+        return False
+    a["deadline"] = 0
+    a["limit"] = 0
+    return True
+
+
 def skip_ask(session_id: str, answer: str = "（使用者直接回話，跳過這個問題）", skipped: bool = False) -> int:
     """把這個對話還在等的提問一次結掉。使用者打字送新訊息進來時用：那一則就是回答，
     不要讓回合卡在等一個沒人會點的卡片上（兩邊都等到 1800 秒逾時）。"""

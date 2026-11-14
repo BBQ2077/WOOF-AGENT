@@ -1949,7 +1949,7 @@ $('#taskBar').addEventListener('click', (e) => {
   else if (e.target.closest('[data-resume-x]')) { const r = resumeInfo(); if (r) S.resumeHide[S.sid] = r.key; renderTaskBar(); }
 });
 const ASK_SKIP = '（略過這題，你自己判斷決定）';
-// 問題卡片的倒數：時間到後端會自動略過；在卡片上打字會重新計時
+// 問題卡片的倒數：時間到後端會自動略過；點了卡片的輸入框就停止倒數
 // 生成速度：每一步的 out_tok／gen_s（woof/agent/loop.py _speed）。一次整段吐出來的（gen_s 太短）不算速度
 function stepRate(s) { return s.gen_s >= 0.3 ? s.out_tok / s.gen_s : null; }
 function spdText(steps) {
@@ -1968,7 +1968,7 @@ function spdTitle(steps) {
 function askSpan(sec) { const s = Math.max(0, Math.round(sec)); return s >= 60 ? `${Math.floor(s / 60)} 分${s % 60 ? ` ${s % 60} 秒` : '鐘'}` : `${s} 秒`; }
 function askLeft(a) {
   const s = Math.max(0, Math.ceil(a.deadline - Date.now() / 1000));
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')} 內沒回就自動略過，讓模型自己判斷（在這裡打字會重新計時）`;
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')} 內沒回就自動略過，讓模型自己判斷（點下面的輸入框就停止倒數）`;
 }
 setInterval(() => {
   for (const el of document.querySelectorAll('[data-askcd]')) {
@@ -1983,6 +1983,14 @@ function askTouch(id) {
   ASK_TOUCHED[id] = Date.now();
   a.deadline = Date.now() / 1000 + (a.timeout || 0);   // 先在畫面上重設，後端回來再對齊
   api('POST', `/api/asks/${id}/touch`).then((r) => { if (r && r.deadline && S.asks[id]) S.asks[id].deadline = r.deadline; }).catch(() => {});
+}
+// 點了輸入框＝要自己回答：這一題不再倒數（後端也不會自動略過），慢慢想、慢慢打
+function askHold(id) {
+  const a = S.asks[id]; if (!a || !a.deadline) return;
+  a.deadline = 0; a.held = true;
+  const el = document.querySelector(`[data-askcd="${CSS.escape(id)}"]`);
+  if (el) { el.textContent = '已停止倒數，慢慢想，回答或按略過才會繼續'; el.classList.remove('soon'); }
+  api('POST', `/api/asks/${id}/hold`).catch(() => {});
 }
 async function answerAsk(id, text) {
   try { await api('POST', `/api/asks/${id}`, { answer: text }); } catch (e) { notify('error', '回答送出失敗', e.message); return; }
@@ -2240,7 +2248,8 @@ function renderChat(scrollBottom) {
       + `<div class="ansrow"><input data-askin="${esc(a.id)}" placeholder="或自己輸入…">`
       + `<button class="btn primary" data-asksend="${esc(a.id)}">送出</button>`
       + `<button class="btn ghost ask-skip" data-askskip="${esc(a.id)}" title="不回答這題，讓模型自己判斷">略過</button></div>`
-      + (a.deadline ? `<div class="ask-cd" data-askcd="${esc(a.id)}">${esc(askLeft(a))}</div>` : '') + `</div>`;
+      + (a.deadline ? `<div class="ask-cd" data-askcd="${esc(a.id)}">${esc(askLeft(a))}</div>`
+        : a.held ? `<div class="ask-cd" data-askcd="${esc(a.id)}">已停止倒數，慢慢想，回答或按略過才會繼續</div>` : '') + `</div>`;
     chat.appendChild(div);
     const inp = $('[data-askin]', div);
     if (inp && S.askDraft[a.id]) inp.value = S.askDraft[a.id];
@@ -5228,7 +5237,7 @@ async function renderPermsSec(box) {
     <div class="card">
       <div class="frow" data-f="pmAllow"><div><b>指令白名單</b><small>開頭符合就直接執行，不問（例如 <code>git status</code>、<code>ls</code>）。指令裡有 &amp;&amp;、;、| 串接時不適用。一行一個。</small></div><textarea class="mono" rows="4" data-pl="allow_cmds" placeholder="git status&#10;git diff&#10;ls">${esc(st.allow_cmds.join(NL))}</textarea></div>
       <div class="frow" data-f="pmDeny"><div><b>指令黑名單</b><small>指令裡出現這些字就擋下，任何模式都一樣。一行一個。</small></div><textarea class="mono" rows="3" data-pl="deny_cmds" placeholder="git push&#10;npm publish">${esc(st.deny_cmds.join(NL))}</textarea></div>
-      <div class="frow" data-f="pmAskWait"><div><b>問你問題時等多久</b><small>模型用提問卡片問你時，這段時間沒回就自動略過，並告訴模型你可能不在，讓它自己判斷繼續（收不回來的事會留到最後再問）。在卡片上打字會重新計時。0＝一直等。</small></div><div class="fctl"><label class="cin"><input type="number" data-pat min="0" max="86400" step="30" value="${st.ask_timeout}"><span>秒</span></label></div></div>
+      <div class="frow" data-f="pmAskWait"><div><b>問你問題時等多久</b><small>模型用提問卡片問你時，這段時間沒回就自動略過，並告訴模型你可能不在，讓它自己判斷繼續（收不回來的事會留到最後再問）。點一下卡片的輸入框就停止倒數，一直等到你回答或按略過。0＝一直等。</small></div><div class="fctl"><label class="cin"><input type="number" data-pat min="0" max="86400" step="30" value="${st.ask_timeout}"><span>秒</span></label></div></div>
       <div class="frow" data-f="pmHeadless"><div><b>沒人在旁邊時</b><small>排程跑的對話碰到要先問的工具，沒有人能按允許。</small></div><div class="fctl"><div class="seg"><b data-ph="deny" class="${st.headless === 'deny' ? 'on' : ''}">擋下</b><b data-ph="approve" class="${st.headless === 'approve' ? 'on' : ''}">直接放行</b></div></div></div>
     </div>
     <div class="card" data-f="pmTry"><div class="card-hd"><b>試試看</b><small>輸入一個指令，看在各模式下會怎樣。</small></div>
@@ -6862,6 +6871,7 @@ $('#chat').addEventListener('keydown', (e) => {
   if (v) answerAsk(el.dataset.askin, v);
 });
 $('#chat').addEventListener('input', (e) => { const el = e.target.closest && e.target.closest('[data-askin]'); if (el) askTouch(el.dataset.askin); });
+for (const t of ['focusin', 'pointerdown']) $('#chat').addEventListener(t, (e) => { const el = e.target.closest && e.target.closest('[data-askin]'); if (el) askHold(el.dataset.askin); });
 
 i18nApply();   // 介面語言：開啟時套用一次，之後新出現的畫面由 MutationObserver 接手
 
