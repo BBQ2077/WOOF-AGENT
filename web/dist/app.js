@@ -1609,6 +1609,14 @@ function toolArgSummary(name, a) {
   if (name === 'tool_call' && Array.isArray(a.calls)) return '→ ' + a.calls.map((c) => (c && c.name) || '?').join('、');
   if (name === 'tool_search' && Array.isArray(a.queries)) return a.queries.join('、').slice(0, 160);
   if (name === 'tool_describe' && Array.isArray(a.names)) return a.names.join('、').slice(0, 160);
+  if (name === 'vision_analyze' && Array.isArray(a.images)) {
+    const ps = a.images.map((x) => x && (x.path || x.url) ? String(x.path || x.url).split(/[\\/]/).pop() + (x.region ? '[' + x.region + ']' : '') : '?');
+    return `${ps.length} 張：` + ps.join('、').slice(0, 160);
+  }
+  if (name === 'view_page') {
+    const n = Array.isArray(a.shots) ? a.shots.length : 1;
+    return String(a.path || a.url || '').slice(0, 140) + (n > 1 ? `（${n} 張）` : '');
+  }
   if (name === 'process') {
     const { body, dir } = splitCd(a.command || '');
     const same = !dir || !S.workdir || normPath(dir) === normPath(S.workdir);
@@ -2275,12 +2283,14 @@ function renderChat(scrollBottom) {
 // 連續同一種工具（≥3 個、都跑完了）收成一列：十幾條 terminal 各占 34px 會把對話擠掉。
 // 點開才看每一條；展開狀態記在 S.openGrp（以第一個工具 id 當 key），重畫不會自己收起來。
 function foldTools(root) {
-  let kids = [...root.children].filter((k) => k.classList && k.classList.contains('tool'));
+  // 已收好的一列也算分隔：每次重畫都會再跑一遍，不能跨過它把前後兩段併成一列（會把後面的卡搬到前面、看起來像同一回合）
+  let kids = [...root.children].filter((k) => k.classList && (k.classList.contains('tool') || k.classList.contains('toolfold')));
+  const nameOf = (k) => (k.classList.contains('toolfold') ? '' : ((k.querySelector('.th code') || {}).textContent || ''));
   let guard = 0;
   for (let i = 0; i < kids.length && guard++ < 200;) {
-    const name = (kids[i].querySelector('.th code') || {}).textContent || '';
+    const name = nameOf(kids[i]);
     let j = i;
-    while (j + 1 < kids.length && ((kids[j + 1].querySelector('.th code') || {}).textContent || '') === name) j++;
+    while (name && j + 1 < kids.length && nameOf(kids[j + 1]) === name) j++;
     const run = kids.slice(i, j + 1);
     const busy = run.some((k) => k.querySelector('.th .st .spin'));
     if (!name || run.length < 3 || busy) { i = j + 1; continue; }
@@ -2303,7 +2313,7 @@ function foldTools(root) {
       S.openGrp = S.openGrp || new Set();
       if (d.open) S.openGrp.add(key); else S.openGrp.delete(key);
     });
-    kids = [...root.children].filter((k) => k.classList && k.classList.contains('tool'));
+    kids = [...root.children].filter((k) => k.classList && (k.classList.contains('tool') || k.classList.contains('toolfold')));
     i = 0;
   }
 }

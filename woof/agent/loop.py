@@ -494,15 +494,16 @@ def plan_segments(calls: list[dict], cwd: str | None) -> list[tuple[str, list[in
         if not isinstance(args, dict) or "_raw" in args:
             close(); seq([i]); continue
         if name in _SCOPED_READERS or name in _SCOPED_WRITERS:
-            p = _call_scope(name, args, cwd)
-            if p is None:
+            subs = [x for x in args["images"] if isinstance(x, dict)] if isinstance(args.get("images"), list) else [args]
+            ps = [p for p in (_call_scope(name, x, cwd) for x in subs) if p is not None]
+            if not ps:
                 if name in _SCOPED_WRITERS or name in ("read_file",):
                     close(); seq([i]); continue
                 cur.append(i); continue   # 看網址的圖、網頁：不碰本機檔
             w = name in _SCOPED_WRITERS
-            if any((w or hw) and _overlap(p, h) for h, hw in held):
+            if any((w or hw) and _overlap(p, h) for p in ps for h, hw in held):
                 close()
-            held.append((p, w)); cur.append(i); continue
+            held.extend((p, w) for p in ps); cur.append(i); continue
         if name == "delegate_task":
             tasks = [args] + [t for t in (args.get("tasks") or []) if isinstance(t, dict)]
             if any(t.get("mode") == "write" for t in tasks):

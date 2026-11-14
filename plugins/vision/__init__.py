@@ -293,44 +293,36 @@ def _norm_shots(raw, limit: int) -> list[dict]:
 
 
 def register(woof):
-    async def vision_analyze(args: dict, ctx) -> dict:
-        raw = (args.get("path") or "").strip()
-        url = (args.get("url") or "").strip()
-        if not raw and not url:
-            return {"output": "path 或 url 要給一個", "is_error": True}
-        if raw and url:
-            return {"output": "path 與 url 只能給一個", "is_error": True}
-        max_px = max(256, int(woof.settings.get("max_px") or 1568))
+    async def _prep(item: dict, max_px: int, cwd: str | None) -> dict:
+        """讀一張圖、裁切縮小；回傳 media、data（b64）、來源與尺寸說明。錯誤拋 ValueError。"""
+        raw = str(item.get("path") or "").strip()
+        url = str(item.get("url") or "").strip()
+        if bool(raw) == bool(url):
+            raise ValueError("path 與 url 要給一個（只能一個）")
         try:
             if url:
                 if not url.lower().startswith(("http://", "https://")):
-                    return {"output": "url 只接受 http:// 或 https://", "is_error": True}
-                im = await _load_url(url)
-                src = url
+                    raise ValueError("url 只接受 http:// 或 https://")
+                im, src = await _load_url(url), url
             else:
-                path = Path(raw)
+                path = Path(raw).expanduser()
+                if not path.is_absolute():
+                    path = Path(cwd or ".") / path
                 if not path.is_file():
-                    return {"output": f"找不到圖片：{path}", "is_error": True}
+                    raise ValueError(f"找不到圖片：{path}")
                 if path.suffix.lower() not in _IMAGE_EXTS:
-                    return {"output": f"不支援的格式：{path.suffix}", "is_error": True}
-                im = Image.open(path)
-                src = str(path)
+                    raise ValueError(f"不支援的格式：{path.suffix}")
+                im, src = Image.open(path), str(path)
             im = ImageOps.exif_transpose(im)
-            region = _parse_region(args.get("region"), im.width, im.height)
+            region = _parse_region(item.get("region"), im.width, im.height)
             ow, oh = im.width, im.height
             media, data = _shrink(im, max_px, region)
             sw, sh = _shrink.last
-        except ValueError as e:
-            return {"output": str(e), "is_error": True}
+        except ValueError:
+            raise
         except Exception as e:
-            return {"output": f"無法讀取圖片：{type(e).__name__}: {e}", "is_error": True}
-        question = (args.get("question") or "描述這張圖片的內容，包含文字、版面和明顯的問題。").strip()
-
-        from woof.agent.loop import complete
-        from woof.config import DATA
-
-        turn = getattr(ctx, "turn", None)
-        note = f"（來源：{src}{'，裁切 ' + str(list(region)) if region else ''}）"
+            raise ValueError(f"無法讀取圖片：{type(e).__name__}: {e}")
+        note = f"{src}{'，裁切 ' + str(list(region)) if region else ''}"
         # 告訴模型尺寸與座標怎麼換算：不知道原圖多大、不知道裁切保留原解析度，模型就不會放大看細節
         if region:
             cw, ch = region[2] - region[0], region[3] - region[1]
@@ -341,44 +333,86 @@ def register(woof):
         else:
             size = (f"原圖 {ow}×{oh}" + ("，原尺寸給你看。" if (sw, sh) == (ow, oh)
                     else f"，縮成 {sw}×{sh} 給你看（座標乘 {ow / sw:.2f} 換回原圖）。細節看不清就用 region 裁切放大，裁切保留原解析度。"))
+        return {"media": media, "data": data, "note": note, "size": size}
 
+    async def vision_analyze(args: dict, ctx) -> dict:
+        # 一次看好幾張（images）：同一張圖的整張和放大、改前改後、大圖和縮圖，一個回合看完
+        items = args.get("images")
+        if items is not None:
+            if not isinstance(items, list) or not items or not all(isinstance(x, dict) for x in items):
+                return {"output": "images 要是物件清單：[{path 或 url, region}…]", "is_error": True}
+            if args.get("path") or args.get("url"):
+                return {"output": "images 和 path／url 只能用一種", "is_error": True}
+            limit = max(1, int(woof.settings.get("max_shots") or 6))
+            if len(items) > limit:
+                return {"output": f"一次最多 {limit} 張，這次給了 {len(items)} 張", "is_error": True}
+        else:
+            items = [{"path": args.get("path"), "url": args.get("url"), "region": args.get("region")}]
+        max_px = max(256, int(woof.settings.get("max_px") or 1568))
+        cwd = getattr(ctx, "cwd", None)
+        pics, fails = [], []
+        for k, it in enumerate(items, 1):
+            try:
+                pics.append((k, await _prep(it, max_px, cwd)))
+            except ValueError as e:
+                fails.append(f"第 {k} 張：{e}" if len(items) > 1 else str(e))
+        if not pics:
+            return {"output": "\n".join(fails), "is_error": True}
+        multi = len(items) > 1
+        info = "\n".join((f"第 {k} 張（{p['note']}）" if multi else f"（來源：{p['note']}）") + p["size"] for k, p in pics)
+        if fails:
+            info += "\n" + "\n".join(fails)
+        question = (args.get("question") or ("描述這幾張圖片的內容，包含文字、版面和明顯的問題。" if multi
+                                               else "描述這張圖片的內容，包含文字、版面和明顯的問題。")).strip()
+
+        from woof.agent.loop import complete
+        from woof.config import DATA
+
+        turn = getattr(ctx, "turn", None)
         tm = _native_model(woof, turn.model_cfg if turn is not None else None)
         if tm is not None:
             # 主模型自己能看圖：圖直接放進它的上下文，不另外叫模型轉述（少一次請求，看的人也知道前因後果）
             from woof.uploads import DIR
             DIR.mkdir(parents=True, exist_ok=True)
-            pic = DIR / f"{uuid.uuid4().hex[:12]}.png"
-            pic.write_bytes(base64.b64decode(data))
-            return {"output": f"圖片已放進你的上下文（uploads/{pic.name}）{note}。{size}直接用你自己的視覺看圖回答：{question}",
-                    "images": [{"type": "image", "path": str(pic), "media_type": media}]}
+            imgs = []
+            for _, p in pics:
+                pic = DIR / f"{uuid.uuid4().hex[:12]}.png"
+                pic.write_bytes(base64.b64decode(p["data"]))
+                imgs.append({"type": "image", "path": str(pic), "media_type": p["media"]})
+            head = f"{len(imgs)} 張圖已依序放進你的上下文。" if multi else "圖片已放進你的上下文。"
+            return {"output": f"{head}\n{info}\n直接用你自己的視覺看圖回答：{question}", "images": imgs}
         from woof.agent.loop import vision_chain
         chain = vision_chain(turn.model_cfg if turn is not None else None)
         if not chain:
             return {"output": "沒有可用的看圖模型：在「設定 → 模型用途 → 看圖」選一個能看圖的模型", "is_error": True}
         tmp = DATA / "tmp"
         tmp.mkdir(exist_ok=True)
-        shot = tmp / f"vision_{ctx.call_id}.png"
-        shot.write_bytes(base64.b64decode(data))
+        files = []
+        for k, p in pics:
+            f = tmp / f"vision_{ctx.call_id}_{k}.png"
+            f.write_bytes(base64.b64decode(p["data"]))
+            files.append((f, p["media"]))
         from woof.prompts import get as _prompt
         errs, text, model = [], None, None
         try:
             for model in chain[:3]:
                 try:
                     text = await complete(model, _prompt("vision"), [{"role": "user", "content": [
-                        {"type": "image", "path": str(shot), "media_type": media},
-                        {"type": "text", "text": question},
+                        *[{"type": "image", "path": str(f), "media_type": m} for f, m in files],
+                        {"type": "text", "text": f"{info}\n\n{question}" if multi else question},
                     ]}])
                     break
                 except Exception as e:  # 這個看圖模型不行（暫停、不收圖、限流）：換下一個
                     errs.append(f"{model.get('label') or model['id']}：{str(e)[:200]}")
                     model = None
         finally:
-            shot.unlink(missing_ok=True)
+            for f, _ in files:
+                f.unlink(missing_ok=True)
         if model is None:
             return {"output": "看圖失敗：\n" + "\n".join(errs), "is_error": True}
         who = model.get("label") or model["id"]
         tried = f"（{'；'.join(errs)}，改用 {who}）" if errs else ""
-        return {"output": f"（{who}）{note}{tried}\n{size}\n{text or '（模型沒有回覆）'}"}
+        return {"output": f"（{who}）{tried}\n{info}\n{text or '（模型沒有回覆）'}"}
 
     async def view_page(args: dict, ctx) -> dict:
         raw = (args.get("path") or "").strip()
@@ -472,15 +506,22 @@ def register(woof):
 
     woof.add_tool(
         "vision_analyze",
-        "看一張圖片。你能看圖時，圖會直接放進你的上下文，由你自己看；不能看圖時交給看圖模型轉成文字。可給本機路徑（path）或網址（url，http/https）。"
+        "看圖片。你能看圖時，圖會直接放進你的上下文，由你自己看，一次就看到全部；不能看圖時交給看圖模型轉成文字。可給本機路徑（path）或網址（url，http/https）。"
+        "要看好幾張（大圖和縮圖、改前改後、同一張的整張和幾塊放大）就用 images 一次給齊，一個回合看完，不要一張叫一次。"
         "整張圖會縮小，細節（接縫、對齊、錯位、小字）容易看漏：先看整張找可疑的地方，再用 region 裁切放大看。"
-        "互不相干的幾塊可以在同一回合各叫一次一起看。要看網頁、HTML、SVG 的畫面用 view_page（截圖和看圖一步完成）。使用者直接貼上的圖不用這個工具。",
+        "要看網頁、HTML、SVG 的畫面用 view_page（截圖和看圖一步完成）。使用者直接貼上的圖不用這個工具。",
         {"type": "object", "properties": {
             "path": {"type": "string", "description": "本機圖片檔的絕對路徑（與 url 二選一）"},
             "url": {"type": "string", "description": "圖片網址，http 或 https（與 path 二選一）"},
             "region": {"type": "array", "items": {"type": "integer"}, "minItems": 4, "maxItems": 4,
                        "description": "裁切區域 [x1, y1, x2, y2]，單位是原圖像素，左上角為 0,0；在縮小之前裁切，裁出來的部分保留原解析度。省略則看整張"},
-            "question": {"type": "string", "description": "要問的問題；空白則描述整張圖"},
+            "images": {"type": "array", "description": "一次看好幾張（與 path／url 擇一），依序放進上下文",
+                       "items": {"type": "object", "properties": {
+                           "path": {"type": "string", "description": "本機圖片檔路徑"},
+                           "url": {"type": "string", "description": "圖片網址"},
+                           "region": {"type": "array", "items": {"type": "integer"}, "minItems": 4, "maxItems": 4,
+                                      "description": "裁切區域 [x1, y1, x2, y2]，原圖像素"}}}},
+            "question": {"type": "string", "description": "要看什麼；空白則描述圖片"},
         }},
         vision_analyze,
     )
