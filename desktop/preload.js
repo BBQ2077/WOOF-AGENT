@@ -23,6 +23,7 @@ contextBridge.exposeInMainWorld('woofDesktop', {
   pathOf: (file) => { try { return webUtils.getPathForFile(file) || ''; } catch (e) { return ''; } },
   zoom: (f) => webFrame.setZoomFactor(Math.max(0.7, Math.min(1.5, Number(f) || 1))),
   notify: (title, body) => ipcRenderer.invoke('notify', title, body),
+  attention: () => ipcRenderer.invoke('attention'),
   onWinState: (fn) => ipcRenderer.on('win-state', (_e, s) => fn(s)),
   onBackendExit: (fn) => ipcRenderer.on('backend-exit', (_e, c) => fn(c)),
   appInfo: () => ipcRenderer.invoke('app-info'),

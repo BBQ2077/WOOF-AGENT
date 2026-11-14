@@ -629,7 +629,10 @@ function onEvent(ev) {
   noteAct(ev);
   if (typeof ev.busy === 'boolean' && sid) {
     const s = S.sessions.find((x) => x.id === sid);
+    const was = s && (s.busy || s.flow);
     if (s) { s.busy = ev.busy; s.flow = !!ev.flow; }
+    // 主對話整個做完（含方案流程）：視窗不在前景就閃工作列；子代理做完主對話還會接著跑，不閃
+    if (s && was && !s.busy && !s.flow && !s.parent) attention();
     // 整個對話都停了（含方案流程）：串流時補記的「執行中」一起清掉
     if (ev.busy === false && S.running.has(sid) && ev.type !== 'run_end') {
       S.running.delete(sid); delete S.live[sid]; renderSessions();
@@ -728,11 +731,13 @@ function onEvent(ev) {
     case 'approval':
       S.approvals[ev.id] = ev;
       if (sid === S.sid) renderChat();
+      attention();
       if (document.hidden && D && D.notify) D.notify('WOOF 需要你確認', `${ev.name}：${toolArgSummary(ev.name, ev.args)}`);
       if (sid !== S.sid) notify('warn', '有工具等你確認', (S.sessions.find((x) => x.id === sid) || {}).title || '');
       break;
     case 'ask':
       S.asks[ev.id] = ev;
+      attention();
       if (sid === S.sid) { S.follow = true; renderChat(); }   // 卡片在對話串尾端，捲到底才看得到
       renderTaskBar();
       if (sid !== S.sid) notify('warn', '有問題等你回答', (S.sessions.find((x) => x.id === sid) || {}).title || '');
@@ -3722,6 +3727,8 @@ const quotePath = (p) => /\s/.test(p) ? `"${p}"` : p;
 const paneOn = (id) => !$('#right').classList.contains('hide') && $('#' + id) && $('#' + id).classList.contains('on');
 
 const seenDone = new Set();
+// 閃工作列按鈕提醒你回來看（桌面版才有；視窗在前景時主程序不會閃）
+function attention() { try { if (D && D.attention) D.attention(); } catch {} }
 let tasksPrimed = false;
 function noteDone(tasks) {
   for (const task of tasks) {

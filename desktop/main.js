@@ -324,6 +324,8 @@ function createWindow() {
   win.on('close', (e) => {
     if (!quitting) { e.preventDefault(); win.hide(); }
   });
+  // 工作列閃爍（attention）：視窗一拿到焦點就停，不然按鈕會一直亮著
+  win.on('focus', () => win.flashFrame(false));
   win.on('maximize', () => win.webContents.send('win-state', 'max'));
   win.on('unmaximize', () => win.webContents.send('win-state', 'normal'));
   win.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
@@ -412,6 +414,13 @@ ipcMain.handle('profile-switch', async (_e, pid) => {
     return { ok: false, error: e.message };
   }
   return { ok: true, restart: true };
+});
+// 有提問、要確認或任務做完：視窗不在前景時閃工作列按鈕（縮到系統匣時不閃，那時靠系統通知）
+ipcMain.handle('attention', (e) => {
+  const w = BrowserWindow.fromWebContents(e.sender) || win;
+  if (!w || w.isDestroyed() || w.isFocused() || !(w.isVisible() || w.isMinimized())) return false;
+  w.flashFrame(true);
+  return true;
 });
 ipcMain.handle('notify', (_e, title, body) => {
   if (Notification.isSupported()) new Notification({ title: title || 'WOOF', body: String(body || '') }).show();
