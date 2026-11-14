@@ -21,6 +21,7 @@ def _shrink(im: Image.Image, max_px: int, region: tuple[int, int, int, int] | No
     if region:
         im = im.crop(region)
     im.thumbnail((max_px, max_px))
+    _shrink.last = im.size
     if im.mode not in ("RGB", "RGBA"):
         im = im.convert("RGB")
     buf = io.BytesIO()
@@ -94,7 +95,9 @@ def register(woof):
                 src = str(path)
             im = ImageOps.exif_transpose(im)
             region = _parse_region(args.get("region"), im.width, im.height)
+            ow, oh = im.width, im.height
             media, data = _shrink(im, max_px, region)
+            sw, sh = _shrink.last
         except ValueError as e:
             return {"output": str(e), "is_error": True}
         except Exception as e:
@@ -106,6 +109,17 @@ def register(woof):
 
         turn = getattr(ctx, "turn", None)
         note = f"（來源：{src}{'，裁切 ' + str(list(region)) if region else ''}）"
+        # 告訴模型尺寸與座標怎麼換算：不知道原圖多大、不知道裁切保留原解析度，模型就不會放大看細節
+        if region:
+            cw, ch = region[2] - region[0], region[3] - region[1]
+            size = (f"原圖 {ow}×{oh}；這是原圖 {list(region)} 這塊（{cw}×{ch}）"
+                    + (f"，以原解析度給你看" if (sw, sh) == (cw, ch) else f"，縮成 {sw}×{sh} 給你看")
+                    + ("。你看到的座標" + ("" if (sw, sh) == (cw, ch) else f"乘 {cw / sw:.2f} 再")
+                       + f"加上 ({region[0]}, {region[1]}) 就是原圖座標。"))
+        else:
+            size = (f"原圖 {ow}×{oh}" + ("，原尺寸給你看。" if (sw, sh) == (ow, oh)
+                    else f"，縮成 {sw}×{sh} 給你看（座標乘 {ow / sw:.2f} 換回原圖）。細節看不清就用 region 裁切放大，裁切保留原解析度。"))
+
         tm = _native_model(woof, turn.model_cfg if turn is not None else None)
         if tm is not None:
             # 主模型自己能看圖：圖直接放進它的上下文，不另外叫模型轉述（少一次請求，看的人也知道前因後果）
@@ -113,7 +127,7 @@ def register(woof):
             DIR.mkdir(parents=True, exist_ok=True)
             pic = DIR / f"{uuid.uuid4().hex[:12]}.png"
             pic.write_bytes(base64.b64decode(data))
-            return {"output": f"圖片已放進你的上下文（uploads/{pic.name}）{note}，直接用你自己的視覺看圖回答：{question}",
+            return {"output": f"圖片已放進你的上下文（uploads/{pic.name}）{note}。{size}直接用你自己的視覺看圖回答：{question}",
                     "images": [{"type": "image", "path": str(pic), "media_type": media}]}
         from woof.agent.loop import vision_chain
         chain = vision_chain(turn.model_cfg if turn is not None else None)
@@ -142,16 +156,18 @@ def register(woof):
             return {"output": "看圖失敗：\n" + "\n".join(errs), "is_error": True}
         who = model.get("label") or model["id"]
         tried = f"（{'；'.join(errs)}，改用 {who}）" if errs else ""
-        return {"output": f"（{who}）{note}{tried}\n{text or '（模型沒有回覆）'}"}
+        return {"output": f"（{who}）{note}{tried}\n{size}\n{text or '（模型沒有回覆）'}"}
 
     woof.add_tool(
         "vision_analyze",
-        "看一張圖片。你能看圖時，圖會直接放進你的上下文，由你自己看；不能看圖時交給看圖模型轉成文字。可給本機路徑（path）或網址（url，http/https）；region 可裁切原圖的 [x1,y1,x2,y2]。使用者直接貼上的圖不用這個工具。",
+        "看一張圖片。你能看圖時，圖會直接放進你的上下文，由你自己看；不能看圖時交給看圖模型轉成文字。可給本機路徑（path）或網址（url，http/https）。"
+        "整張圖會縮小，細節（接縫、對齊、錯位、小字）容易看漏：先看整張找可疑的地方，再用 region 裁切放大看。"
+        "互不相干的幾塊可以在同一回合各叫一次一起看。使用者直接貼上的圖不用這個工具。",
         {"type": "object", "properties": {
             "path": {"type": "string", "description": "本機圖片檔的絕對路徑（與 url 二選一）"},
             "url": {"type": "string", "description": "圖片網址，http 或 https（與 path 二選一）"},
             "region": {"type": "array", "items": {"type": "integer"}, "minItems": 4, "maxItems": 4,
-                       "description": "裁切區域 [x1, y1, x2, y2]，單位是原圖像素，左上角為 0,0；省略則看整張"},
+                       "description": "裁切區域 [x1, y1, x2, y2]，單位是原圖像素，左上角為 0,0；在縮小之前裁切，裁出來的部分保留原解析度。省略則看整張"},
             "question": {"type": "string", "description": "要問的問題；空白則描述整張圖"},
         }},
         vision_analyze,

@@ -630,6 +630,11 @@ function onEvent(ev) {
   if (typeof ev.busy === 'boolean' && sid) {
     const s = S.sessions.find((x) => x.id === sid);
     if (s) { s.busy = ev.busy; s.flow = !!ev.flow; }
+    // 整個對話都停了（含方案流程）：串流時補記的「執行中」一起清掉
+    if (ev.busy === false && S.running.has(sid) && ev.type !== 'run_end') {
+      S.running.delete(sid); delete S.live[sid]; renderSessions();
+      if (sid === S.sid) renderChat();
+    }
     if (sid === S.sid) { renderTaskBar(); renderComposer(); }
   }
   switch (ev.type) {
@@ -652,6 +657,12 @@ function onEvent(ev) {
     case 'delta': {
       const l = S.live[sid] || (S.live[sid] = { thinking: '', text: '' });
       l[ev.kind] += ev.text;
+      // 方案流程的每一步只送 flow_start、不送 run_start：沒記成執行中，畫面就沒有 #live，
+      // 每一格都會退回整串重畫（一秒好幾次，點思考框、捲動都卡）。有字在串流就是在跑
+      if (!S.running.has(sid)) {
+        S.running.add(sid); renderSessions();
+        if (sid === S.sid) { renderChat(); renderComposer(); }
+      }
       if (sid === S.sid) scheduleLive();
       break;
     }
@@ -2490,7 +2501,12 @@ function scheduleLive() {
   if (liveRaf) return;
   liveRaf = requestAnimationFrame(() => {
     liveRaf = 0;
-    const lv = $('#live'); if (!lv) return renderChat();
+    const lv = $('#live');
+    if (!lv) {   // 保險：找不到即時區塊時最多每秒整串重畫一次
+      const now = performance.now();
+      if (now - (S.liveFallbackAt || 0) > 1000) { S.liveFallbackAt = now; renderChat(); }
+      return;
+    }
     const c = $('#chat'), top = c.scrollTop;
     fillLive(lv);
     if (S.follow !== false) stickBottom(); else if (c.scrollTop !== top) c.scrollTop = top;

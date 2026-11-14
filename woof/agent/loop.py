@@ -123,13 +123,15 @@ class TurnContext:
 
 
 async def build_parts(ctx: TurnContext) -> list[dict]:
+    from woof.prompts import get as _prompt_get
     """系統提示詞拆成段落，送出與面板預覽共用。覆寫只取代「基礎提示詞」，插件片段一律保留。"""
     # 系統提示詞在對話第一次送出時固定（system_for），這裡的日期就是對話開始那天；精確時間用 current_time 工具
     now = datetime.now(TPE).strftime("%Y-%m-%d（%A，UTC%z）")
     ov = prompt_override(ctx.session)
     parts = [{"key": "base", "source": "基礎提示詞", "text": ov if ov is not None else base_prompt(),
               "overridden": ov is not None}]
-    parts.append({"key": "env", "source": "系統", "text": f"{model_identity(ctx.model_cfg)}\n對話開始日期：{now}；現在的日期與時間請用 current_time 工具查詢。\n工作目錄：{ctx.cwd}（相對路徑以這裡為準）"})
+    parts.append({"key": "env", "source": "系統", "text": f"{model_identity(ctx.model_cfg)}\n對話開始日期：{now}；現在的日期與時間請用 current_time 工具查詢。\n工作目錄：{ctx.cwd}（相對路徑以這裡為準）"
+                  + (("\n" + _bt) if (_bt := _prompt_get("batch_tools")) else "")})
     # 提示詞檔（人物檔、設定檔、使用者檔、記憶檔）是核心的，不掛在任何插件上：
     # 關掉某個插件不該讓它們跟著從系統提示消失
     from woof import promptfiles as _pf
