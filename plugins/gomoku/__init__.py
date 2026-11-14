@@ -273,10 +273,12 @@ def register(woof):
         return {"say": say, "face": _face(got.get("face"))}
 
     async def drop(body: dict) -> dict:
-        """作廢預先思考：除了 keep 那個（猜中、正在用的）以外全部取消。"""
+        """取消還在想的：有 ids 就只取消那幾個（並行思考輸掉的）；
+        沒有就作廢預先思考（s 開頭），除了 keep 那個（猜中、正在用的）。"""
         keep, n = str(body.get("keep") or ""), 0
+        ids = {str(i) for i in (body.get("ids") or [])}
         for k, t in list(SPEC.items()):
-            if k != keep and not t.done():
+            if (k in ids if ids else (k.startswith("s") and k != keep)) and not t.done():
                 t.cancel()
                 n += 1
         return {"dropped": n}
