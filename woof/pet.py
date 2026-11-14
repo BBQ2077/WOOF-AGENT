@@ -758,11 +758,27 @@ def fit_react(emoji: str, c_id: str | None = None) -> str:
 
 # ---------------------------------------------------------------- 呼叫模型
 
+# 玩遊戲時暫時換的思考強度（例如五子棋棋盤上選的）：下棋和這段時間在寵物欄的聊天都用它；
+# 遊戲結束、關掉遊戲或太久沒動靜（ttl）就回到設定裡的
+_TEMP_EFFORT = {"v": "", "until": 0.0}
+
+
+def set_temp_effort(v: str = "", ttl: float = 900) -> None:
+    from .effort import SCALE, norm as _norm
+    v = _norm(str(v or ""))
+    ok = v in SCALE or v == "off"
+    _TEMP_EFFORT.update(v=v if ok else "", until=time.time() + ttl if ok else 0.0)
+
+
+def temp_effort() -> str:
+    return _TEMP_EFFORT["v"] if _TEMP_EFFORT["v"] and time.time() < _TEMP_EFFORT["until"] else ""
+
+
 def _params(model: dict, c: dict) -> dict:
     m = dict(model)
     from .effort import resolve
     # 選的檔位模型沒有就往下找最近的一檔；舊設定的 "on"＝用模型預設
-    e = resolve(m.get("efforts"), c.get("effort") or None, m.get("default_effort"))
+    e = resolve(m.get("efforts"), temp_effort() or c.get("effort") or None, m.get("default_effort"))
     if e:
         m["effort"] = e
     else:
