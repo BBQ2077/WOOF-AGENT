@@ -5345,7 +5345,16 @@ function renderPromptsSec(box) {
 const FLOW_PROMPTS = ['plan_review', 'review', 'expand', 'plan_goal', 'plan_redo', 'review_fail'];
 function renderFlowSec(box) {
   IP.only = FLOW_PROMPTS;
-  const f = S.cfg.flow = Object.assign({ plan_rounds: 3, fix_rounds: 1, review_timeout: 300, context_chars: 1500, goal_gate: true }, S.cfg.flow || {});
+  const f = S.cfg.flow = Object.assign({ plan_rounds: 3, fix_rounds: 1, review_timeout: 300, context_chars: 1500, goal_gate: true, expand_model: '', review_model: '' }, S.cfg.flow || {});
+  const mrow = (k, n, tag, d) => {
+    const m = (S.models || []).find((x) => x.id === f[k]);
+    return `<div class="auxrow" data-f="fl:${k}"><div><b>${n}<i>${tag}</i></b><small>${d}</small><div class="now">${esc(m ? `目前：${m.label || m.id}` : '目前：跟這個對話的模型')}</div></div>`
+      + mpPairHtml('flow:' + k, f[k], { filter: (x) => auxFits('subagent', x), blank: '跟這個對話的模型', set: (v) => {
+        f[k] = v || ''; setDirty(true);
+        const now = document.querySelector(`.auxrow[data-f="fl:${k}"] .now`), mm = (S.models || []).find((x) => x.id === v);
+        if (now) now.textContent = mm ? `目前：${mm.label || mm.id}` : '目前：跟這個對話的模型';
+      } }) + '</div>';
+  };
   const num = (k, min, max, step, unit) => `<label class="cin"><input type="number" data-fl="${k}" min="${min}" max="${max}" step="${step}" value="${f[k]}"><span>${unit}</span></label>`;
   const row = (id, title, hint, ctl) => `<div class="frow" data-f="${id}"><div><b>${title}</b><small>${hint}</small></div><div class="fctl">${ctl}</div></div>`;
   const worst = f.plan_rounds + 1 + f.fix_rounds;
@@ -5356,6 +5365,11 @@ function renderFlowSec(box) {
     ${row('flCtx', '附前文最多幾字', '你在對話中接著說（例如「0分」「不夠好 多想」）時，規劃、拓展、審核會一起看到之前在做什麼：你最近說的話，加上一輪回覆的結尾。中文一個字大約一個 token。0＝不附，只看這一句。', num('context_chars', 0, 20000, 500, '字'))}
     ${row('flGoal', '/goal 也照對話選的模式走', '開著：對話選了方案模式時，/goal 先審核或拓展再做；放著讓它自己跑，打回到上限或你沒回應都照最後一版做。關掉：/goal 直接拆步驟做，做完一樣驗收。', `<span class="sw${f.goal_gate ? ' on' : ''}" data-flgoal></span>`)}
     <div class="pm-ex"><span>依目前設定，一個方案最多審核 ${f.plan_rounds} 次、驗收 ${worst - f.plan_rounds} 次；加上等待上限，不會無限來回。</span></div>
+  </div>
+  <div class="card">
+    ${mrow('expand_model', '拓展', '方案・拓展', '先替你的要求想更完整的做法，再交給審核。留空＝跟這個對話的模型。')}
+    ${mrow('review_model', '審核', '方案審核・驗收', '審方案、做完驗收，也包括「審核上一則回覆」。留空＝跟這個對話的模型；選別家的模型比較不會放過自己寫的毛病。')}
+    <div class="auxnote">只列能跑工具的 API 型模型（Claude Code CLI 不行）。對話的模型不能當子代理時，改用「模型用途 → 子代理」。</div>
   </div>
   <div class="card ip-card">
     <div class="card-hd"><b>審核與拓展的提示詞</b><small>點開可以直接改（自動儲存），改壞了按「還原預設」。跟「提示詞與記憶 → 內部提示詞」是同一份。</small></div>
@@ -5528,7 +5542,7 @@ const AUX = [
   ['fallback', '備用模型', '預設不用', '主要模型出錯（限流、額度用完、連不上，服務商自己的重試都用完）時，這一回合改用它接手。預設留空：直接停下來告訴你比換一個不熟的模型接著做安全。真的要設就挑一個你也信得過的。'],
   ['vision', '看圖', '圖片分析', 'vision_analyze 工具看本機圖片時用的模型，要選支援看圖的。'],
   ['compact', '壓縮', '上下文壓縮', '把較早的對話寫成摘要。留空＝跟這個對話的模型；建議選便宜、上下文大的模型。'],
-  ['subagent', '子代理', 'delegate_task', '子代理（含方案・拓展、審核）預設用的模型。留空＝跟這個對話的模型。需要 API 型連線（Claude Code CLI 不行）。'],
+  ['subagent', '子代理', 'delegate_task', '主模型派子代理時預設用的模型。留空＝跟這個對話的模型。方案模式的拓展、審核在「設定 → 方案模式」另外選；對話的模型不能當子代理時也用這裡的。需要 API 型連線（Claude Code CLI 不行）。'],
   ['image', '生圖', 'delegate_task image', '主模型派子代理生圖（model 填 image）時用的模型。只列生圖模型；留空＝第一個有 key 的生圖模型。'],
   ['video', '生影片', 'delegate_task video', '主模型派子代理生影片（model 填 video）時用的模型。只列影片模型；留空＝第一個有 key 的影片模型。'],
   ['review', '自動審核', '先問我', '權限要問你的動作，先交給這個模型判斷（只給工具名稱、參數、工作目錄，不給對話內容）。判定安全就直接放行並在對話裡留一行紀錄，判不出來或有疑慮才問你。危險指令一律問你。留空就不審核。建議選便宜、快的模型。'],

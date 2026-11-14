@@ -1200,6 +1200,11 @@ async def put_settings(body: dict):
             except (TypeError, ValueError):
                 fl[k] = FLOW_DEFAULTS[k]
         fl["goal_gate"] = bool(body["flow"].get("goal_gate", True))
+        ids = {m.get("id") for m in (cfg.get("models") or [])}
+        for k in ("expand_model", "review_model"):
+            v = str(body["flow"].get(k) or "")
+            if v and v in ids:
+                fl[k] = v
         cfg["flow"] = fl
     if "prompts" in body:
         from woof.prompts import MODES

@@ -24,7 +24,8 @@ PLAN_TOOLS = {"write_file", "patch", "terminal", "process"}
 ASKS: dict[str, dict] = {}
 GOAL_TASKS: dict[str, asyncio.Task] = {}
 PLAN_ROUNDS = 3  # 方案最多提幾版（模型審核打回、或使用者要求重提）；設定 [flow] plan_rounds 可改
-FLOW_DEFAULTS = {"plan_rounds": PLAN_ROUNDS, "fix_rounds": 1, "review_timeout": 300, "context_chars": 1500, "goal_gate": True}
+FLOW_DEFAULTS = {"plan_rounds": PLAN_ROUNDS, "fix_rounds": 1, "review_timeout": 300, "context_chars": 1500, "goal_gate": True,
+                 "expand_model": "", "review_model": ""}
 FLOW_LIMITS = {"plan_rounds": (1, 10), "fix_rounds": (0, 5), "review_timeout": (0, 3600), "context_chars": (0, 20000)}
 
 
@@ -32,7 +33,7 @@ def flow_settings() -> dict:
     """方案模式的上限（設定 → 方案模式，存在 config.toml [flow]）：
     plan_rounds 方案最多提幾版；fix_rounds 做完驗收後最多補幾輪；review_timeout 每次審核／拓展最多等幾秒（0＝不限）；
     context_chars 規劃／拓展／審核附上的前文最多幾字（0＝不附）；
-    goal_gate /goal 是否照對話選的方案模式走。"""
+    goal_gate /goal 是否照對話選的方案模式走；expand_model／review_model 拓展、審核用的模型（空＝跟這個對話）。"""
     from woof.config import load_config
 
     raw = (load_config().get("flow") or {})
@@ -44,7 +45,22 @@ def flow_settings() -> dict:
             pass
     if "goal_gate" in raw:
         out["goal_gate"] = bool(raw["goal_gate"])
+    for k in ("expand_model", "review_model"):
+        out[k] = str(raw.get(k) or "")
     return out
+
+
+def _sub_model(ctx, kind: str) -> str:
+    """拓展／審核用哪個模型：方案模式設定有指定（且模型還在）就用它；沒有就跟這個對話。
+    對話的模型不能當子代理（例如 Claude Code CLI）時回空字串，交給「模型用途 → 子代理」。"""
+    from woof.agent.loop import find_model
+    from woof.loader import REG
+
+    want = flow_settings().get("expand_model" if kind == "expand_request" else "review_model") or ""
+    if want and find_model(want):
+        return want
+    m = getattr(ctx, "model_cfg", None) or {}
+    return m["id"] if m.get("id") and m.get("provider") in REG.providers else ""
 
 
 async def _sub(ctx, goal: str, label: str, title: str, kind: str) -> dict | None:
@@ -52,7 +68,7 @@ async def _sub(ctx, goal: str, label: str, title: str, kind: str) -> dict | None
     from woof.agent.loop import run_subagent
 
     lim = flow_settings()["review_timeout"]
-    coro = run_subagent(ctx, goal, "", "", None, label, title_hint=title, kind=kind)
+    coro = run_subagent(ctx, goal, "", _sub_model(ctx, kind), None, label, title_hint=title, kind=kind)
     if not lim:
         return await coro
     try:

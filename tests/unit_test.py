@@ -17,7 +17,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-TMP = tempfile.mkdtemp(prefix="woof_test_")
+TMP = os.environ.get("WOOF_DATA") or tempfile.mkdtemp(prefix="woof_test_")  # 同一批先載入的測試已經設好就沿用
 os.environ["WOOF_DATA"] = TMP
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
