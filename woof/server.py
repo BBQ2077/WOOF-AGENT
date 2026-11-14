@@ -2075,6 +2075,46 @@ async def get_file(path: str):
     return FileResponse(p, media_type=mimetypes.guess_type(p.name)[0] or "application/octet-stream")
 
 
+# ---- HTML 預覽：iframe 載真正的網址，頁面裡的相對路徑（圖片、js、css）才找得到，大檔也不會被截斷
+# 網址裡放的是預覽金鑰，不是 WOOF 的 token：頁面的 js 看得到自己的網址，金鑰只能讀允許資料夾裡的檔，不能呼叫 API
+_PV: dict[str, tuple[Path, float]] = {}
+_PV_MIME = {".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css", ".json": "application/json",
+            ".svg": "image/svg+xml", ".wasm": "application/wasm", ".html": "text/html", ".htm": "text/html"}
+
+
+@app.get("/api/fs/page")
+async def page_url(path: str):
+    import secrets
+
+    p = Path(path)
+    if not p.is_file():
+        raise HTTPException(404, "檔案不存在")
+    if not _allowed(p):
+        raise HTTPException(403, "這個資料夾不在允許清單內")
+    now = time.time()
+    for k in [k for k, (_, exp) in _PV.items() if exp < now] + list(_PV)[:-63]:
+        _PV.pop(k, None)
+    key = secrets.token_urlsafe(16)
+    _PV[key] = (p.resolve().parent, now + 12 * 3600)
+    return {"url": f"/pv/{key}/" + p.resolve().as_posix()}
+
+
+@app.get("/pv/{key}/{rest:path}")
+async def page_file(key: str, rest: str):
+    root, exp = _PV.get(key, (None, 0))
+    if root is None or exp < time.time():
+        raise HTTPException(404, "預覽已過期，重新打開預覽")
+    p = Path(rest)
+    if not p.is_absolute() or not p.is_file() or not _allowed(p):
+        raise HTTPException(404, "找不到")
+    # 頁面在 sandbox 裡（來源是 null）：同資料夾內的檔放行跨來源讀取，fetch、模組 js 才能用；資料夾外的只能當圖片、樣式載入
+    hdr = {"Cache-Control": "no-store"}
+    if p.resolve().is_relative_to(root):
+        hdr["Access-Control-Allow-Origin"] = "*"
+    mime = _PV_MIME.get(p.suffix.lower()) or mimetypes.guess_type(p.name)[0] or "application/octet-stream"
+    return FileResponse(p, media_type=mime, headers=hdr)
+
+
 @app.post("/api/paste")
 async def save_paste(body: dict):
     """貼上的長文存成檔案（跟貼圖同一條生命週期：對話刪掉一起刪）。"""

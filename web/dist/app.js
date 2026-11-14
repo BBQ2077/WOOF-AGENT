@@ -4140,11 +4140,14 @@ async function openPreview(path) {
     const n = r.text.split('\n').length;
     return note + `<div class="pv-code"><pre class="pv-ln">${Array.from({ length: Math.min(n, 30000) }, (_, i) => i + 1).join('\n')}</pre><pre class="hljs"><code>${html}</code></pre></div>`;
   };
+  // HTML 用真正的網址載入：相對路徑的圖片、js、css 才找得到，大檔也是整份
+  let page = null;
+  if (ext === 'html' || ext === 'htm') { try { page = BASE + (await api('GET', `/api/fs/page?path=${encodeURIComponent(path)}`)).url; } catch {} }
   const views = ext === 'md' || ext === 'markdown' ? { render: () => note + `<div class="pv-md">${md(r.text).outerHTML}</div>`, code }
-    : ext === 'html' || ext === 'htm' ? { render: () => note + '<iframe class="pv-html" sandbox="allow-scripts"></iframe>', code } : null;
+    : ext === 'html' || ext === 'htm' ? { render: () => (page ? '' : note) + '<iframe class="pv-html" sandbox="allow-scripts"></iframe>', code } : null;
   const draw = (k) => {
     bd.innerHTML = views ? views[k]() : code();
-    const fr = $('iframe.pv-html', bd); if (fr) fr.srcdoc = r.text;
+    const fr = $('iframe.pv-html', bd); if (fr) { if (page) fr.src = page; else fr.srcdoc = r.text; }
     const tg = $('.pv-tg', bg);
     if (views) { tg.hidden = false; tg.innerHTML = `<div class="seg sm"><b data-pvv="render" class="${k === 'render' ? 'on' : ''}">預覽</b><b data-pvv="code" class="${k === 'code' ? 'on' : ''}">原始碼</b></div>`; }
   };
