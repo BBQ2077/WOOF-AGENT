@@ -1474,7 +1474,13 @@ def report_text(r: dict) -> str:
 async def _drive(ctx: TurnContext) -> None:
     AGENT_RUNS.add(ctx.session_id)
     try:
-        await run_model_loop(ctx)
+        while True:
+            await run_model_loop(ctx)
+            # 收尾那一刻才送到的插話／追加要求：還沒讀到就接著做，不讓它卡在佇列裡
+            # （這裡到 finally 拿掉 AGENT_RUNS 之間沒有 await，之後送來的會走「重新叫它做」）
+            if not peek_steer(ctx.session_id):
+                break
+            await flush_steer(ctx.session_id, ctx.emit)
     finally:
         AGENT_RUNS.discard(ctx.session_id)
         # 子代理最後一個事件送出時還在 AGENT_RUNS（busy=True），收尾補一個，前端才不會一直顯示「還在跑：審核…」
