@@ -1104,6 +1104,7 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
     每段開始前把目前在哪一段（phase）存進 goal：程式重開、停止後 resume 帶著這份紀錄接回那一段，
     已經列好的 TODO、已經拿到的意見照用，不從頭重來。
     """
+    from woof.agent import live
     from woof.agent.loop import TurnContext
     from woof.loader import REG
 
@@ -1151,6 +1152,7 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
                         await _push_todos(emit, session_id, old_todos)
                     _save(session_id, goal={"objective": raw_objective, "status": "chat", "at": time.time()})
                     return
+            live.progress(session_id)   # TODO 列好了：算進度
             phase = "approve" if gate == "human" else "opinions"
         if gate in ("model", "expand") and phase == "opinions":
             save_planning("opinions")
@@ -1195,6 +1197,7 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
                     fb.append("【使用者剛插話（在對話裡，以他說的為準）】")
                 await emit({"type": "notice", "session_id": session_id, "text": "收到插話：交給主模型照你說的調整 TODO"})
             fb_text = "\n\n".join(fb)
+            live.progress(session_id)   # 意見拿到了：算進度
             phase = "fix_todo" if fb_text else "go"
         if phase == "fix_todo" and fb_text:
             save_planning("fix_todo", fb=fb_text)

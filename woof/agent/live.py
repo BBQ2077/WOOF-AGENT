@@ -16,7 +16,7 @@ from ..config import DATA
 
 log = logging.getLogger("woof.live")
 
-MAX_RECOVER = 2
+MAX_RECOVER = 3
 SHUTTING = False          # 程式正在關閉：這時被收掉的回合、流程、子代理不算結束，紀錄留著
 _lock = threading.Lock()
 _live: dict[str, dict] = {}
