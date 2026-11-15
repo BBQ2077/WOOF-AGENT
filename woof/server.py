@@ -1984,8 +1984,6 @@ async def perm_save(body: dict):
         cur["custom"] = {k: v for k, v in (body["custom"] or {}).items() if k in perms.CATS and v in perms.DECISIONS}
     if body.get("default_mode") in perms.MODES:
         cur["default_mode"] = body["default_mode"]
-    if "danger_ask" in body:
-        cur["danger_ask"] = bool(body["danger_ask"])
     if "headless" in body:
         cur["headless"] = "approve" if body["headless"] == "approve" else "deny"
     if "ask_timeout" in body:

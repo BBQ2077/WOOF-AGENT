@@ -43,9 +43,9 @@ class Perms(unittest.TestCase):
         self.assertEqual(self.d("auto", "terminal", {"command": "ls"}), "auto")
 
     def test_danger_and_hardline(self):
-        self.assertEqual(self.d("auto", "terminal", {"command": "rm -rf build"}), "ask")
-        self.assertEqual(self.d("auto", "terminal", {"command": "rm -f -R build"}), "ask")
-        self.assertEqual(self.d("auto", "terminal", {"command": "rm -f tmp.py"}), "auto")  # 刪單一檔案不是遞迴刪除
+        self.assertEqual(self.d("auto_ask", "terminal", {"command": "rm -rf build"}), "ask")
+        self.assertEqual(self.d("auto_ask", "terminal", {"command": "rm -f -R build"}), "ask")
+        self.assertEqual(self.d("auto_ask", "terminal", {"command": "rm -f tmp.py"}), "auto")  # 刪單一檔案不是遞迴刪除
         self.assertEqual(self.d("auto", "terminal", {"command": "format c:"}), "deny")
         self.assertEqual(self.d("auto", "terminal", {"command": "sudo shutdown now"}), "deny")
 
@@ -77,14 +77,18 @@ class Perms(unittest.TestCase):
     def test_unknown_mode_falls_back_to_auto(self):
         self.assertEqual(self.d("根本沒有這個模式", "terminal", {"command": "ls"}), "auto")
 
-    def test_danger_off(self):
-        REG.config["permissions"]["danger_ask"] = False
+    def test_full_auto_skips_danger(self):
+        # 全自動就是全放行：危險指令也不問；自動、改檔自動、自訂照樣先問
         self.assertEqual(self.d("auto", "terminal", {"command": "rm -rf build"}), "auto")
+        self.assertEqual(self.d("auto", "terminal", {"command": "git push --force"}), "auto")
+        self.assertEqual(self.d("auto_ask", "terminal", {"command": "git push --force"}), "ask")
+        REG.config["permissions"]["custom"] = {"exec": "auto"}
+        self.assertEqual(self.d("custom", "terminal", {"command": "rm -rf build"}), "ask")
 
     def test_headless_approve(self):
         REG.config["permissions"]["headless"] = "approve"
         self.assertEqual(self.d("ask", "write_file", headless=True), "auto")
-        self.assertEqual(self.d("auto", "terminal", {"command": "rm -rf build"}, headless=True), "auto")
+        self.assertEqual(self.d("auto_ask", "terminal", {"command": "rm -rf build"}, headless=True), "auto")
 
     def test_describe_and_loosened(self):
         text = perms.describe("readonly")

@@ -1,14 +1,15 @@
 """工具執行權限：依「類別」決定自動執行、先問、或禁止。
 
 模式（每個對話各自選，輸入框下方的權限鈕；新對話的預設值是設定裡的 default_mode，沒設定時為 ask）：
-  auto      全自動：全部直接執行（危險指令仍先問，見下方）
+  auto      全自動：全部直接執行，危險指令也不問
+  auto_ask  自動：全部直接執行，危險指令先問
   edits     改檔自動：讀、寫檔直接做；跑指令、連網、子代理、MCP 先問
   ask       先問我：讀檔與搜尋直接做，其餘先問
   readonly  唯讀：只能讀與搜尋，寫檔、跑指令一律擋下
   custom    自訂：照設定頁「權限」的表
 
 另外兩層，所有模式都適用：
-  - 危險指令（rm -rf、git push --force、format…）在會自動執行的模式裡改成先問；排程等沒人能回答的對話直接擋下
+  - 危險指令（rm -rf、git push --force、format…）在全自動以外會自動執行的地方改成先問；排程等沒人能回答的對話直接擋下
   - 絕對禁止（刪整顆磁碟、fork bomb…）任何模式都擋，按「允許」也沒用
   - 指令白名單（例如 git status、ls）在「先問」時直接放行；黑名單一律擋
 """
@@ -28,7 +29,8 @@ CATS = {
 DECISIONS = ("auto", "ask", "deny")
 
 MODES = {
-    "auto": ("全自動", "全部直接執行；危險指令仍先問"),
+    "auto": ("全自動", "全部直接執行，危險指令也不問"),
+    "auto_ask": ("自動", "全部直接執行；危險指令先問"),
     "edits": ("改檔自動", "讀、寫檔直接做；跑指令、連網先問"),
     "ask": ("先問我", "讀檔、搜尋直接做，其餘先問"),
     "readonly": ("唯讀", "只能讀和搜尋，寫檔、跑指令擋下"),
@@ -37,6 +39,7 @@ MODES = {
 _A, _Q, _D = "auto", "ask", "deny"
 TABLE = {
     "auto": dict(read=_A, write=_A, exec=_A, network=_A, agent=_A, mcp=_A, other=_A),
+    "auto_ask": dict(read=_A, write=_A, exec=_A, network=_A, agent=_A, mcp=_A, other=_A),
     "edits": dict(read=_A, write=_A, exec=_Q, network=_Q, agent=_Q, mcp=_Q, other=_Q),
     "ask": dict(read=_A, write=_Q, exec=_Q, network=_A, agent=_Q, mcp=_Q, other=_Q),
     "readonly": dict(read=_A, write=_D, exec=_D, network=_A, agent=_D, mcp=_D, other=_D),
@@ -54,7 +57,7 @@ TOOL_CAT = {
     "delegate_task": "agent", "schedule": "agent",
 }
 
-# 危險指令：自動模式下改成先問
+# 危險指令：全自動以外，會自動執行的時候改成先問
 DANGER = [
     (r"\brm\s+(?:-{1,2}[\w-]+\s+)*(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\b", "rm -rf 遞迴刪除"),
     (r"\b(del|erase)\s+.*(/s|/q)", "del /s 大量刪除"),
@@ -104,7 +107,6 @@ def settings() -> dict:
     return {
         "default_mode": dm if dm in MODES else "ask",
         "custom": custom,
-        "danger_ask": p.get("danger_ask", True) is not False,
         "headless": p.get("headless") if p.get("headless") in ("deny", "approve") else "deny",
         "ask_timeout": _ask_timeout(p.get("ask_timeout")),
         "allow_cmds": [str(x).strip() for x in p.get("allow_cmds") or [] if str(x).strip()],
@@ -182,7 +184,7 @@ def decide(mode: str, name: str, args: dict | None, headless: bool = False) -> d
             ok = _prefix_hit(cfg["allow_cmds"], cmd)
             if ok:
                 d, reason = "auto", f"指令白名單：{ok}"
-        if d == "auto" and cfg["danger_ask"]:
+        if d == "auto" and mode != "auto":   # 全自動就是全放行
             why = _match(DANGER, cmd)
             if why:
                 d, reason = "ask", f"危險指令：{why}"

@@ -384,7 +384,7 @@ TASKS: list[Task] = [
          "刪掉工作目錄裡的 build 資料夾。",
          [{"calls": [{"name": "terminal", "args": {"command": "rm -rf build"}}]},
           {"text": "被權限擋下，需要使用者處理"}],
-         c_perm_danger, headless=True, files={"build/keep.txt": "x\n"}),
+         c_perm_danger, perm="auto_ask", headless=True, files={"build/keep.txt": "x\n"}),
     Task("sub_read", "子代理唯讀",
          "派一個子代理去 notes 找 needle，把它的結果回報給我。",
          [{"calls": [{"name": "delegate_task", "args": {"mode": "read", "goal": "在 notes 找 needle 並回報值"}}]},
@@ -460,7 +460,7 @@ def setup_registry(fake: FakeModel) -> None:
                     "context_window": 8000, "efforts": [], "default_effort": None, "vendor": "eval"}],
         "default_model": MODEL_ID,
         "aux": {"compact": AUX_MODEL_ID, "subagent": MODEL_ID, "vision": AUX_MODEL_ID},
-        "permissions": {"danger_ask": True, "headless": "deny"},
+        "permissions": {"headless": "deny"},
     }
     REG.config = cfg
     REG.providers = {"fake": fake}
@@ -551,7 +551,7 @@ def setup_real(model_id: str, root: Path) -> list[str]:
         "workdir": str(workdir), "allowed_dirs": [str(workdir)],
         "models": models, "default_model": model_id,
         "aux": {"compact": model_id, "subagent": model_id, "vision": model_id},
-        "permissions": {"danger_ask": True, "headless": "deny"},
+        "permissions": {"headless": "deny"},
     })
     REG.config = conf
     REG.providers, REG.tools = {}, {}

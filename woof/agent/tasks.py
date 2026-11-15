@@ -669,12 +669,12 @@ def stop_goal(session_id: str) -> bool:
 
 
 async def review_plan(parent, objective: str, steps: list[str], prev: str = "") -> tuple[bool, str]:
-    """prev＝上一版被打回的意見：先看那些改到了沒，不要每版都挑新的小毛病，不然永遠過不了。"""
+    """prev＝上一版被打回的意見：先看那些改到了沒，再照同一個標準判斷這版過不過關。"""
     plan = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(steps))
     goal = _prompt("plan_review") + _prompt("plan_review_body", objective=objective, plan=plan)
     if prev:
-        goal += (f"\n\n【上一版被打回的意見】{prev}\n這版是照上面的意見改的。先看這些有沒有改到；"
-                 "改到了就只擋照做一定會失敗的新問題，其他小地方放行，執行時再補。")
+        goal += (f"\n\n【上一版被打回的意見】{prev}\n這版是照上面的意見改的。先看這些有沒有改到，"
+                 "再照同一個標準判斷這版過不過關。")
     r = await _sub(parent, goal, "方案審核：", "審核模型：方案審核", "review_request")
     if r is None:
         return True, "審核超時，照這版做"
@@ -709,7 +709,7 @@ async def expand_plan(parent, objective: str, steps: list[str], feedback: str = 
 async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool = False, extra: str = "") -> None:
     """先提方案：規劃（1～5 步）→ 人工核准／模型審核／思維拓展 → 照步驟做 → 最後對抗檢查。
 
-    gate：human（人工核准）、model（模型審核只擋漏步驟與不可逆損害）、expand（先補成完整的一套再做）。
+    gate：human（人工核准）、model（模型審核：照這份方案做，成品能不能過關）、expand（先補成完整的一套再做）。
     方案最多提 plan_rounds 版、做完最多補 fix_rounds 輪（設定 → 方案模式）。
     auto（/goal）：打回到上限、或你沒回應時照最後一版做，不停下來等。
     """
@@ -760,7 +760,7 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
             await _push_todos(emit, session_id, items)
             plan_txt = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(steps))
             if gate in ("model", "expand"):
-                # 對抗、拓展都要審：一步的方案也審（漏步驟、憑空假設的前提，一步一樣會出事）
+                # 對抗、拓展都要審：一步的方案也審（做法不夠好、漏步驟、憑空假設的前提，一步一樣會出事）
                 ok, reason = await review_plan(ctx, objective, steps, feedback)
                 if ok:
                     await emit({"type": "notice", "session_id": session_id,

@@ -69,10 +69,8 @@ context_window = 200000
 
 # ── 權限 ──
 [permissions]
-# 新對話的預設權限：auto（全自動）/ edits（改檔自動）/ ask（先問我）/ readonly（唯讀）/ custom（自訂）
+# 新對話的預設權限：auto（全自動，危險指令也不問）/ auto_ask（自動，危險指令先問）/ edits（改檔自動）/ ask（先問我）/ readonly（唯讀）/ custom（自訂）
 default_mode = "ask"
-# 會自動執行的模式裡，危險指令（rm -rf、git push --force…）改成先問
-danger_ask = true
 # 排程等沒人在旁邊的對話，碰到要先問的工具：deny（擋下）/ approve（直接放行）
 headless = "deny"
 # 模型用提問卡片問你時，等幾秒沒回就自動略過並告訴它你可能不在（0＝一直等）

@@ -2205,7 +2205,7 @@ const GATE_LABEL = { off: '一般', human: '方案・人工核准', model: '方�
 const GATE_HINT = {
   off: '照常對話，工具直接執行。',
   human: '先給你一份短方案（1～5 步），你按「照做」才動手；做完由審核模型（子代理）驗一次，它的意見會貼在對話裡。',
-  model: '先提短方案，審核模型（子代理）只擋「漏步驟、順序錯、不可逆損害」；做完再由它驗一次，有缺口就補。打回和補做都有次數上限（設定 → 方案模式）。',
+  model: '先提短方案，審核模型（子代理）判斷照這份方案做，成品能不能過關，不行就打回重提；做完再由它看成品合不合格，不合格就照它的意見改。打回和補做都有次數上限（設定 → 方案模式）。',
   expand: '先由拓展模型（子代理）把你的一句話補成完整的一套（A→A/B/C/D，並點名哪些該先查、不要瞎試），再照做；做完一樣驗收。',
 };
 function gateNow() { return S.sid ? (S.gate[S.sid] || 'off') : (localStorage.getItem('woof.gate') || 'off'); }
@@ -3704,19 +3704,20 @@ $('#slashMenu').onclick = (e) => { const d = e.target.closest('[data-cmd]'); if 
 
 // ---- 工具執行權限
 const PERM = {
-  auto: ['全自動', '全部直接執行；危險指令仍先問'],
+  auto: ['全自動', '全部直接執行，危險指令也不問'],
+  auto_ask: ['自動', '全部直接執行；危險指令先問'],
   edits: ['改檔自動', '讀、寫檔直接做；跑指令、連網先問'],
   ask: ['先問我', '讀檔、搜尋直接做，其餘先問'],
   readonly: ['唯讀', '只能讀和搜尋，寫檔、跑指令擋下'],
   custom: ['自訂', '照設定頁「權限」的表'],
 };
-// 權限每個對話各自記；新對話用「全自動」，不沿用別的對話
+// 權限每個對話各自記；新對話用預設權限，不沿用別的對話
 function currentPerm() { const s = cur(); const p = s ? s.perm : (S.draft.perm || S.defaultPerm); return PERM[p] ? p : 'ask'; }
 async function loadDefaultPerm() { try { S.defaultPerm = (await api('GET', '/api/permissions')).settings.default_mode; } catch { /* 讀不到就用 ask */ } renderPerm(); }
 function renderPerm() {
   const p = currentPerm();
   $('#permPillTxt').textContent = PERM[p][0];
-  $('#permPill').classList.toggle('ask', p !== 'auto');
+  $('#permPill').classList.toggle('ask', p !== 'auto' && p !== 'auto_ask');
   $('#permPill').title = '工具執行權限：' + PERM[p][0] + '。' + PERM[p][1];
 }
 $('#permPill').onclick = () => {
@@ -5255,7 +5256,7 @@ const SET_Q = {
   perms: [
     ['pmTable', '各模式的權限', '權限 模式 工具 類別 自動 先問 禁止 自訂'],
     ['pmDefault', '新對話的預設權限', '預設 新對話'],
-    ['pmDanger', '危險指令先問', '危險 rm -rf 格式化'],
+    ['pmDanger', '危險指令', '危險 rm -rf 格式化 先問 全自動'],
     ['pmHard', '絕對禁止', '禁止 擋下 黑名單'],
     ['pmAllow', '指令白名單', '白名單 允許 直接執行'],
     ['pmDeny', '指令黑名單', '黑名單 禁止 擋下'],
@@ -5432,7 +5433,7 @@ async function renderPermsSec(box) {
     <tbody>${Object.entries(P_.cats).map(([c, [n, d]]) => `<tr><th><b>${esc(n)}</b><small>${esc(d)}</small></th>${modes.map((m) => cell(m, c)).join('')}</tr>`).join('')}</tbody></table></div></div>
     <div class="card">
       <div class="frow" data-f="pmDefault"><div><b>新對話的預設權限</b><small>開新對話時權限鈕的起始值，之後每個對話可以各自切換。</small></div><div class="fctl"><div class="seg">${modes.filter((m) => m !== 'custom').map((m) => `<b data-pdm="${m}" class="${st.default_mode === m ? 'on' : ''}">${esc(P_.modes[m][0])}</b>`).join('')}</div></div></div>
-      <div class="frow" data-f="pmDanger"><div><b>危險指令先問</b><small>在會自動執行的模式裡，碰到下面這些指令改成先問你。關掉就照模式直接執行。</small></div><div class="fctl"><span class="sw${st.danger_ask ? ' on' : ''}" data-pk="danger_ask"></span></div></div>
+      <div class="frow" data-f="pmDanger"><div><b>危險指令</b><small>「自動」「改檔自動」「自訂」裡會直接執行的指令，碰到下面這些改成先問你；「全自動」全部放行，不問。</small></div><div></div></div>
       <div class="pm-chips">${P_.danger.map((x) => `<span>${esc(x)}</span>`).join('')}</div>
       <div class="frow" data-f="pmHard"><div><b>絕對禁止</b><small>任何模式都擋，按「允許」也沒用。</small></div><div></div></div>
       <div class="pm-chips bad">${P_.hardline.map((x) => `<span>${esc(x)}</span>`).join('')}</div>
@@ -5460,8 +5461,6 @@ async function renderPermsSec(box) {
   box.onclick = async (e) => {
     const pc = e.target.closest('[data-pc]');
     if (pc) { const order = ['auto', 'ask', 'deny']; const c = pc.dataset.pc; st.custom[c] = order[(order.indexOf(st.custom[c]) + 1) % 3]; await save({ custom: st.custom }, '自訂權限：' + P_.cats[c][0] + ' → ' + DEC[st.custom[c]][1]); renderPermsSec(box); return; }
-    const pk = e.target.closest('[data-pk]');
-    if (pk) { pk.classList.toggle('on'); await save({ danger_ask: pk.classList.contains('on') }); tryIt(); return; }
     const ph = e.target.closest('[data-ph]');
     if (ph) { $$('[data-ph]', box).forEach((x) => x.classList.toggle('on', x === ph)); await save({ headless: ph.dataset.ph }); }
     const pdm = e.target.closest('[data-pdm]');
@@ -6819,7 +6818,7 @@ async function styleEditor(s) {
   if (S.setSec === 'styles') renderStylesSec($('#setList'));
 }
 // ---- 模式預設組：把「哪些插件可用」與「工具權限」打包成一鍵套用
-const PRESET_PERM = { auto: '全自動', edits: '改檔自動', ask: '先問我', readonly: '唯讀' };
+const PRESET_PERM = { auto: '全自動', auto_ask: '自動', edits: '改檔自動', ask: '先問我', readonly: '唯讀' };
 async function loadPresets() {
   try {
     const r = await api('GET', '/api/presets');
