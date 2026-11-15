@@ -334,7 +334,7 @@ def _jobj(text: str, key: str) -> dict | None:
     m = re.search(r'"pass"\s*:\s*(true|false)', s)
     if m:
         out["pass"] = m.group(1) == "true"
-    for k in ("steps", "gaps"):
+    for k in ("steps", "gaps", "ideas", "checks"):
         m = re.search(rf'"{k}"\s*:\s*\[\s*(.*?)\s*\]\s*(?:,\s*"|\}})', s, re.S)
         if m:
             body = m.group(1).strip()
@@ -354,7 +354,7 @@ def _parse_check(ans: str) -> tuple[bool, list[str], str]:
     raw = j.get("gaps") or []
     if isinstance(raw, str):
         raw = [raw]
-    gaps = [str(x).strip() for x in raw if str(x).strip()][:3]
+    gaps = [str(x).strip() for x in raw if str(x).strip()][:5]
     ok = bool(j.get("pass")) and not gaps
     return ok, ([] if ok else gaps), str(j.get("reason") or "")
 
@@ -370,8 +370,31 @@ async def review(ctx, request: str, report: str) -> tuple[bool, str]:
     return ok, "；".join(gaps) or why
 
 
+def _ref_text(ref: dict | None) -> str:
+    """拓展模型想到的方向與要先查的問題。它沒有查證，只是參考：只附給執行的模型，審核不看（免得被當成規格）。"""
+    ideas, checks = (ref or {}).get("ideas") or [], (ref or {}).get("checks") or []
+    if not ideas and not checks:
+        return ""
+    out = "\n\n【拓展的參考（拓展模型沒查證的想法，不是規格）】"
+    if ideas:
+        out += "\n可以考慮的方向：\n" + "\n".join(f"- {x}" for x in ideas)
+    if checks:
+        out += "\n動手前該查的：\n" + "\n".join(f"- {x}" for x in checks)
+    return out
+
+
+def _ref_list(raw, n: int) -> list[str]:
+    if isinstance(raw, str):
+        raw = [raw]
+    return [s for s in (_step_text(x) for x in (raw or [])) if s][:n]
+
+
+def _ref_of(g: dict) -> dict:
+    return {"ideas": _ref_list(g.get("ideas"), IDEAS_MAX), "checks": _ref_list(g.get("checks"), CHECKS_MAX)}
+
+
 async def final_check(ctx, session_id: str, objective: str, steps: list[str], emit) -> tuple[bool, list[str]]:
-    """全部跑完驗一次：目標真的做到了嗎。回（有沒有過, 缺什麼）。"""
+    """全部跑完驗一次：目標真的做到了、做得夠好嗎（對照同類做得好的樣子，不對照拓展的猜測）。回（有沒有過, 缺什麼）。"""
     plan = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(steps))
     goal = _prompt("review") + _prompt("review_body", objective=objective, plan=plan, report=_recent_report(session_id))
     r = await _sub(ctx, goal, "對抗檢查：", f"審核模型：{objective.strip()[:20]}", "review_request")
@@ -384,7 +407,7 @@ async def final_check(ctx, session_id: str, objective: str, steps: list[str], em
 
 
 async def _run_step(ctx, session_id: str, objective: str, step: str, idx: int, total: int, emit,
-                    plan: list[str] | None = None, notes: str = "") -> bool:
+                    plan: list[str] | None = None, notes: str = "", ref: dict | None = None) -> bool:
     """做一步：不再每步派子代理審核（那是八股與卡住的來源），做完就往下。
     notes＝拓展模型的提醒（哪些該先查、哪些是配套），每一步都附上，不然只在畫面上閃一下、模型根本沒看到。"""
     from woof.agent.loop import run_model_loop
@@ -392,6 +415,10 @@ async def _run_step(ctx, session_id: str, objective: str, step: str, idx: int, t
     plan_txt = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(plan or [step]))
     if notes:
         plan_txt += "\n【方案的提醒】" + notes + "\n（提醒裡點名要查的，輪到相關的步驟就先用 web_search／web_extract 真的查，不要靠猜或反覆試）"
+    if _ref_text(ref):
+        plan_txt += (_ref_text(ref) + "\n（這些是拓展模型沒查證就想到的，只供參考：真的去查網路上同類做得好的做法，"
+                     "實作中想到更好的就用更好的；做哪些、怎麼做由你判斷，以查到的和實際做出來的為準，不要照著猜的內容硬做。"
+                     "目標是把成品做好，不是做到能交差。）")
     text = _prompt("goal_step", objective=objective, n=idx + 1, total=total, step=step, plan=plan_txt)
     m = store.add_message(session_id, "user", [{"type": "text", "text": text}], meta=internal.meta("goal_step"))
     await emit({"type": "message", "session_id": session_id, "message": m})
@@ -423,17 +450,22 @@ async def _run_fix(ctx, session_id: str, gaps: list[str], emit) -> bool:
 
 
 STEPS_MAX = 8   # 拓展補成的一整套最多幾步（規劃本身只拆 1～5 步）
+IDEAS_MAX = 10  # 拓展想到的方向最多幾條
+CHECKS_MAX = 6  # 拓展點名要先查的最多幾條
+RESEARCH_STEP = ("先查證：上網查同類做得好的成品與做法（拓展列的「動手前該查的」也一起查），"
+                 "看哪些方向值得做、有沒有比拓展想的更好的做法，決定這次要做到哪些")
 
 
 def _goal_save(session_id: str, objective: str, status: str, steps: list[str] | None = None, idx: int = 0,
-               new: bool = False, notes: str | None = None) -> None:
+               new: bool = False, notes: str | None = None, ref: dict | None = None) -> None:
     """方案的步驟與做到第幾步存在 goal 裡（不放 todos：模型自己呼叫 todo 會蓋掉），程式重開後「繼續」才接得回來。
     since＝流程開始時最後一則訊息；之後你自己下了新指令，就不再接回這個方案。"""
     g = {"objective": objective, "status": status, "at": time.time()}
     if steps:
         old = _state(session_id).get("goal") or {}
         g.update(steps=steps, idx=idx, since=(None if new else old.get("since")) or _last_mid(session_id),
-                 notes=notes if notes is not None else old.get("notes") or "")
+                 notes=notes if notes is not None else old.get("notes") or "",
+                 **(ref if ref is not None else _ref_of(old)))
     _save(session_id, goal=g)
 
 
@@ -510,7 +542,7 @@ def resume_goal(session_id: str, emit, reason: str) -> bool:
         return True
     GOAL_TASKS[session_id] = _track(session_id, run_goal(session_id, g["objective"], emit, steps=list(g["steps"]),
                                                          start=int(g.get("idx") or 0), resume_reason=reason,
-                                                         notes=str(g.get("notes") or "")), emit)
+                                                         notes=str(g.get("notes") or ""), ref=_ref_of(g)), emit)
     return True
 
 
@@ -536,7 +568,7 @@ async def _resume_step(ctx, session_id: str, reason: str, emit) -> bool:
 
 
 async def run_goal(session_id: str, objective: str, emit, steps: list[str] | None = None,
-                   start: int = 0, resume_reason: str = "", notes: str = "") -> None:
+                   start: int = 0, resume_reason: str = "", notes: str = "", ref: dict | None = None) -> None:
     """目標：拆步驟（能一步就一步）→ 照做 → 全部做完只做一次對抗檢查 → 有缺口補一輪。
     start／resume_reason：程式重開或停止後「繼續」，從第 start 步接回（那一步先用接續訊息做完）。"""
     from woof.agent.loop import TurnContext
@@ -564,7 +596,7 @@ async def run_goal(session_id: str, objective: str, emit, steps: list[str] | Non
             return
         start = max(0, min(start, len(steps)))
         items = set_todos(session_id, [{"text": s, "status": "done" if i < start else "pending"} for i, s in enumerate(steps)])
-        _goal_save(session_id, objective, "running", steps, start, new=not resume_reason, notes=notes)
+        _goal_save(session_id, objective, "running", steps, start, new=not resume_reason, notes=notes, ref=_ref_of(ref or {}))
         await _push_todos(emit, session_id, items)
         if start:
             await emit({"type": "notice", "session_id": session_id,
@@ -580,7 +612,7 @@ async def run_goal(session_id: str, objective: str, emit, steps: list[str] | Non
             if i == start and resume_reason:
                 ok = await _resume_step(ctx, session_id, resume_reason, emit)
             else:
-                ok = await _run_step(ctx, session_id, objective, step, i, len(steps), emit, plan=steps, notes=notes)
+                ok = await _run_step(ctx, session_id, objective, step, i, len(steps), emit, plan=steps, notes=notes, ref=ref)
             items[i]["status"] = "done" if ok else "failed"
             if not ok:
                 failed += 1
@@ -669,7 +701,8 @@ def stop_goal(session_id: str) -> bool:
 
 
 async def review_plan(parent, objective: str, steps: list[str], prev: str = "") -> tuple[bool, str]:
-    """prev＝上一版被打回的意見：先看那些改到了沒，再照同一個標準判斷這版過不過關。"""
+    """prev＝上一版被打回的意見：先看那些改到了沒，再照同一個標準判斷這版過不過關。
+    拓展的想法不給審核看：審核看了會把沒查證的猜測要求寫進方案，又變回總規劃。"""
     plan = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(steps))
     goal = _prompt("plan_review") + _prompt("plan_review_body", objective=objective, plan=plan)
     if prev:
@@ -684,26 +717,22 @@ async def review_plan(parent, objective: str, steps: list[str], prev: str = "") 
     return bool(j.get("pass")), str(j.get("reason") or "")
 
 
-async def expand_plan(parent, objective: str, steps: list[str], feedback: str = "") -> tuple[list[str], str]:
-    """「方案・拓展」：把 A 補成 A/B/C/D 一整套，並點名哪些該先查。回（步驟, 一句話說明）。
-    feedback＝審核模型打回上一版拓展的意見，這次照著修。"""
+async def expand_plan(parent, objective: str, steps: list[str]) -> tuple[dict, str]:
+    """「方案・拓展」：拓展思路——做完整、做得好還可能包括哪些（A→A/B/C/D），動手前該先查什麼。
+    拓展模型沒有查證，回的只是參考（不改步驟、不當規格），回（{ideas, checks}, 一句話說明）。"""
     plan = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(steps))
     goal = _prompt("expand") + _prompt("expand_body", objective=objective, plan=plan)
-    if feedback:
-        goal += f"\n\n【審核模型打回上一版拓展的意見】{feedback}\n照這個意見修正，仍然只輸出 JSON。"
     r = await _sub(parent, goal, "思維拓展：", "拓展模型：思維拓展", "expand_request")
     if r is None:
-        return [], ""
-    j = _jobj(r.get("answer") or "", "steps")
-    new = [s for s in (_step_text(x) for x in ((j or {}).get("steps") or [])) if s]
-    if new:
-        if len(new) > STEPS_MAX:   # 多出來的併進最後一步，不要直接丟掉（之前排的「出預覽圖、寫說明」就這樣被截掉）
-            new = new[:STEPS_MAX - 1] + ["；".join(new[STEPS_MAX - 1:])]
-        return new, str((j or {}).get("notes") or "")[:600]
+        return {"ideas": [], "checks": []}, ""
+    j = _jobj(r.get("answer") or "", "ideas") or {}
+    ref = _ref_of(j)
+    if ref["ideas"] or ref["checks"]:
+        return ref, str(j.get("notes") or "")[:300]
     if parent is not None:
         await parent.emit({"type": "notice", "session_id": parent.session_id,
-                           "text": "拓展模型（子代理）的回覆讀不出步驟，照原本的方案做"})
-    return [], ""
+                           "text": "拓展模型（子代理）的回覆讀不出想法，照原本的方案做"})
+    return ref, ""
 
 
 async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool = False, extra: str = "") -> None:
@@ -723,23 +752,20 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
         return
     ctx = TurnContext(session, model_cfg, (session or {}).get("effort") or model_cfg.get("default_effort"), emit)
     gate_name = {"human": "人工審核", "expand": "思維拓展"}.get(gate, "模型審核")
-    feedback, steps, notes = "", None, ""
+    feedback, steps, notes, ref = "", None, "", None
     rounds = flow_settings()["plan_rounds"]
     raw_objective = objective   # 存檔用原句：「繼續」從規劃重來時會再附一次前文，不能疊兩層
     objective = _with_context(session_id, objective) + extra
 
     try:
-        approved, base, prev = False, None, None
+        approved = False
         since = _last_mid(session_id)
         for rnd in range(1, rounds + 1):
             # gate／since 存著：規劃、拓展、審核途中被打斷（程式重開、停止），「繼續」會從規劃重來，不會變成沒有審核的一般接續
             _save(session_id, goal={"objective": raw_objective, "status": "planning", "at": time.time(),
                                     "gate": gate, "auto": auto, "since": since, "extra": extra})
-            if gate != "expand" or base is None:
-                # 拓展模式只規劃一次；被打回時拿原本的步驟照審核意見重新拓展
-                base = await plan_steps(model_cfg, objective, "" if gate == "expand" else feedback)
-                base = [s for s in (_step_text(x) for x in base) if s][:5]
-            steps = base
+            base = await plan_steps(model_cfg, objective, feedback)
+            steps = [s for s in (_step_text(x) for x in base) if s][:5]
             if not steps:
                 # 打招呼、閒聊、單純問答：不拆步驟、不出方案卡、不做對抗檢查，直接當一般對話回
                 from woof.agent.loop import run_model_loop
@@ -748,14 +774,15 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
                 _save(session_id, goal={"objective": raw_objective, "status": "chat", "at": time.time()})
                 return
             if gate == "expand":
-                # 思維拓展：這個模型容易「你說 A 就只做 A」，先把它補成完整的一套，再交給審核模型看過才動手
-                # 打回時在上一版拓展上修，不從原本的步驟重來（重來會把上一輪改好的又丟掉，永遠修不完）
-                exp, notes = await expand_plan(ctx, objective, prev or base, feedback)
-                if exp:
-                    steps = prev = exp
-                if notes:
-                    await emit({"type": "notice", "session_id": session_id,
-                                "text": "拓展模型（子代理）補的：" + notes})
+                # 思維拓展：這個模型容易「你說 A 就只做 A」。拓展模型只負責拓展思路（還可能包括哪些、該先查什麼），
+                # 它沒查證，不讓它改寫成總規劃：步驟照規劃員的，前面加一步先查證，拓展的想法每步附上當參考
+                if ref is None:
+                    ref, notes = await expand_plan(ctx, objective, steps)
+                    if ref["ideas"] or ref["checks"]:
+                        await emit({"type": "notice", "session_id": session_id,
+                                    "text": f"拓展模型（子代理）想到 {len(ref['ideas'])} 個方向、{len(ref['checks'])} 個該先查的"
+                                            + (f"：{notes}" if notes else "") + "（只當參考，做的時候先查證）"})
+                steps = [RESEARCH_STEP] + steps
             items = set_todos(session_id, [{"text": s, "status": "pending"} for s in steps])
             await _push_todos(emit, session_id, items)
             plan_txt = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(steps))
@@ -770,7 +797,7 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
                     break
                 await emit({"type": "notice", "session_id": session_id,
                             "text": f"審核模型（子代理）打回第 {rnd}/{rounds} 版方案：{reason or '不完整'}"
-                                    + (("；照意見重新拓展" if gate == "expand" else "；換一版重提") if rnd < rounds else "")})
+                                    + ("；換一版重提" if rnd < rounds else "")})
                 feedback = reason or "方案不完整"
                 continue
             if len(steps) == 1:
@@ -814,7 +841,7 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
                 notes = (notes + "\n" if notes else "") + fix_note + extra
                 await emit({"type": "notice", "session_id": session_id,
                             "text": f"提了 {rounds} 版，審核（{gate_name}）都沒過；照最後這版做，最後的審核意見交給執行的模型自己判斷"})
-        await run_goal(session_id, objective, emit, steps=steps, notes=notes)
+        await run_goal(session_id, objective, emit, steps=steps, notes=notes, ref=ref)
     except asyncio.CancelledError:
         g = dict(_state(session_id).get("goal") or {})   # run_goal 已存的步驟與進度留著，「繼續」才接得回來
         # 已經在執行步驟：留 run_goal 存的（附前文的）目標；還在規劃：存原句，「繼續」會再附一次前文

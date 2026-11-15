@@ -1698,7 +1698,7 @@ class FlowLimits(unittest.TestCase):
             return ["一", "二"]
 
         async def expand(*a, **k):
-            return ["一", "二", "三"], "補了三"
+            return {"ideas": ["三"], "checks": []}, "補了三"
 
         async def ask(*a, **k):
             seen["ask"] += 1
@@ -1720,7 +1720,7 @@ class FlowLimits(unittest.TestCase):
                 mock.patch.object(tasks, "ask", ask), mock.patch.object(tasks, "run_goal", goal), \
                 mock.patch.object(tasks, "review_plan", review):
             asyncio.run(tasks.run_gated(s["id"], "做事", emit, "expand"))
-        self.assertEqual(seen, {"ask": 0, "goal": ["一", "二", "三"], "review": 1})
+        self.assertEqual(seen, {"ask": 0, "goal": [tasks.RESEARCH_STEP, "一", "二"], "review": 1})
 
     def test_goal_follows_gate(self):
         from unittest import mock
@@ -2052,12 +2052,12 @@ class GoalFlow(unittest.TestCase):
         self.assertFalse(ok)
         self.assertTrue(why)
 
-    def test_gaps_capped_at_three(self):
+    def test_gaps_capped_at_five(self):
         from woof.agent import tasks
 
-        ok, gaps, _ = tasks._parse_check('{"pass": false, "gaps": ["a", "b", "c", "d", "e"]}')
+        ok, gaps, _ = tasks._parse_check('{"pass": false, "gaps": ["a", "b", "c", "d", "e", "f", "g"]}')
         self.assertFalse(ok)
-        self.assertEqual(len(gaps), 3)
+        self.assertEqual(len(gaps), 5)
 
     def test_recent_report_includes_tool_output(self):
         from woof.agent import tasks
@@ -2635,9 +2635,9 @@ class PythonHint(unittest.TestCase):
         self.assertNotIn("os.environ[\"PATH\"]", src)
 
 class ExpandGate(unittest.TestCase):
-    """「方案・拓展」：先補成完整的一套再做，做完照樣驗收。"""
+    """「方案・拓展」：拓展思路只當參考，先查證再做，做完照樣驗收。"""
 
-    def test_expand_parses_steps(self):
+    def test_expand_parses_ideas(self):
         import asyncio
         from woof.agent import loop, tasks
 
@@ -2646,20 +2646,20 @@ class ExpandGate(unittest.TestCase):
         async def fake(parent, goal, *a, **kw):
             calls["kind"] = kw.get("kind")
             calls["goal"] = goal
-            return {"answer": '{"steps": ["算出 A 的數字", "同步 B 的公式", "跑回測驗證"], "notes": "B 的公式也要一起改"}',
+            return {"answer": '{"ideas": ["B、C 的公式可能要一起改", "回測報告附改前改後對照"], "checks": ["A 的算法在哪些地方被引用"], "notes": "B 的公式也要一起改"}',
                     "steps": 3, "session_id": "x"}
 
         real = loop.run_subagent
         loop.run_subagent = fake
         try:
-            steps, notes = asyncio.run(tasks.expand_plan(None, "改一下 A 的算法", ["改 A 的算法"]))
+            ref, notes = asyncio.run(tasks.expand_plan(None, "改一下 A 的算法", ["改 A 的算法"]))
         finally:
             loop.run_subagent = real
-        self.assertEqual(steps, ["算出 A 的數字", "同步 B 的公式", "跑回測驗證"])
+        self.assertEqual(ref, {"ideas": ["B、C 的公式可能要一起改", "回測報告附改前改後對照"], "checks": ["A 的算法在哪些地方被引用"]})
         self.assertEqual(notes, "B 的公式也要一起改")
         self.assertEqual(calls["kind"], "expand_request")
-        self.assertIn("網路", calls["goal"])          # 該查的要先查
-        self.assertIn("不要", calls["goal"])          # 不要瞎試
+        self.assertIn("沒有查證", calls["goal"])      # 拓展只是想法
+        self.assertIn("不寫規格", calls["goal"])      # 不當總規劃
 
     def test_expand_bad_json_is_safe(self):
         import asyncio
@@ -2671,15 +2671,16 @@ class ExpandGate(unittest.TestCase):
         real = loop.run_subagent
         loop.run_subagent = fake
         try:
-            steps, notes = asyncio.run(tasks.expand_plan(None, "x", ["y"]))
+            ref, notes = asyncio.run(tasks.expand_plan(None, "x", ["y"]))
         finally:
             loop.run_subagent = real
-        self.assertEqual((steps, notes), ([], ""))
+        self.assertEqual((ref, notes), ({"ideas": [], "checks": []}, ""))
 
     def test_wiring(self):
         src = open(str(ROOT / "woof/agent/tasks.py"), encoding="utf-8").read()
         self.assertIn('if gate == "expand":', src)
-        self.assertIn("await expand_plan(ctx, objective, prev or base, feedback)", src)
+        self.assertIn("ref, notes = await expand_plan(ctx, objective, steps)", src)
+        self.assertIn("steps = [RESEARCH_STEP] + steps", src)      # 拓展完先查證再做
         self.assertIn('if gate in ("model", "expand"):', src)   # 拓展完也要審核
         sv = open(str(ROOT / "woof/server.py"), encoding="utf-8").read()
         self.assertIn('("off", "human", "model", "expand")', sv)
@@ -2689,6 +2690,58 @@ class ExpandGate(unittest.TestCase):
         pr = open(str(ROOT / "woof/prompts.py"), encoding="utf-8").read()
         self.assertIn('_e("expand"', pr)
         self.assertIn('_e("expand_body"', pr)
+
+    def test_ref_is_reference_only_and_survives_resume(self):
+        """拓展的想法：只附給執行的每一步、標明只是參考，審核不看；存進進度，按「繼續」也接得回來。"""
+        import asyncio
+        from unittest import mock
+
+        from woof.agent import tasks
+
+        ref = {"ideas": ["列表空的時候顯示提示", "深色模式"], "checks": ["同類 App 首頁放了什麼"]}
+        goals = []
+
+        async def sub(ctx, goal, *a, **k):
+            goals.append(goal)
+            return {"answer": '{"pass": true, "gaps": [], "reason": ""}'}
+
+        with mock.patch.object(tasks, "_sub", sub), mock.patch.object(tasks, "_recent_report", return_value="r"):
+            asyncio.run(tasks.review_plan(None, "做清單頁", ["做頁面"]))
+            asyncio.run(tasks.final_check(None, "s", "做清單頁", ["做頁面"], None))
+        for g in goals:                                   # 審核不看拓展，免得把猜測當規格
+            self.assertNotIn("拓展的參考", g)
+        t = tasks._ref_text(ref)                           # 只附給執行的模型，標明不是規格
+        self.assertIn("不是規格", t)
+        self.assertIn("深色模式", t)
+        self.assertIn("同類 App 首頁放了什麼", t)
+        self.assertEqual(tasks._ref_text(None), "")
+        src = open(str(ROOT / "woof/agent/tasks.py"), encoding="utf-8").read()
+        self.assertIn("plan_txt += (_ref_text(ref)", src)
+        s = store.create_session("m", None, "ref")
+        tasks._goal_save(s["id"], "做清單頁", "running", ["查證", "做頁面"], 1, new=True, notes="n", ref=ref)
+        tasks._goal_save(s["id"], "做清單頁", "running", ["查證", "做頁面"], 2)   # 進度往下，參考留著
+        g = tasks._state(s["id"])["goal"]
+        self.assertEqual((g["ideas"], g["checks"]), (ref["ideas"], ref["checks"]))
+        seen = {}
+
+        async def goal(sid, obj, emit, **k):
+            seen.update(k)
+
+        async def emit(ev):
+            pass
+
+        async def go():
+            with mock.patch.object(tasks, "run_goal", goal):
+                self.assertTrue(tasks.resume_goal(s["id"], emit, "重開"))
+                await asyncio.sleep(0.05)
+
+        asyncio.run(go())
+        self.assertEqual(seen.get("ref"), ref)
+        self.assertEqual(tasks._ref_list([{"text": "a"}, "", "b"], 5), ["a", "b"])
+        self.assertIn("做得好", tasks._prompt("review"))
+        self.assertIn("ideas", tasks._prompt("expand"))
+        self.assertIn("查", tasks.RESEARCH_STEP)
+
 
 class SubagentAlwaysReports(unittest.TestCase):
     """子代理中斷／被停掉也要回報，否則主對話會一直等一個不會來的結論。"""

@@ -2159,26 +2159,22 @@ function spdText(steps) {
   steps = steps || []; if (!steps.length) return '';
   const ok = steps.filter((s) => stepRate(s) != null);
   const tok = ok.reduce((a, s) => a + s.out_tok, 0), sec = ok.reduce((a, s) => a + s.gen_s, 0);
-  // 填充：送出到第一個字（模型讀完上下文、開始吐字前）。速度＝上下文 token／等待秒數，多步取總平均；
-  // 括號裡是最後一步的上下文長度和每步等待加總。舊訊息沒記上下文 token，只顯示秒數
+  // 填充：送出到第一個字（模型讀完上下文、開始吐字前）。寫上下文多少 token（最後一步）＋每步等待加總的秒數；
+  // 舊訊息沒記上下文 token，只寫秒數
   const fill = steps.reduce((a, s) => a + (s.ttft_s || 0), 0);
-  const known = steps.filter((s) => s.in_tok && s.ttft_s > 0);
-  let fillTxt = `填充 ${secTxt(fill)}`;
-  if (known.length === steps.length) {
-    const inSum = known.reduce((a, s) => a + s.in_tok, 0), tSum = known.reduce((a, s) => a + s.ttft_s, 0);
-    fillTxt = `填充 ${kTok(inSum / tSum)} tok/s（${kTok(steps[steps.length - 1].in_tok)} tok，${secTxt(fill)}）`;
-  }
+  const lastIn = steps[steps.length - 1].in_tok;
+  const fillTxt = `填充 ${lastIn ? kTok(lastIn) + ' tok，' : ''}${secTxt(fill)}`;
   const rt = steps.reduce((a, s) => a + (s.retries || []).length, 0);
   return [ok.length ? `生成 ${Math.round(tok / sec)} tok/s` : '', fillTxt, rt ? `重試 ${rt} 次` : ''].filter(Boolean).join(' · ');
 }
 function spdTitle(steps) {
   if (!(steps || []).length) return '';
   const rows = steps.map((s, i) => `第 ${i + 1} 步：生成 ${stepRate(s) != null ? Math.round(stepRate(s)) + ' tok/s' : '一次回完'}，${s.tok_est ? '約 ' : ''}${s.out_tok} tokens，${s.gen_s} 秒；`
-    + (s.in_tok ? `填充 ${s.ttft_s > 0 ? kTok(s.in_tok / s.ttft_s) + ' tok/s，' : ''}上下文 ${s.in_tok} tokens${s.cache_tok ? `（快取 ${s.cache_tok}）` : ''}，` : '填充 ')
+    + (s.in_tok ? `填充上下文 ${s.in_tok} tokens${s.cache_tok ? `（快取 ${s.cache_tok}）` : ''}，` : '填充 ')
     + `等第一個字 ${s.ttft_s} 秒`
     + ((s.retries || []).length ? `；先重試 ${s.retries.length} 次（${s.retries.map((r) => r.reason).join('；')}）` : ''));
-  const head = '生成＝吐字速度（只算生成時間）；填充＝讀上下文的速度（上下文 token／送出到第一個字的時間，含網路與排隊）'
-    + (steps.length > 1 ? '。多步時速度是整則平均，填充的 token 數是最後一步的上下文、秒數是每步加總' : '');
+  const head = '生成＝吐字速度（只算生成時間）；填充＝上下文多少 token、送出到第一個字花了幾秒（含網路與排隊）'
+    + (steps.length > 1 ? '。多步時生成速度是整則平均，填充的 token 數是最後一步的上下文、秒數是每步加總' : '');
   return ` title="${esc(head + '\n' + rows.join('\n'))}"`;
 }
 function askSpan(sec) { const s = Math.max(0, Math.round(sec)); return s >= 60 ? `${Math.floor(s / 60)} 分${s % 60 ? ` ${s % 60} 秒` : '鐘'}` : `${s} 秒`; }
@@ -2257,8 +2253,8 @@ const GATE_LABEL = { off: '一般', human: '方案・人工核准', model: '方�
 const GATE_HINT = {
   off: '照常對話，工具直接執行。',
   human: '先給你一份短方案（1～5 步），你按「照做」才動手；做完由審核模型（子代理）驗一次，它的意見會貼在對話裡。',
-  model: '先提短方案，審核模型（子代理）判斷照這份方案做，成品能不能過關，不行就打回重提；做完再由它看成品合不合格，不合格就照它的意見改。打回和補做都有次數上限（設定 → 方案模式）。',
-  expand: '先由拓展模型（子代理）把你的一句話補成完整的一套（A→A/B/C/D，並點名哪些該先查、不要瞎試），再照做；做完一樣驗收。',
+  model: '先提短方案，審核模型（子代理）判斷照這份方案做出來的成品夠不夠好（不只是有沒有做），不行就打回重提；做完再由它實際檢查成品，功能、外觀、細節不合格就照它的意見改。打回和補做都有次數上限（設定 → 方案模式）。',
+  expand: '先由拓展模型（子代理）拓展思路：做完整、做得好還可能包括哪些（A→A/B/C/D），功能、外觀、細節有哪些方向，該先查什麼。這些只當參考：照做時第一步先上網查證，有更好的做法就用更好的；做完由審核模型驗收。',
 };
 function gateNow() { return S.sid ? (S.gate[S.sid] || 'off') : (localStorage.getItem('woof.gate') || 'off'); }
 function renderModePill() {
