@@ -1232,7 +1232,9 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
                 steps = await _model_todo(ctx, session_id, said, emit, feedback=fb) or steps
         if not steps:
             steps = [t["text"] for t in _state(session_id).get("todos") or []]   # 都做完了：直接進驗收
-        await run_goal(session_id, objective, emit, steps=steps, notes=notes, ref=ref, keep_todos=True)
+        # 照 TODO 做時只帶目標與前文；「繼續」當下的進度摘要只給列 TODO 用，不跟著每一步送（過時了會誤導主模型）
+        await run_goal(session_id, _with_context(session_id, raw_objective), emit, steps=steps, notes=notes, ref=ref,
+                       keep_todos=True)
     except asyncio.CancelledError:
         g = dict(_state(session_id).get("goal") or {})   # 已存的段落、步驟與進度留著，接回時從這裡接
         if g.get("steps"):
