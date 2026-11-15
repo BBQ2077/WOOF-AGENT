@@ -1653,7 +1653,9 @@ async def run_subagent_bg(parent: TurnContext, goal: str, context: str = "", mod
             err, status = f"{type(e).__name__}: {e}", "error"
         finally:
             try:
-                await asyncio.shield(parent.emit({"type": "run_end", "session_id": ctx.session_id, "status": status}))
+                # 這時背景任務本身還沒結束（要送回報），不能讓「還在跑」的判斷算到它：明講已經跑完
+                await asyncio.shield(parent.emit({"type": "run_end", "session_id": ctx.session_id, "status": status,
+                                                  "busy": False, "flow": False}))
             except Exception:
                 pass
             # 不管成功、出錯、被停掉，都要讓主對話聽到結果（不然它會一直等一個不會來的回報）。
