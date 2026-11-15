@@ -2827,17 +2827,26 @@ class SubagentProgress(unittest.TestCase):
         self.assertIn("正在跑回測", r["output"])
         self.assertEqual((got["sid"], got["text"]), ("childA", "進度怎樣？"))
 
-    def test_resume_mentions_dead_subagents(self):
+    def test_resume_lists_live_subagents(self):
+        """接回時告訴主模型哪些子代理還在跑（重開後自動接回的），叫它別重派；不再叫它重派。"""
         from woof import store
-        from woof.agent import tasks
+        from woof.agent import tasks, loop
 
-        con = store._conn()
-        row = con.execute("SELECT parent FROM sessions WHERE parent IS NOT NULL AND parent != '' LIMIT 1").fetchone()
-        if not row:
-            self.skipTest("沒有子代理對話")
-        txt = tasks.resume_digest(row[0])
-        self.assertIn("子代理", txt)
-        self.assertIn("不會再回報", txt)
+        s = store.create_session(None, None, "resume_kids")
+        k = store.create_session(None, None, "子代理：讀第一窗")
+
+        class T:
+            def done(self):
+                return False
+        loop.BG_BY_SID[k["id"]], loop.BG_PARENT[k["id"]] = T(), s["id"]
+        try:
+            txt = tasks.resume_digest(s["id"])
+        finally:
+            loop.BG_BY_SID.pop(k["id"]), loop.BG_PARENT.pop(k["id"])
+            store.delete_session(k["id"]), store.delete_session(s["id"])
+        self.assertIn(k["id"], txt)
+        self.assertIn("不要重派", txt)
+        self.assertNotIn("不會再回報", txt)
 
 
 class AppVersion(unittest.TestCase):
@@ -3000,7 +3009,7 @@ class SteerDuringFlow(unittest.TestCase):
         t.STAGE[self.sid] = "wait_bg"
         self.assertIn("馬上交給模型", t.steer_note(self.sid))
         t.STAGE[self.sid] = "check"
-        self.assertIn("先停下驗收", t.steer_note(self.sid))
+        self.assertIn("驗收照樣跑", t.steer_note(self.sid))
         t.STAGE.pop(self.sid, None)
 
     def test_flush_before_step(self):
@@ -3370,32 +3379,24 @@ class SubagentWriteMode(unittest.TestCase):
         self.assertNotIn("全部工具", src)
         self.assertIn("一定要 mode=write", src)
 
-    def test_scope_lock(self):
+    def test_same_file_writes_one_at_a_time(self):
+        """範圍重疊的寫入子代理同時跑；只有同一個檔才一次寫一個。"""
         import asyncio
-        from pathlib import Path
-        m = self._mod()
-        base = Path("C:/lib").resolve()
-        log, waits = [], []
+        from woof.agent import loop
+        log = []
 
-        async def job(name, scope, dur):
-            async def w():
-                waits.append(name)
-            async with m._ScopeLock(scope, w):
+        async def w(name, path, dur):
+            async with loop._path_lock(path, "C:/lib"):
                 log.append(("in", name, time.monotonic()))
                 await asyncio.sleep(dur)
                 log.append(("out", name, time.monotonic()))
 
         async def main():
-            await asyncio.gather(job("a", [base / "early"], 0.3), job("b", [base / "late"], 0.3),
-                                 job("c", [base], 0.1), job("d", [base / "early" / "x"], 0.1))
+            await asyncio.gather(w("a", "x/a.md", 0.3), w("b", "x/b.md", 0.3), w("c", "x/a.md", 0.1))
         asyncio.run(main())
         t = {(k, n): v for k, n, v in log}
-        self.assertLess(abs(t[("in", "a")] - t[("in", "b")]), 0.1)        # 不重疊：同時跑
-        self.assertGreaterEqual(t[("in", "c")], t[("out", "a")] - 0.01)  # 上層資料夾：等裡面的寫完
-        self.assertGreaterEqual(t[("in", "c")], t[("out", "b")] - 0.01)
-        self.assertIn("c", waits)
-        self.assertNotIn("a", waits)
-        self.assertNotIn("b", waits)
+        self.assertLess(abs(t[("in", "a")] - t[("in", "b")]), 0.1)        # 不同檔：同時寫
+        self.assertGreaterEqual(t[("in", "c")], t[("out", "a")] - 0.01)  # 同一個檔：等前一個寫完
 
 
 class ResumeAfterSteer(unittest.TestCase):
@@ -3612,7 +3613,7 @@ class SteerDuringPlanning(unittest.TestCase):
             restore()
 
     def test_steer_during_check(self):
-        """驗收途中插話：馬上停下驗收，插話交給模型處理，處理完再驗收。"""
+        """驗收途中插話：驗收照跑（審核子代理不收掉），插話馬上交給主模型；處理過插話就再驗一次。"""
         import asyncio, time as _time
         from woof.agent import tasks, loop
 
@@ -3623,7 +3624,8 @@ class SteerDuringPlanning(unittest.TestCase):
             calls.append(1)
             if len(calls) == 1:
                 loop.push_steer(sid, [{"type": "text", "text": "計畫？"}], {"steer": True})
-                await asyncio.sleep(30)
+                await asyncio.sleep(1.5)
+                calls.append("finished")   # 驗收沒被收掉，自己跑完
             return True, []
 
         sid, log, restore = self._goal_env(check)
@@ -3635,6 +3637,7 @@ class SteerDuringPlanning(unittest.TestCase):
             asyncio.run(tasks.run_goal(sid, "做卡片", emit, steps=["寫卡"]))
             self.assertLess(_time.monotonic() - t0, 6)
             self.assertEqual([k for k, _ in log], ["model", "check", "model", "check"])
+            self.assertIn("finished", calls)
             self.assertIn("計畫", log[2][1])
             self.assertTrue(any((m.get("meta") or {}).get("steer") for m in store.get_messages(sid)))
         finally:
@@ -3681,7 +3684,9 @@ class SteerDuringPlanning(unittest.TestCase):
             await asyncio.sleep(0.8)
             return 7
         try:
-            self.assertEqual(asyncio.run(tasks._or_steer("x_int", work())), 7)
+            async def never():
+                raise AssertionError("內部通知不算插話")
+            self.assertEqual(asyncio.run(tasks._keep_steer("x_int", work(), never)), (7, False))
         finally:
             loop.pop_steer("x_int")
 

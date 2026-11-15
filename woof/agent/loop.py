@@ -461,6 +461,15 @@ PARALLEL_SAFE = {"read_file", "search_files", "list_tree", "vision_analyze", "vi
                  "web_search", "web_extract", "image_generate", "video_generate", "delegate_task"}
 _SCOPED_READERS = {"read_file", "search_files", "list_tree", "vision_analyze", "view_page"}
 _SCOPED_WRITERS = {"write_file", "patch"}
+_PATH_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _path_lock(path: str, cwd: str) -> asyncio.Lock:
+    p = os.path.normcase(os.path.abspath(os.path.join(cwd or ".", os.path.expanduser(path))))
+    if len(_PATH_LOCKS) > 500:
+        for k in [k for k, v in _PATH_LOCKS.items() if not v.locked()][:250]:
+            _PATH_LOCKS.pop(k, None)
+    return _PATH_LOCKS.setdefault(p, asyncio.Lock())
 
 
 def _call_scope(name: str, args: dict, cwd: str | None) -> Path | None:
@@ -652,7 +661,12 @@ async def _run_tool(call: dict, ctx: TurnContext) -> dict:
             args = await REG.events.pipe("before_tool", args, name, ctx)
             tctx = ToolContext(ctx.session_id, ctx.cwd, ctx.emit, cid)
             tctx.turn = ctx
-            result = await tool.handler(args, tctx)
+            if name in _SCOPED_WRITERS and isinstance(args, dict) and args.get("path"):
+                # 好幾個子代理同時寫同一個檔：一次寫一個，不會互蓋（不同檔照樣同時寫）
+                async with _path_lock(str(args["path"]), ctx.cwd):
+                    result = await tool.handler(args, tctx)
+            else:
+                result = await tool.handler(args, tctx)
             result = await REG.events.pipe("after_tool", result, name, args, ctx)
             if isinstance(result, dict):
                 is_error = bool(result.get("is_error"))
@@ -1662,7 +1676,6 @@ class _Shutting(Exception):
     pass
 
 
-SCOPE_LOCK = None   # 子代理插件掛上：寫入範圍鎖（接回寫入型子代理時一樣要排隊）
 
 
 async def resume_bg(child_id: str, rec: dict, emit: Emit) -> bool:
@@ -1693,8 +1706,7 @@ async def resume_bg(child_id: str, rec: dict, emit: Emit) -> bool:
     if digest:
         goal = goal.rstrip() + "\n\n" + digest
     await run_subagent_bg(pctx, goal, "", "", None, "", title_hint=rec.get("title") or "",
-                          kind="subagent_followup", read_only=not write, write_scope=scope, session_id=child_id,
-                          lock=SCOPE_LOCK(scope) if write and SCOPE_LOCK else None)
+                          kind="subagent_followup", read_only=not write, write_scope=scope, session_id=child_id)
     return True
 
 

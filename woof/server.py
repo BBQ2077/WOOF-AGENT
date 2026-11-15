@@ -95,6 +95,10 @@ def _busy(sid: str | None) -> bool:
         return True
     if sid in AGENT_RUNS:
         return True
+    from woof.agent.loop import BG_BY_SID
+
+    if sid in BG_BY_SID and not BG_BY_SID[sid].done():
+        return True   # 背景子代理在排隊等名額也算還在跑，側欄照樣亮
     try:
         if _tasks.is_running(sid) or _tasks.has_ask(sid):
             return True

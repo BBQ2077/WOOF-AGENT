@@ -11,41 +11,6 @@ from __future__ import annotations
 import asyncio
 import re
 
-class _ScopeLock:
-    """寫入子代理按範圍排隊：範圍不重疊的可以同時跑；同一個資料夾、或一個在另一個裡面才排隊。
-    沒給範圍的當成跟誰都重疊（照規範它不該改任何東西，先回報）。"""
-    _cond: "asyncio.Condition | None" = None
-    _busy: list = []
-
-    def __init__(self, scope: list, on_wait=None):
-        self.scope = list(scope or [])
-        self.on_wait = on_wait
-
-    @staticmethod
-    def _overlap(a: list, b: list) -> bool:
-        if not a or not b:
-            return True
-        return any(x == y or x in y.parents or y in x.parents for x in a for y in b)
-
-    def _clash(self) -> bool:
-        return any(self._overlap(self.scope, s) for s in _ScopeLock._busy)
-
-    async def __aenter__(self):
-        if _ScopeLock._cond is None:
-            _ScopeLock._cond = asyncio.Condition()
-        async with _ScopeLock._cond:
-            if self._clash() and self.on_wait:
-                await self.on_wait()
-            await _ScopeLock._cond.wait_for(lambda: not self._clash())
-            _ScopeLock._busy.append(self.scope)
-        return self
-
-    async def __aexit__(self, *exc):
-        async with _ScopeLock._cond:
-            _ScopeLock._busy.remove(self.scope)
-            _ScopeLock._cond.notify_all()
-        return False
-
 
 def _mode(t: dict) -> str:
     """有給 scope 卻漏了 mode：scope 只對寫入有意義，當成 write。"""
@@ -215,7 +180,6 @@ async def _generate(woof, m: dict, t: dict, parent, progress) -> dict:
 def register(woof):
     from woof.agent import loop as _loop
 
-    _loop.SCOPE_LOCK = _ScopeLock   # 程式重開後接回寫入型子代理時，一樣照範圍排隊
 
     used: dict[str, set] = {}   # 每個回合新派出的子代理 id（擋住模型一回合派一大堆燒錢）
     held: dict[str, int] = {}   # 正在派、還沒拿到 id 的數量（同一步同時呼叫好幾次時不會一起超過）
@@ -288,14 +252,15 @@ def register(woof):
                         last = (_t.last_text(sid, "assistant") or "").strip().replace("\n", " ")[:160]
                         return {"steered": True, "session_id": sid, "last": last}
                 write = t.get("mode") == "write"
-
-                async def wait_scope():
-                    await progress(f"{label}寫入範圍跟另一個正在寫的子代理重疊，先排隊，它寫完就開始（主對話不用等）")
+                if not sid:
+                    dup = _same_job(str(t["goal"]))
+                    if dup:
+                        return {"dup": dup}
+                # 寫入範圍重疊也同時跑（各寫各的檔）；同一個檔同時寫由寫檔工具逐次排隊，不會互蓋
                 r = await run_subagent_bg(
                     parent, str(t["goal"]), ctx_text, str(t.get("model") or ""), None, label,
                     read_only=not write, write_scope=kw.get("write_scope"), session_id=sid,
-                    kind="subagent_followup" if sid else "subagent_task",
-                    lock=_ScopeLock(kw.get("write_scope"), wait_scope) if write else None)
+                    kind="subagent_followup" if sid else "subagent_task")
                 if isinstance(r, dict):
                     r["mode"] = "write" if write else "read"
                 return r
@@ -304,6 +269,20 @@ def register(woof):
             except Exception as e:
                 await progress(f"{label}失敗：{e}")
                 return {"error": f"{type(e).__name__}: {e}", "goal": t["goal"]}
+
+        def _same_job(goal: str) -> str:
+            # 同一件事已經有子代理在跑或排隊（例如重開後忘了它還在）：不再派一個重複的
+            from woof.agent.loop import bg_children
+            from woof import store as _store
+
+            g = " ".join(goal.split())
+            for k in bg_children(getattr(parent, "root_session_id", parent.session_id)):
+                first = next((m for m in _store.get_messages(k) if m["role"] == "user"), None)
+                txt = " ".join("".join(b.get("text", "") for b in (first or {}).get("content", [])
+                                       if b.get("type") == "text").split())
+                if g and g in txt:
+                    return k
+            return ""
 
         from woof.agent.loop import _SUB_RUNNING, SUB_BATCH, sub_limit
         import uuid as _uuid
@@ -322,6 +301,9 @@ def register(woof):
             if "error" in r:
                 bad += 1
                 parts.append(f"{head}（派不出去）\n{r['error']}")
+            elif r.get("dup"):
+                parts.append(f"{head}沒有重派：同樣的工作子代理 {r['dup']} 還在跑或排隊，做完會回報。"
+                             "要改方向帶 session_id 追加要求；不需要了用 stop_subagent 停")
             elif r.get("steered"):
                 parts.append(f"{head}它還在跑，這句話已經送進去了（對話 {r.get('session_id')}）："
                              "它這一步跑完就會看到，不用重派、也不用再催。要它的結論就等它自己回報。"
