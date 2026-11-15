@@ -7619,7 +7619,9 @@ async function petSay(forced) {
     inp.value = text;
   } finally {
     PET.busy = false; petGrow();
-    if (document.activeElement !== inp) inp.focus();
+    // 只在焦點還留在寵物欄（按了送出鈕、建議句）或沒停在任何地方時拉回寵物輸入框；已經去別的輸入框打字就不搶
+    const ae = document.activeElement;
+    if (ae !== inp && (!ae || ae === document.body || ae.closest('#panePet'))) inp.focus();
   }
 }
 
