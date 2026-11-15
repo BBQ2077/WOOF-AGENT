@@ -1542,6 +1542,11 @@ async def mcp_info():
 
 @app.on_event("startup")
 async def _auto_discover_on_start():
+    from .agent.loop import restore_steer
+
+    n = restore_steer()   # 上次重開前還在排隊的插話／子代理回報，寫回各自的對話，按「繼續」就接著處理
+    if n:
+        logging.getLogger("woof").info("寫回上次沒送出的排隊訊息 %d 則", n)
     asyncio.create_task(_discover_all(force=False))
     asyncio.create_task(_watch_bg_tasks())
     asyncio.create_task(cron.loop(_cron_run, broadcast))

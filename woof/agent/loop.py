@@ -696,16 +696,58 @@ _steer: dict[str, list[list[dict]]] = {}
 _steer_lock = threading.Lock()
 
 
+def _steer_file():
+    return DATA / "steer_queue.json"
+
+
+def _save_steer() -> None:
+    """排隊中的訊息同步寫到磁碟（呼叫時已持有鎖）：程式重開、當掉也不會丟。"""
+    try:
+        f = _steer_file()
+        live = {k: v for k, v in _steer.items() if v}
+        if not live:
+            f.unlink(missing_ok=True)
+            return
+        tmp = f.with_suffix(".tmp")
+        tmp.write_text(json.dumps(live, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, f)
+    except Exception:
+        log.exception("寫入排隊訊息失敗")
+
+
+def restore_steer() -> int:
+    """開程式時把上次沒送出的排隊訊息寫進各自的對話（照原本順序），回寫了幾則。"""
+    f = _steer_file()
+    try:
+        saved = json.loads(f.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return 0
+    except Exception:
+        log.exception("讀取排隊訊息失敗")
+        return 0
+    n = 0
+    for sid, items in (saved or {}).items():
+        if not store.get_session(sid):
+            continue
+        for it in items:
+            store.add_message(sid, "user", it.get("blocks") or [], it.get("meta"))
+            n += 1
+    f.unlink(missing_ok=True)
+    return n
+
+
 def push_steer(session_id: str, blocks: list[dict], meta: dict | None = None) -> None:
     """執行中排隊的訊息：使用者插話，或內部通知（例如背景指令結束，meta 帶 internal）。
-    這一步結束後才寫進資料庫，順序才對。"""
+    這一步結束後才寫進資料庫，順序才對；排隊期間同步存在磁碟。"""
     with _steer_lock:
         _steer.setdefault(session_id, []).append({"blocks": blocks, "meta": meta})
+        _save_steer()
 
 
 def requeue_steer(session_id: str, items: list[dict]) -> None:
     with _steer_lock:
         _steer.setdefault(session_id, [])[:0] = items
+        _save_steer()
 
 
 def peek_steer(session_id: str) -> list[dict]:
@@ -715,7 +757,10 @@ def peek_steer(session_id: str) -> list[dict]:
 
 def pop_steer(session_id: str) -> list[dict]:
     with _steer_lock:
-        return _steer.pop(session_id, [])
+        out = _steer.pop(session_id, [])
+        if out:
+            _save_steer()
+        return out
 
 
 async def flush_steer(session_id: str, emit) -> bool:
