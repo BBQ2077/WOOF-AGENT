@@ -1677,51 +1677,6 @@ class FlowLimits(unittest.TestCase):
             asyncio.run(tasks.run_gated(s["id"], "做事", emit, "model", auto=auto))
         return calls
 
-    def test_plan_rounds_capped_and_goal_keeps_going(self):
-        c = self._gated(auto=True)
-        self.assertEqual((c["plan"], c["review"], c["ask"]), (2, 2, 0))
-        self.assertEqual(c["goal"], ["一", "二"])
-        c = self._gated(auto=False)       # 不是 /goal 也一樣：撞到上限不問，照最後一版做
-        self.assertEqual((c["plan"], c["review"], c["ask"]), (2, 2, 0))
-        self.assertEqual(c["goal"], ["一", "二"])
-
-    def test_expand_does_not_ask(self):
-        from unittest import mock
-
-        from woof.agent import tasks
-        from woof.loader import REG
-
-        s = store.create_session("m", None, "expand")
-        seen = {"ask": 0, "goal": None}
-
-        async def plan(*a, **k):
-            return ["一", "二"]
-
-        async def expand(*a, **k):
-            return {"ideas": ["三"], "checks": []}, "補了三"
-
-        async def ask(*a, **k):
-            seen["ask"] += 1
-            return "取消"
-
-        async def goal(sid, obj, emit, steps=None, **k):
-            seen["goal"] = steps
-
-        async def review(*a, **k):
-            seen["review"] = seen.get("review", 0) + 1
-            return True, ""
-
-        async def emit(ev):
-            pass
-
-        with mock.patch.object(REG, "model_cfg", return_value={"id": "m", "provider": "fakep"}), \
-                mock.patch.dict(REG.providers, {"fakep": object()}), \
-                mock.patch.object(tasks, "plan_steps", plan), mock.patch.object(tasks, "expand_plan", expand), \
-                mock.patch.object(tasks, "ask", ask), mock.patch.object(tasks, "run_goal", goal), \
-                mock.patch.object(tasks, "review_plan", review):
-            asyncio.run(tasks.run_gated(s["id"], "做事", emit, "expand"))
-        self.assertEqual(seen, {"ask": 0, "goal": [tasks.RESEARCH_STEP, "一", "二"], "review": 1})
-
     def test_goal_follows_gate(self):
         from unittest import mock
 
@@ -2676,21 +2631,6 @@ class ExpandGate(unittest.TestCase):
             loop.run_subagent = real
         self.assertEqual((ref, notes), ({"ideas": [], "checks": []}, ""))
 
-    def test_wiring(self):
-        src = open(str(ROOT / "woof/agent/tasks.py"), encoding="utf-8").read()
-        self.assertIn('if gate == "expand":', src)
-        self.assertIn("ref, notes = await _or_steer(session_id, expand_plan(ctx, objective, steps))", src)
-        self.assertIn("steps = [RESEARCH_STEP] + steps", src)      # 拓展完先查證再做
-        self.assertIn('if gate in ("model", "expand"):', src)   # 拓展完也要審核
-        sv = open(str(ROOT / "woof/server.py"), encoding="utf-8").read()
-        self.assertIn('("off", "human", "model", "expand")', sv)
-        js = open(str(ROOT / "web/dist/app.js"), encoding="utf-8").read()
-        self.assertIn("方案・思維拓展", js)
-        self.assertIn("v: 'expand'", js)
-        pr = open(str(ROOT / "woof/prompts.py"), encoding="utf-8").read()
-        self.assertIn('_e("expand"', pr)
-        self.assertIn('_e("expand_body"', pr)
-
     def test_ref_is_reference_only_and_survives_resume(self):
         """拓展的想法：只附給執行的每一步、標明只是參考，審核不看；存進進度，按「繼續」也接得回來。"""
         import asyncio
@@ -3456,156 +3396,65 @@ class ResumeAfterSteer(unittest.TestCase):
 class SteerDuringPlanning(unittest.TestCase):
     """規劃／拓展／審核途中插話：馬上停下手上那個，插話寫進對話，依插話重新規劃，不算版數。"""
 
-    def test_steer_replans(self):
+    def test_model_writes_todo_flow(self):
+        """方案模式：執行的模型自己列 TODO → 審核看一次（意見交回模型調一次）→ 照 TODO 做（中途加的項也做）；問答不審。"""
         import asyncio
         from woof.agent import tasks, loop
 
-        sid = store.create_session("m", None, "規劃插話測試")["id"]
-        calls, events = [], []
-        orig = (tasks.plan_steps, tasks.expand_plan, tasks.review_plan, tasks.run_goal, tasks.flow_settings)
         reg = sys.modules["woof.loader"].REG
-        orig_cfg = reg.model_cfg
+        orig = (loop.run_model_loop, tasks.review_plan, tasks.final_check, reg.model_cfg, reg.providers)
+        reviews, done = [], []
 
-        async def fake_plan(cfg, objective, feedback=""):
-            calls.append(("plan", objective))
-            return ["做一件事", "再做一件事"]
+        def setup(chat):
+            sid = store.create_session("m", None, "TODO 流程")["id"]
+            tasks.set_todos(sid, [{"text": "舊的", "status": "pending"}])
 
-        async def fake_expand(ctx, objective, steps):
-            return {"ideas": [], "checks": []}, ""
+            async def fake_loop(ctx):
+                last = store.get_messages(sid)[-1]
+                kind = (last.get("meta") or {}).get("internal")
+                text = last["content"][0]["text"]
+                if kind == "plan_request" and not chat:
+                    tasks.set_todos(sid, [{"text": "A"}, {"text": "B"}])
+                elif kind == "plan_feedback":
+                    tasks.set_todos(sid, [{"text": "A"}, {"text": "B"}, {"text": "C"}])
+                elif kind == "goal_step":
+                    cur = tasks._state(sid).get("todos")
+                    now = next(t["text"] for t in cur if t["status"] == "doing")
+                    done.append(now)
+                    if now == "B":
+                        tasks.set_todos(sid, cur + [{"text": "D", "status": "pending"}])
 
-        async def fake_review(ctx, objective, steps, prev=""):
-            calls.append(("review", objective))
-            if len([c for c in calls if c[0] == "review"]) == 1:
-                loop.push_steer(sid, [{"type": "text", "text": "不要附書名"}], {"steer": True})
-                await asyncio.sleep(30)          # 審核還在跑：要被插話打斷，不能等它跑完
-            return True, ""
+            async def fake_review(ctx, objective, steps, prev=""):
+                reviews.append(list(steps))
+                return False, "缺 C"
 
-        async def fake_goal(session_id, objective, emit, **kw):
-            calls.append(("goal", objective))
+            async def fake_check(*a, **k):
+                return True, []
 
-        async def emit(ev):
-            events.append(ev)
-
-        fs = dict(orig[4]())
-        fs["plan_rounds"] = 1
-        tasks.plan_steps, tasks.expand_plan, tasks.review_plan, tasks.run_goal = fake_plan, fake_expand, fake_review, fake_goal
-        tasks.flow_settings = lambda: fs
-        orig_prov = reg.providers
-        reg.providers = {**orig_prov, "fake_prov": object()}
-        reg.model_cfg = lambda name: {"provider": "fake_prov", "id": "m", "name": "m"}
-        try:
-            store.add_message(sid, "user", [{"type": "text", "text": "上一輪要的：卡片要有修仙味"}])
-            store.add_message(sid, "assistant", [{"type": "text", "text": "上一輪回覆：已做好 20 張卡"}])
-            store.add_message(sid, "user", [{"type": "text", "text": "做遊戲卡片"}])
-            t0 = time.monotonic()
-            asyncio.run(tasks.run_gated(sid, "做遊戲卡片", emit, "model"))
-            self.assertLess(time.monotonic() - t0, 5)
-            kinds = [c[0] for c in calls]
-            self.assertEqual(kinds, ["plan", "review", "plan", "review", "goal"])   # 只給 1 版也能重來：不算版數
-            self.assertIn("不要附書名", calls[2][1])
-            self.assertIn("卡片要有修仙味", calls[2][1])      # 重新規劃：前文（上一輪要的、上一輪回覆）照樣附上
-            self.assertIn("已做好 20 張卡", calls[2][1])
-            self.assertEqual(len(store.get_messages(sid)), 4)  # 原本 3 則一則都沒少，多了插話那則
-            self.assertIn("不要附書名", calls[-1][1])
-            msgs = store.get_messages(sid)
-            self.assertTrue(any((m.get("meta") or {}).get("steer") for m in msgs))
-            self.assertEqual(loop.peek_steer(sid), [])
-            self.assertIn("不要附書名", (tasks._state(sid).get("goal") or {}).get("extra", ""))
-            self.assertTrue(any("重新規劃" in (e.get("text") or "") for e in events))
-        finally:
-            tasks.plan_steps, tasks.expand_plan, tasks.review_plan, tasks.run_goal, tasks.flow_settings = orig
-            reg.model_cfg = orig_cfg
-            reg.providers = orig_prov
-            loop.pop_steer(sid)
-            store.delete_session(sid)
-
-    def test_steer_keeps_review_feedback(self):
-        """插話重新規劃後，上一版審核挑出的問題還在（交給下一次審核核對），只是衝突時以插話為準。"""
-        import asyncio
-        from woof.agent import tasks, loop
-
-        sid = store.create_session("m", None, "插話留意見測試")["id"]
-        prevs = []
-        orig = (tasks.plan_steps, tasks.review_plan, tasks.run_goal, tasks.flow_settings)
-        reg = sys.modules["woof.loader"].REG
-        orig_cfg, orig_prov = reg.model_cfg, reg.providers
-
-        async def fake_plan(cfg, objective, feedback=""):
-            return ["一", "二"]
-
-        async def fake_review(ctx, objective, steps, prev=""):
-            prevs.append(prev)
-            if len(prevs) == 1:
-                return False, "還缺測試"
-            if len(prevs) == 2:
-                loop.push_steer(sid, [{"type": "text", "text": "改用藍色"}], {"steer": True})
-                await asyncio.sleep(30)
-            return True, ""
-
-        async def fake_goal(session_id, objective, emit, **kw):
-            pass
+            loop.run_model_loop, tasks.review_plan, tasks.final_check = fake_loop, fake_review, fake_check
+            reg.providers = {**orig[4], "fake_prov": object()}
+            reg.model_cfg = lambda name: {"provider": "fake_prov", "id": "m", "name": "m"}
+            return sid
 
         async def emit(ev):
             pass
-
-        fs = dict(orig[3]())
-        fs["plan_rounds"] = 3
-        tasks.plan_steps, tasks.review_plan, tasks.run_goal = fake_plan, fake_review, fake_goal
-        tasks.flow_settings = lambda: fs
-        reg.providers = {**orig_prov, "fake_prov": object()}
-        reg.model_cfg = lambda name: {"provider": "fake_prov", "id": "m", "name": "m"}
         try:
-            store.add_message(sid, "user", [{"type": "text", "text": "做一件事"}])
-            asyncio.run(tasks.run_gated(sid, "做一件事", emit, "model"))
-            self.assertEqual(len(prevs), 3)
-            self.assertIn("還缺測試", prevs[2])
-            self.assertIn("插話前的審核意見", prevs[2])
-        finally:
-            tasks.plan_steps, tasks.review_plan, tasks.run_goal, tasks.flow_settings = orig
-            reg.model_cfg, reg.providers = orig_cfg, orig_prov
-            loop.pop_steer(sid)
+            sid = setup(False)
+            asyncio.run(tasks.run_gated(sid, "做遊戲", emit, "model"))
+            self.assertEqual(reviews, [["A", "B"]])                  # 只審一次
+            self.assertEqual(done, ["A", "B", "C", "D"])             # 審核意見讓模型加了 C；做 B 時自己加了 D
+            self.assertEqual(tasks._state(sid)["goal"]["status"], "done")
             store.delete_session(sid)
 
-    def test_max_steps_setting(self):
-        """步驟上限照設定（可到 100），不再寫死 5～8 步。"""
-        import asyncio
-        from woof.agent import tasks
-
-        sid = store.create_session("m", None, "步驟上限測試")["id"]
-        got = {}
-        orig = (tasks.plan_steps, tasks.review_plan, tasks.run_goal, tasks.flow_settings)
-        reg = sys.modules["woof.loader"].REG
-        orig_cfg, orig_prov = reg.model_cfg, reg.providers
-
-        async def fake_plan(cfg, objective, feedback=""):
-            return [f"步驟{i}" for i in range(60)]
-
-        async def fake_review(ctx, objective, steps, prev=""):
-            return True, ""
-
-        async def fake_goal(session_id, objective, emit, steps=None, **kw):
-            got["steps"] = steps
-
-        async def emit(ev):
-            pass
-
-        fs = dict(orig[3]())
-        fs["max_steps"] = 40
-        tasks.plan_steps, tasks.review_plan, tasks.run_goal = fake_plan, fake_review, fake_goal
-        tasks.flow_settings = lambda: fs
-        reg.providers = {**orig_prov, "fake_prov": object()}
-        reg.model_cfg = lambda name: {"provider": "fake_prov", "id": "m", "name": "m"}
-        try:
-            store.add_message(sid, "user", [{"type": "text", "text": "做一個遊戲"}])
-            asyncio.run(tasks.run_gated(sid, "做一個遊戲", emit, "model"))
-            self.assertEqual(len(got["steps"]), 40)
-            self.assertEqual(tasks.FLOW_LIMITS["max_steps"], (1, 100))
-            from woof.prompts import get
-            self.assertIn("最多 40 步", get("plan_goal", max_steps=40))
-        finally:
-            tasks.plan_steps, tasks.review_plan, tasks.run_goal, tasks.flow_settings = orig
-            reg.model_cfg, reg.providers = orig_cfg, orig_prov
+            reviews.clear(); done.clear()
+            sid = setup(True)
+            asyncio.run(tasks.run_gated(sid, "這是什麼？", emit, "model"))
+            self.assertEqual(reviews, [])                            # 問答：不審、不做步驟
+            self.assertEqual(done, [])
+            self.assertEqual([t["text"] for t in tasks._state(sid)["todos"]], ["舊的"])
             store.delete_session(sid)
+        finally:
+            loop.run_model_loop, tasks.review_plan, tasks.final_check, reg.model_cfg, reg.providers = orig
 
     def _goal_env(self, check):
         """run_goal 的測試環境：一步、假的模型回合、假的驗收。回（session id, 紀錄, 還原函式）。"""
@@ -3732,49 +3581,6 @@ class SteerDuringPlanning(unittest.TestCase):
         finally:
             loop.run_subagent = orig
             tasks.FLOW_BATCH.pop("flowbatch_x", None)
-
-    def test_rounds_used_up_no_ask(self):
-        """模型審核撞到版數上限：不跳提問卡問使用者，照最後一版做，審核意見交給執行的模型。"""
-        import asyncio
-        from woof.agent import tasks
-
-        sid = store.create_session("m", None, "上限不問測試")["id"]
-        got, asked = {}, []
-        orig = (tasks.plan_steps, tasks.review_plan, tasks.run_goal, tasks.flow_settings, tasks.ask)
-        reg = sys.modules["woof.loader"].REG
-        orig_cfg, orig_prov = reg.model_cfg, reg.providers
-
-        async def fake_plan(cfg, objective, feedback=""):
-            return ["一", "二"]
-
-        async def fake_review(ctx, objective, steps, prev=""):
-            return False, "還缺測試"
-
-        async def fake_goal(session_id, objective, emit, **kw):
-            got.update(kw)
-
-        async def fake_ask(*a, **k):
-            asked.append(a)
-            return "取消"
-
-        async def emit(ev):
-            pass
-
-        fs = dict(orig[3]())
-        fs["plan_rounds"] = 2
-        tasks.plan_steps, tasks.review_plan, tasks.run_goal, tasks.ask = fake_plan, fake_review, fake_goal, fake_ask
-        tasks.flow_settings = lambda: fs
-        reg.providers = {**orig_prov, "fake_prov": object()}
-        reg.model_cfg = lambda name: {"provider": "fake_prov", "id": "m", "name": "m"}
-        try:
-            store.add_message(sid, "user", [{"type": "text", "text": "做一件事"}])
-            asyncio.run(tasks.run_gated(sid, "做一件事", emit, "model"))
-            self.assertEqual(asked, [])
-            self.assertIn("還缺測試", got.get("notes", ""))
-        finally:
-            tasks.plan_steps, tasks.review_plan, tasks.run_goal, tasks.flow_settings, tasks.ask = orig
-            reg.model_cfg, reg.providers = orig_cfg, orig_prov
-            store.delete_session(sid)
 
     def test_internal_does_not_interrupt(self):
         import asyncio

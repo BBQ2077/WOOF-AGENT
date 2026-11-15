@@ -1581,9 +1581,17 @@ async def run_subagent_bg(parent: TurnContext, goal: str, context: str = "", mod
                           lock: "asyncio.Lock | None" = None) -> dict:
     """派出子代理但「不等它」：立刻回傳子代理對話，主對話可以繼續做別的事或跟使用者對話。
     跑完把回報送進主對話（閒置就開一步處理，執行中就在下一步看到）。"""
+    from woof.agent import live
+
     child, model_cfg, ctx = await _prepare_subagent(
         parent, goal, context, model_id, progress, label, title_hint, kind, read_only, write_scope, session_id)
     parent_sid = parent.session_id
+    # 記到磁碟：程式重開後照這些接回這個子代理，做完照樣回報給派它的對話
+    live.mark(child["id"], "bg", {"parent": parent_sid, "root": getattr(parent, "root_session_id", parent_sid),
+                                  "read_only": bool(read_only), "scope": [str(p) for p in (write_scope or [])],
+                                  "cwd": str(getattr(parent, "cwd", "") or ""),
+                                  "exclude": sorted(getattr(parent, "tool_exclude", None) or ()),
+                                  "title": child.get("title") or title_hint})
 
     async def _bg() -> None:
         status = "done"
@@ -1616,8 +1624,12 @@ async def run_subagent_bg(parent: TurnContext, goal: str, context: str = "", mod
                 await asyncio.shield(parent.emit({"type": "run_end", "session_id": ctx.session_id, "status": status}))
             except Exception:
                 pass
+            # 程式關閉途中被收掉：不算結束，不送「被停止」的回報，紀錄留著，下次開程式接著做完再回報
+            live.unmark(child["id"], "bg")
             # 不管成功、出錯、被停掉，都要讓主對話聽到結果（不然它會一直等一個不會來的回報）
             try:
+                if live.SHUTTING:
+                    raise _Shutting
                 r = _subagent_report(ctx.session_id, child.get("title") or title_hint, model_cfg)
                 if err:
                     r["error"] = err
@@ -1626,6 +1638,8 @@ async def run_subagent_bg(parent: TurnContext, goal: str, context: str = "", mod
                 inject = getattr(REG, "inject", None)
                 if inject is not None:
                     await asyncio.shield(inject(parent_sid, "bg_done", report_text(r)))
+            except _Shutting:
+                pass
             except Exception:
                 log.exception("子代理回報送出失敗")
 
@@ -1644,6 +1658,46 @@ async def run_subagent_bg(parent: TurnContext, goal: str, context: str = "", mod
     task.add_done_callback(_done)
     return {"session_id": child["id"], "title": child.get("title") or title_hint,
             "model": model_cfg.get("label", model_cfg.get("id", "")), "background": True}
+
+
+class _Shutting(Exception):
+    pass
+
+
+SCOPE_LOCK = None   # 子代理插件掛上：寫入範圍鎖（接回寫入型子代理時一樣要排隊）
+
+
+async def resume_bg(child_id: str, rec: dict, emit: Emit) -> bool:
+    """程式重開後接回背景子代理：同一個子對話、同樣的權限與範圍，接著把任務做完，做完照樣回報給派它的對話。"""
+    from pathlib import Path
+
+    parent = store.get_session(rec.get("parent") or "")
+    child = store.get_session(child_id)
+    if not parent or not child:
+        return False
+    pm = REG.model_cfg(parent.get("model")) or REG.model_cfg(child.get("model"))
+    if pm is None:
+        return False
+    pctx = TurnContext(parent, pm, parent.get("effort") or pm.get("default_effort"), emit)
+    pctx.root_session_id = rec.get("root") or parent["id"]
+    pctx.tool_exclude = set(rec.get("exclude") or []) - {"delegate_task"}
+    if rec.get("cwd"):
+        pctx.cwd = rec["cwd"]
+    scope = [Path(p) for p in rec.get("scope") or []]
+    write = not rec.get("read_only", True)
+    from woof.agent.tasks import resume_digest
+
+    goal = _P("resume", reason="程式重開")
+    try:
+        digest = resume_digest(child_id)
+    except Exception:
+        digest = ""
+    if digest:
+        goal = goal.rstrip() + "\n\n" + digest
+    await run_subagent_bg(pctx, goal, "", "", None, "", title_hint=rec.get("title") or "",
+                          kind="subagent_followup", read_only=not write, write_scope=scope, session_id=child_id,
+                          lock=SCOPE_LOCK(scope) if write and SCOPE_LOCK else None)
+    return True
 
 
 async def resume_session(session_id: str, emit: Emit) -> None:

@@ -5869,7 +5869,7 @@ function renderPromptsSec(box) {
   ipLoad();
 }
 // ---- 方案模式：次數上限、審核時間上限、/goal 要不要跟著模式走，以及審核／拓展的提示詞（跟「內部提示詞」同一份覆寫）
-const FLOW_PROMPTS = ['plan_review', 'review', 'expand', 'plan_goal', 'plan_redo', 'review_fail'];
+const FLOW_PROMPTS = ['plan_todo', 'plan_todo_fix', 'plan_review', 'review', 'expand', 'plan_goal', 'plan_redo', 'review_fail'];
 function renderFlowSec(box) {
   IP.only = FLOW_PROMPTS;
   const f = S.cfg.flow = Object.assign({ plan_rounds: 3, fix_rounds: 1, review_timeout: 300, context_chars: 1500, goal_gate: true, expand_model: '', review_model: '', max_steps: 30 }, S.cfg.flow || {});
@@ -5884,15 +5884,14 @@ function renderFlowSec(box) {
   };
   const num = (k, min, max, step, unit) => `<label class="cin"><input type="number" data-fl="${k}" min="${min}" max="${max}" step="${step}" value="${f[k]}"><span>${unit}</span></label>`;
   const row = (id, title, hint, ctl) => `<div class="frow" data-f="${id}"><div><b>${title}</b><small>${hint}</small></div><div class="fctl">${ctl}</div></div>`;
-  const worst = f.plan_rounds + 1 + f.fix_rounds;
   box.innerHTML = `<div class="card">
-    ${row('flSteps', '方案最多幾步', '規劃員照實際工作量拆步驟：小事 1 步，做一整個遊戲、一套系統這種大型工作可以拆很多步，不會硬壓成幾步就當成品驗收。', num('max_steps', 1, 100, 1, '步'))}
-    ${row('flRounds', '方案最多提幾版', '對抗審核打回、或你按「換個做法」時重提。到上限還沒過不會問你，照最後一版做，最後的審核意見交給執行的模型自己判斷要不要補。人工審核模式例外：最後一版是你退的，照舊問你。', num('plan_rounds', 1, 10, 1, '版'))}
+    ${row('flSteps', 'TODO 最多幾項', '執行的模型盤點現況後自己列 TODO，照實際工作量：小事 1～2 項，做一整個遊戲、一套系統這種大型工作可以很多項。做的時候模型加項、改項也照新的走。', num('max_steps', 1, 100, 1, '項'))}
+    ${row('flRounds', '人工審核最多換幾版', '人工審核模式下你按「換個做法」時，模型照你的意見重列 TODO。到上限照最後一版做，你最後的意見交給模型。對抗、拓展模式的審核只看一次，意見交給模型自己判斷、調一次就做，不會一版一版打回。', num('plan_rounds', 1, 10, 1, '版'))}
     ${row('flFix', '做完驗收後最多補幾輪', '審核模型驗收發現缺口時補做幾輪，每補一輪再驗一次；再驗時先核對上次列的缺口補好了沒，不會每次換一批新要求。0＝不補，只把缺口告訴你。', num('fix_rounds', 0, 5, 1, '輪'))}
     ${row('flWait', '審核／拓展卡住多久就不等', '子代理在思考、輸出或跑工具都算有動靜，會一直等它想完；連續這麼久完全沒動靜才當作卡住，照目前這版繼續。0＝一直等。', num('review_timeout', 0, 3600, 30, '秒'))}
-    ${row('flCtx', '附前文最多幾字', '你在對話中接著說（例如「0分」「不夠好 多想」）時，規劃、拓展、審核會一起看到之前在做什麼：你最近說的話，加上一輪回覆的結尾。中文一個字大約一個 token。0＝不附，只看這一句。', num('context_chars', 0, 20000, 500, '字'))}
-    ${row('flGoal', '/goal 也照對話選的模式走', '開著：對話選了方案模式時，/goal 先審核或拓展再做；放著讓它自己跑，打回到上限或你沒回應都照最後一版做。關掉：/goal 直接拆步驟做，做完一樣驗收。', `<span class="sw${f.goal_gate ? ' on' : ''}" data-flgoal></span>`)}
-    <div class="pm-ex"><span>依目前設定，一個方案最多審核 ${f.plan_rounds} 次、驗收 ${worst - f.plan_rounds} 次；加上等待上限，不會無限來回。</span></div>
+    ${row('flCtx', '附前文最多幾字', '你在對話中接著說（例如「0分」「不夠好 多想」）時，拓展、審核會一起看到之前在做什麼：以你說的為主，這句放最前面，接著是你之前說的，助手的回覆只留結尾一小段。中文一個字大約一個 token。0＝不附，只看這一句。', num('context_chars', 0, 20000, 500, '字'))}
+    ${row('flGoal', '/goal 也照對話選的模式走', '開著：對話選了方案模式時，/goal 一樣先列 TODO、審核或拓展再做；放著讓它自己跑，你沒回應就照目前這版做。關掉：/goal 直接拆步驟做，做完一樣驗收。', `<span class="sw${f.goal_gate ? ' on' : ''}" data-flgoal></span>`)}
+    <div class="pm-ex"><span>依目前設定，一個方案 TODO 審核 1 次、驗收最多 ${1 + f.fix_rounds} 次；加上等待上限，不會無限來回。</span></div>
   </div>
   <div class="card">
     ${mrow('expand_model', '拓展', '方案・拓展', '先替你的要求想更完整的做法，再交給審核。留空＝跟這個對話的模型。')}

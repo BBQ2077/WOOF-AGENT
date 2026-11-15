@@ -213,6 +213,10 @@ async def _generate(woof, m: dict, t: dict, parent, progress) -> dict:
 
 
 def register(woof):
+    from woof.agent import loop as _loop
+
+    _loop.SCOPE_LOCK = _ScopeLock   # 程式重開後接回寫入型子代理時，一樣照範圍排隊
+
     used: dict[str, int] = {}  # 每個使用者回合已派出的子代理數（擋住模型反覆派工燒錢）
 
     async def delegate_task(args: dict, tctx) -> dict:
