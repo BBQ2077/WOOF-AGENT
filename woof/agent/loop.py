@@ -763,6 +763,12 @@ def pop_steer(session_id: str) -> list[dict]:
         return out
 
 
+def _user_steer_waiting(session_id: str) -> bool:
+    """排隊裡有使用者自己打的插話（內部通知如子代理回報不算，那些等這一步寫完再送）。"""
+    with _steer_lock:
+        return any(not (it.get("meta") or {}).get("internal") for it in _steer.get(session_id, ()))
+
+
 async def flush_steer(session_id: str, emit) -> bool:
     """把排隊的訊息寫進資料庫。放在目前這步的回覆之後，順序才對。"""
     batch = pop_steer(session_id)
@@ -1038,13 +1044,15 @@ async def run_model_loop(ctx: TurnContext) -> None:
         tmo = None
         got = False   # 收到過模型的資料了沒（服務商自己的提示不算）
         sdk_tok = SDK_RETRIES.set(0)
+        cut = False
         try:
             # 卡住偵測：開始回應前等 first_s 秒，之後每收到一筆資料就重新算 idle_s 秒；逾時丟 StallTimeout 走下面的重試
             async with asyncio.timeout(first_s or None) as tmo:
-                async for ev in provider.stream(
+                gen = provider.stream(
                     model=ctx.model_cfg, system=system, messages=messages,
                     tools=specs, effort=ctx.effort,
-                ):
+                )
+                async for ev in gen:
                     t = ev.get("type")
                     now = asyncio.get_running_loop().time()
                     if t in ("text_delta", "thinking_delta", "message"):
@@ -1081,6 +1089,15 @@ async def run_model_loop(ctx: TurnContext) -> None:
                         await ctx.emit({"type": "notice", "session_id": ctx.session_id, "text": ev.get("text", "")})
                     elif t == "message":
                         final = ev
+                    # 模型正在出字時使用者插話：馬上收掉這一步，已出的字留著，插話立刻交給模型（不等整段寫完）
+                    if t in ("text_delta", "thinking_delta") and _user_steer_waiting(ctx.session_id):
+                        cut = True
+                        break
+                if cut:
+                    try:
+                        await gen.aclose()
+                    except Exception:
+                        pass
         except asyncio.CancelledError:
             if text_buf["thinking"]:
                 partial.append({"type": "thinking", "text": text_buf["thinking"]})
@@ -1144,6 +1161,17 @@ async def run_model_loop(ctx: TurnContext) -> None:
         store.log_op(ctx.session_id, "model", ctx.model_cfg.get("id"), (time.time() - t_req) * 1000,
                      (t_first - t_req) * 1000 if t_first else None)
         api_retry = big_retry = 0
+        if cut:
+            part = []
+            if text_buf["text"].strip():
+                if text_buf["thinking"]:
+                    part.append({"type": "thinking", "text": text_buf["thinking"]})
+                part.append({"type": "text", "text": text_buf["text"]})
+            if part:
+                m = store.add_message(ctx.session_id, "assistant", part, {"model": ctx.model_cfg["id"], "steered": True})
+                await ctx.emit({"type": "message", "session_id": ctx.session_id, "message": m})
+            await flush_steer(ctx.session_id, ctx.emit)
+            continue
         if final is None:
             raise RuntimeError("模型沒有回傳完整訊息")
         content = final["content"]
