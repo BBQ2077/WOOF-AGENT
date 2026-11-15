@@ -64,19 +64,46 @@ def _sub_model(ctx, kind: str) -> str:
 
 
 async def _sub(ctx, goal: str, label: str, title: str, kind: str) -> dict | None:
-    """跑審核／拓展子代理，超過 review_timeout 就放棄（回 None），流程照目前這版往下走，不會卡死。"""
+    """跑審核／拓展子代理。review_timeout 算的是「卡住多久」不是總時間：
+    它在思考、輸出、跑工具都算有動靜，會一直等；連續 review_timeout 秒完全沒動靜才放棄（回 None），流程照目前這版往下走。
+    （模型本身連線卡住由每一步的等待上限處理、會重試；這裡是最後一道保險，不會卡死。）"""
     from woof.agent.loop import run_subagent
 
     lim = flow_settings()["review_timeout"]
-    coro = run_subagent(ctx, goal, "", _sub_model(ctx, kind), None, label, title_hint=title, kind=kind)
+    st = {"t": time.monotonic(), "tools": 0}
+
+    def activity(ev: dict) -> None:
+        st["t"] = time.monotonic()
+        t = ev.get("type")
+        if t == "tool_start":
+            st["tools"] += 1
+        elif t == "tool_end":
+            st["tools"] = max(0, st["tools"] - 1)
+
+    task = asyncio.ensure_future(run_subagent(ctx, goal, "", _sub_model(ctx, kind), None, label,
+                                              title_hint=title, kind=kind, activity=activity))
     if not lim:
-        return await coro
+        return await task
     try:
-        return await asyncio.wait_for(coro, timeout=lim)
-    except asyncio.TimeoutError:
-        await ctx.emit({"type": "notice", "session_id": ctx.session_id,
-                        "text": f"{title.split('：')[0]}（子代理）超過 {lim} 秒沒結論，這次不等了，照目前這版繼續"})
-        return None
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=min(lim, 10))
+            if done:
+                return task.result()
+            # 工具在跑不算卡住（工具有自己的逾時）；其餘連續 lim 秒沒有任何事件才算
+            if st["tools"] == 0 and time.monotonic() - st["t"] > lim:
+                break
+    except asyncio.CancelledError:
+        task.cancel()
+        raise
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):
+        pass
+    await ctx.emit({"type": "notice", "session_id": ctx.session_id,
+                    "text": f"{title.split('：')[0]}（子代理）連續 {lim} 秒沒有任何動靜（沒在思考、輸出或跑工具），"
+                            "當作卡住，這次不等了，照目前這版繼續"})
+    return None
 
 
 
@@ -476,10 +503,16 @@ def _ref_of(g: dict) -> dict:
     return {"ideas": _ref_list(g.get("ideas"), IDEAS_MAX), "checks": _ref_list(g.get("checks"), CHECKS_MAX)}
 
 
-async def final_check(ctx, session_id: str, objective: str, steps: list[str], emit) -> tuple[bool, list[str]]:
-    """全部跑完驗一次：目標真的做到了、做得夠好嗎（對照同類做得好的樣子，不對照拓展的猜測）。回（有沒有過, 缺什麼）。"""
+async def final_check(ctx, session_id: str, objective: str, steps: list[str], emit,
+                      prev: list[str] | None = None) -> tuple[bool, list[str]]:
+    """全部跑完驗一次：目標真的做到了、做得夠好嗎（對照同類做得好的樣子，不對照拓展的猜測）。回（有沒有過, 缺什麼）。
+    prev＝上一次驗收列的缺口（補完再驗）：先核對那些補好了沒，不要每次換一個審核就換一批新要求，補不完。"""
     plan = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(steps))
     goal = _prompt("review") + _prompt("review_body", objective=objective, plan=plan, report=_recent_report(session_id))
+    if prev:
+        goal += ("\n\n【上一次驗收列的缺口，已經補過一輪】\n" + "\n".join(f"- {g}" for g in prev)
+                 + "\n先逐條核對這些補好了沒（要自己看證據，不能只看報告）。"
+                 "沒補好的照列；另外只有會讓目標做不到、或明顯做不好的新問題才列，挑剔小地方不算缺口。")
     r = await _sub(ctx, goal, "對抗檢查：", f"審核模型：{objective.strip()[:20]}", "review_request")
     if r is None:
         return False, []
@@ -728,7 +761,7 @@ async def run_goal(session_id: str, objective: str, emit, steps: list[str] | Non
             fixed = await _run_fix(ctx, session_id, gaps, emit)
             if not fixed:
                 break
-            ok, gaps = await final_check(ctx, session_id, objective, steps, emit)
+            ok, gaps = await final_check(ctx, session_id, objective, steps, emit, prev=gaps)
 
         status = "done" if ok else ("partial" if failed < len(steps) else "error")
         _save(session_id, goal={"objective": objective, "status": status, "at": time.time()})

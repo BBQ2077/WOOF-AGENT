@@ -2059,4 +2059,12 @@ window.WOOF_EN = {
 "已插入：方案還在規劃／審核，開始做第一步時一起送給執行的模型": "Inserted: the plan is still being drafted/reviewed; it goes to the working model when step 1 starts",
 "已插入，這一步的工具跑完就送給模型": "Inserted; the model gets it once this step's tools finish",
 "已插入：步驟都做完了、正在驗收，驗收完接著處理這則": "Inserted: all steps are done and the final check is running; this is handled right after",
+"同時最多": "Max at once",
+"每回合最多派": "Max per turn",
+"同時最多：同一個對話同時在跑的子代理，超過的排隊、前面跑完自動開始（拓展、審核不算）。每回合最多：你送出一則訊息後這一輪最多派幾個，0＝不限。": "Max at once: sub-agents running at the same time in one chat; extras queue and start when one finishes (expand/review not counted). Max per turn: how many one message may dispatch in total, 0 = no limit.",
+"審核／拓展卡住多久就不等": "Give up on a stuck review/expand after",
+"子代理在思考、輸出或跑工具都算有動靜，會一直等它想完；連續這麼久完全沒動靜才當作卡住，照目前這版繼續。0＝一直等。": "Thinking, output or running tools all count as activity, so it waits for the sub-agent to finish; only this long with no activity at all counts as stuck, and the flow continues with the current version. 0 = wait forever.",
+"審核模型驗收發現缺口時補做幾輪，每補一輪再驗一次；再驗時先核對上次列的缺口補好了沒，不會每次換一批新要求。0＝不補，只把缺口告訴你。": "Fix rounds when the final check finds gaps; each round is re-checked, first against the gaps listed last time, so new demands don't keep appearing. 0 = don't fix, just report the gaps.",
+"模型跑指令時前景最多等幾秒，超過就轉背景繼續跑（子代理則停止）。不設上限。": "How long a command may run in the foreground before moving to the background (sub-agents stop instead). No upper limit.",
+"這個對話之後的工具都直接執行（含危險指令；絕對禁止和黑名單照擋）。換權限模式就取消": "Run every tool in this chat without asking (dangerous commands included; hard-blocked and blacklisted ones still blocked). Changing the permission mode cancels this",
 };

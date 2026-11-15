@@ -6,9 +6,9 @@ enabled = true
 
 [settings.max_parallel]
 type = "number"
-label = "最多同時幾個"
+label = "同時最多幾個"
 default = 3
-help = "一次 delegate_task 最多並行的子代理數"
+help = "同一個對話同時在跑的子代理上限（方案的拓展、審核不算）。一次派超過的不會報錯，先排隊，前面的跑完自動開始"
 
 [settings.models]
 in_settings = "aux"

@@ -59,7 +59,8 @@ TOOL_CAT = {
 
 # 危險指令：全自動以外，會自動執行的時候改成先問
 DANGER = [
-    (r"\brm\s+(?:-{1,2}[\w-]+\s+)*(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\b", "rm -rf 遞迴刪除"),
+    # git rm 只是從版本庫移除（檔案救得回來），不算；rm -f 刪單一檔案也不算
+    (r"(?<!\bgit )\brm\s+(?:-{1,2}[\w-]+\s+)*(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\b", "rm -rf 遞迴刪除"),
     (r"\b(del|erase)\b(?=.*(?:\s/s\b|\*))", "del /s 大量刪除"),   # /q 只是不問確認，刪單一檔案常用，不算
     (r"\b(rd|rmdir)\s+.*?/s", "rmdir /s 刪除資料夾"),
     (r"Remove-Item\b.*-Recurse", "Remove-Item -Recurse 遞迴刪除"),

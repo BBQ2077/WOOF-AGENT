@@ -187,9 +187,7 @@ def register(woof):
         tasks = [t for t in tasks if str(t.get("goal") or "").strip()]
         if not tasks:
             return {"output": "至少要給一個 goal", "is_error": True}
-        limit = max(1, int(woof.settings.get("max_parallel") or 3))
-        if len(tasks) > limit:
-            return {"output": f"一次最多 {limit} 個子任務，這次給了 {len(tasks)} 個", "is_error": True}
+        # 一次給幾個都收：同一個對話同時在跑的超過「同時最多幾個」就排隊，前面的跑完自動開始（loop._SubSlot）
         for t in tasks:
             g = _gen_target(woof, t)
             if g and g.get("missing"):
@@ -246,8 +244,9 @@ def register(woof):
                 await progress(f"{label}失敗：{e}")
                 return {"error": f"{type(e).__name__}: {e}", "goal": t["goal"]}
 
-        from woof.agent.loop import SUB_BATCH
+        from woof.agent.loop import _SUB_RUNNING, SUB_BATCH, sub_limit
         import uuid as _uuid
+        slots = max(0, sub_limit() - _SUB_RUNNING.get(getattr(parent, "root_session_id", parent.session_id), 0))
         SUB_BATCH.set(_uuid.uuid4().hex[:8])   # 這一次派出的算同一批；gather 會把這個值帶進每個子任務
         results = await asyncio.gather(*[one(i, t) for i, t in enumerate(tasks)])
         parts, bad = [], 0
@@ -262,7 +261,7 @@ def register(woof):
                              + (f"\n它最後在做的：{r['last']}" if r.get("last") else ""))
             elif r.get("background") or r.get("pending"):
                 sid = r.get("session_id") or ""
-                parts.append(f"{head}已派出，不用等它。\n"
+                parts.append(f"{head}已派出，不用等它" + ("（同時在跑的已到上限，這個先排隊，前面的跑完自動開始）" if i >= slots else "") + "。\n"
                              f"對話 {sid}（{r.get('model') or '子代理模型'}）在背景跑，跑完會自己把報告送回來。"
                              f"你可以先用一句話跟使用者說「派出去了，我在這裡陪你等」，或繼續別的動作；"
                              f"不要停下來等它，也不要反覆呼叫 delegate_task 去催。"

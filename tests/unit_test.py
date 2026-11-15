@@ -3117,5 +3117,265 @@ class NotesLog(unittest.TestCase):
         body = js[js.index("function nlogAdd("):js.index("function nlogBadge(")]
         self.assertNotIn("paneOn", body)
 
+
+class SubIdleTimeout(unittest.TestCase):
+    """審核／拓展等多久：算卡住多久，不算總時間。一直有動靜就一直等；完全沒動靜才放棄。"""
+
+    def _run(self, body):
+        import asyncio
+        from unittest import mock
+
+        from woof.agent import loop as lp, tasks
+
+        async def fake(ctx, goal, context, model, progress, label, title_hint="", kind="", activity=None):
+            return await body(activity)
+
+        evs = []
+
+        class Ctx:
+            session_id = "x"
+
+            async def emit(self, ev):
+                evs.append(ev)
+
+        fs = dict(tasks.flow_settings(), review_timeout=1)
+        with mock.patch.object(lp, "run_subagent", fake), mock.patch.object(tasks, "flow_settings", lambda: fs), \
+                mock.patch.object(tasks, "_sub_model", lambda c, k: ""):
+            r = asyncio.run(tasks._sub(Ctx(), "g", "審核：", "審核模型：x", "review_request"))
+        return r, evs
+
+    def test_busy_thinking_is_not_killed(self):
+        import asyncio
+
+        async def body(act):
+            for _ in range(8):           # 總共 2.4 秒，超過 1 秒上限，但一直有思考
+                act({"type": "delta", "kind": "thinking", "text": "…"})
+                await asyncio.sleep(0.3)
+            return {"answer": "ok"}
+
+        r, evs = self._run(body)
+        self.assertEqual(r, {"answer": "ok"})
+        self.assertFalse(evs)
+
+    def test_long_tool_is_not_killed(self):
+        import asyncio
+
+        async def body(act):
+            act({"type": "tool_start"})
+            await asyncio.sleep(2.2)      # 工具在跑沒事件，不算卡住（工具有自己的逾時）
+            act({"type": "tool_end"})
+            return {"answer": "ok"}
+
+        self.assertEqual(self._run(body)[0], {"answer": "ok"})
+
+    def test_silent_gives_up(self):
+        import asyncio
+
+        async def body(act):
+            await asyncio.sleep(30)
+
+        r, evs = self._run(body)
+        self.assertIsNone(r)
+        self.assertIn("沒有任何動靜", evs[-1]["text"])
+
+
+class SubSlots(unittest.TestCase):
+    """同一個對話同時在跑的子代理不超過上限，超過的排隊。"""
+
+    def test_queue(self):
+        import asyncio
+        from unittest import mock
+
+        from woof.agent import loop as lp
+
+        state = {"now": 0, "peak": 0, "waits": 0}
+
+        async def on_wait(n):
+            state["waits"] += 1
+
+        async def one():
+            async with lp._SubSlot("root1", on_wait):
+                state["now"] += 1
+                state["peak"] = max(state["peak"], state["now"])
+                await asyncio.sleep(0.05)
+                state["now"] -= 1
+
+        async def main():
+            await asyncio.gather(*[one() for _ in range(5)], lp._SubSlot("root2").__aenter__())
+
+        with mock.patch.object(lp, "sub_limit", lambda: 2):
+            asyncio.run(main())
+        self.assertEqual(state["peak"], 2)
+        self.assertEqual(state["waits"], 3)
+        self.assertNotIn("root1", lp._SUB_RUNNING)
+
+    def test_no_per_call_error(self):
+        src = (ROOT / "plugins/subagent/__init__.py").read_text(encoding="utf-8")
+        self.assertNotIn("一次最多 {limit} 個子任務", src)
+        js = (ROOT / "web/dist/app.js").read_text(encoding="utf-8")
+        self.assertIn('data-subn="max_parallel"', js)
+        self.assertIn('data-subn="max_per_turn"', js)
+
+
+class AllowAllCoversDanger(unittest.TestCase):
+    def test_always_skips_danger_prompt(self):
+        import asyncio
+
+        from woof.agent import loop as lp
+
+        sid = store.create_session("m", None, "放行測試")["id"]
+        store.update_session(sid, perm="auto_ask")
+
+        class Ctx:
+            session_id = root_session_id = sid
+            cwd = "."
+
+            async def emit(self, ev):
+                raise AssertionError("不該再問：" + str(ev))
+
+        lp._allow_all.add(sid)
+        try:
+            ok, _ = asyncio.run(lp._approved({"name": "terminal", "id": "c1", "args": {"command": "rm -rf build"}}, Ctx()))
+            self.assertTrue(ok)
+            ok, why = asyncio.run(lp._approved({"name": "terminal", "id": "c2", "args": {"command": "rm -rf /"}}, Ctx()))
+            self.assertFalse(ok)   # 絕對禁止照擋
+        finally:
+            lp.reset_allow_all(sid)
+            store.delete_session(sid)
+
+
+class CmdTimeoutNoCap(unittest.TestCase):
+    def test_no_600(self):
+        from woof import server
+
+        t = (ROOT / "plugins/terminal/__init__.py").read_text(encoding="utf-8")
+        self.assertNotIn("600)", t)
+        self.assertGreater(server.CMD_TIMEOUT_MAX, 86400)
+        self.assertNotIn('max="600"', (ROOT / "web/dist/app.js").read_text(encoding="utf-8"))
+
+
+class FinalCheckPrevGaps(unittest.TestCase):
+    def test_recheck_sees_prev(self):
+        import asyncio
+        from unittest import mock
+
+        from woof.agent import tasks
+
+        got = []
+
+        async def fake_sub(ctx, goal, label, title, kind):
+            got.append(goal)
+            return {"answer": '{"pass": true}'}
+
+        with mock.patch.object(tasks, "_sub", fake_sub), mock.patch.object(tasks, "_recent_report", lambda s: ""):
+            asyncio.run(tasks.final_check(None, "s", "做網站", ["a"], None, prev=["標題太小"]))
+            asyncio.run(tasks.final_check(None, "s", "做網站", ["a"], None))
+        self.assertIn("標題太小", got[0])
+        self.assertIn("先逐條核對", got[0])
+        self.assertNotIn("上一次驗收", got[1])
+
+
+class WaitClock(unittest.TestCase):
+    def test_frontend(self):
+        js = (ROOT / "web/dist/app.js").read_text(encoding="utf-8")
+        self.assertIn("case 'step_data':", js)
+        self.assertIn("沒有新資料", js)
+        self.assertIn("基本 ${w.base}＋上下文約", js)
+        lp = (ROOT / "woof/agent/loop.py").read_text(encoding="utf-8")
+        self.assertIn('{"type": "step_data", "session_id": ctx.session_id}', lp)
+        self.assertIn('"first_base": wait_limits(0)[0]', lp)
+
+
+class DupCallIds(unittest.TestCase):
+    """模型每步都用同一組工具呼叫 id（call_0）時，換成新的，確認列才不會掛到舊卡上。"""
+
+    def test_rewrite(self):
+        from woof.agent import loop as lp
+
+        sid = store.create_session("m", None, "id 測試")["id"]
+        try:
+            store.add_message(sid, "assistant", [{"type": "tool_call", "id": "call_0", "name": "terminal", "args": {}}])
+
+            class Ctx:
+                session_id = sid
+
+            ctx = Ctx()
+            c1 = [{"type": "tool_call", "id": "call_0", "name": "terminal", "args": {}},
+                  {"type": "tool_call", "id": "call_9", "name": "terminal", "args": {}},
+                  {"type": "tool_call", "id": "call_9", "name": "terminal", "args": {}},
+                  {"type": "tool_call", "id": "", "name": "terminal", "args": {}}]
+            lp._unique_call_ids(ctx, c1)
+            ids = [b["id"] for b in c1]
+            self.assertNotEqual(ids[0], "call_0")
+            self.assertEqual(ids[1], "call_9")
+            self.assertEqual(len(set(ids)), 4)
+            self.assertTrue(all(ids))
+            c2 = [{"type": "tool_call", "id": "call_9", "name": "terminal", "args": {}}]
+            lp._unique_call_ids(ctx, c2)
+            self.assertNotEqual(c2[0]["id"], "call_9")
+        finally:
+            store.delete_session(sid)
+
+    def test_frontend_guard(self):
+        js = (ROOT / "web/dist/app.js").read_text(encoding="utf-8")
+        self.assertIn("const ap = !result && S.approvals[call.id];", js)
+
+
+class RmRule(unittest.TestCase):
+    def test_cases(self):
+        from woof import perms
+
+        def danger(c):
+            return perms.decide("auto_ask", "terminal", {"command": c})["reason"].startswith("危險指令")
+
+        for c in ("rm -rf build", "rm -fr x", "rm -f -r x", "rm -R x", "rm --recursive x", "ls && rm -rf x"):
+            self.assertTrue(danger(c), c)
+        for c in ("cd /c/x && rm -f out/q_*.png && ls out/ && du -sh frames 2>/dev/null", "rm -f a.png",
+                  'rm -f "frames/run -Rf.png"', "git rm -r --cached x", "rm --force x"):
+            self.assertFalse(danger(c), c)
+
+
+class TerminalYieldsToSteer(unittest.TestCase):
+    def test_moves_to_background(self):
+        import asyncio
+
+        import importlib.util
+
+        from woof.agent import loop as lp
+
+        spec = importlib.util.spec_from_file_location("term_plugin", ROOT / "plugins" / "terminal" / "__init__.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        tools = {}
+        mod.register(types.SimpleNamespace(settings={}, add_tool=lambda n, d, s, h, *a, **k: tools.__setitem__(n, h)))
+
+        class T:
+            session_id = "steer-term"
+            cwd = str(ROOT)
+            call_id = "c"
+
+            async def output(self, s):
+                pass
+
+        async def main():
+            async def later():
+                await asyncio.sleep(1.0)
+                lp.push_steer("steer-term", [{"type": "text", "text": "換個做法"}])
+            asyncio.ensure_future(later())
+            t0 = time.monotonic()
+            r = await tools["terminal"]({"command": "sleep 20", "timeout": 60}, T())
+            return r, time.monotonic() - t0
+
+        try:
+            r, dt = asyncio.run(main())
+        finally:
+            lp.pop_steer("steer-term")
+            from woof import procs
+            for t in list(procs.TASKS.values()):
+                if t.session_id == "steer-term":
+                    procs.stop_task(t.id)
+        self.assertLess(dt, 8)
+        self.assertIn("使用者插話", r["output"])
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

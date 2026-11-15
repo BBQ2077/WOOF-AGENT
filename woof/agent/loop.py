@@ -598,7 +598,8 @@ async def _approved(call: dict, ctx: TurnContext) -> tuple[bool, str]:
     r = perms.decide(st.get("perm") or "auto", name, call.get("args") or {}, headless)
     if r["decision"] == "deny":
         return False, _P("perm_denied", reason=r["reason"])
-    if r["decision"] == "auto" or (sid in _allow_all and not r["reason"].startswith("危險指令")):
+    # 「這個對話都允許」＝使用者對這個對話整個放行，危險指令也算（絕對禁止、黑名單在上面已經擋掉，不受影響）
+    if r["decision"] == "auto" or sid in _allow_all:
         return True, ""
     if not headless and not r["reason"].startswith("危險指令"):
         verdict = await _auto_review(name, call.get("args") or {}, ctx)
@@ -983,9 +984,12 @@ async def run_model_loop(ctx: TurnContext) -> None:
         t_req, t_first, out_tok = time.time(), None, None
         in_tok = cache_tok = None
         from woof.tokens import estimate_messages, estimate_text, estimate_tools
-        first_s, idle_s = wait_limits(estimate_messages(messages) + estimate_tools(specs) + estimate_text(system))
+        est_tok = estimate_messages(messages) + estimate_tools(specs) + estimate_text(system)
+        first_s, idle_s = wait_limits(est_tok)
         await ctx.emit({"type": "step_wait", "session_id": ctx.session_id, "first_s": first_s, "idle_s": idle_s,
+                        "first_base": wait_limits(0)[0], "ctx_tok": est_tok,
                         "retry": api_retry, "retries": api_retries()})
+        t_data = 0.0   # 上次送 step_data 的時間：模型在寫工具參數這種畫面上看不到字的資料，也讓畫面知道它有在動
         tmo = None
         got = False   # 收到過模型的資料了沒（服務商自己的提示不算）
         sdk_tok = SDK_RETRIES.set(0)
@@ -1003,6 +1007,9 @@ async def run_model_loop(ctx: TurnContext) -> None:
                     lim = idle_s if got else first_s
                     # 有任何資料（含 alive：工具參數之類不會變成字的）就重新起算；服務商在限流等待、換 key 時多給 60 秒
                     tmo.reschedule(now + lim + (60 if t == "notice" else 0) if lim else None)
+                    if t not in ("text_delta", "thinking_delta", "usage", "notice") and now - t_data >= 2:
+                        t_data = now
+                        await ctx.emit({"type": "step_data", "session_id": ctx.session_id})
                     if t_first is None and t in ("text_delta", "thinking_delta"):
                         t_first = time.time()
                     if t in ("text_delta", "thinking_delta"):
@@ -1096,6 +1103,7 @@ async def run_model_loop(ctx: TurnContext) -> None:
             raise RuntimeError("模型沒有回傳完整訊息")
         content = final["content"]
         fmeta = final.get("meta") or {}
+        _unique_call_ids(ctx, content)
         calls = [b for b in content if b.get("type") == "tool_call"]
         has_text = any(b.get("type") == "text" and str(b.get("text", "")).strip() for b in content)
         if not calls and not has_text:
@@ -1293,7 +1301,7 @@ async def _prepare_subagent(parent: TurnContext, goal: str, context: str = "", m
                             progress: Callable[[str], Awaitable[None]] | None = None, label: str = "",
                             title_hint: str = "", kind: str = "subagent_task", read_only: bool = True,
                             write_scope: list | None = None,
-                            session_id: str = "") -> tuple[dict, dict, TurnContext]:
+                            session_id: str = "", activity: Callable[[dict], None] | None = None) -> tuple[dict, dict, TurnContext]:
     """建一個子對話（或接續既有的那一個）並把任務寫進去。回 (對話, 模型設定, ctx)。"""
     if parent.session.get("parent"):  # 工具清單已經拿掉 delegate_task，這裡再擋一次，萬一別的插件繞過來呼叫
         raise RuntimeError("子代理不能再派子代理")
@@ -1336,6 +1344,8 @@ async def _prepare_subagent(parent: TurnContext, goal: str, context: str = "", m
 
     async def emit(ev: dict) -> None:
         await parent.emit(ev)
+        if activity is not None:
+            activity(ev)
         if progress and ev.get("type") == "tool_start":
             a = ev.get("args") or {}
             brief = a.get("command") or a.get("path") or a.get("query") or a.get("url") or ""
@@ -1414,12 +1424,59 @@ async def run_subagent(parent: TurnContext, goal: str, context: str = "", model_
                        progress: Callable[[str], Awaitable[None]] | None = None, label: str = "",
                        title_hint: str = "", kind: str = "subagent_task",
                        read_only: bool = True, write_scope: list | None = None,
-                       session_id: str = "") -> dict:
-    """跑到完（對抗、審核這種要拿到結果才能往下走的地方用）。"""
+                       session_id: str = "", activity: Callable[[dict], None] | None = None) -> dict:
+    """跑到完（對抗、審核這種要拿到結果才能往下走的地方用）。activity：子代理每個事件都呼叫一次（判斷卡住用）。"""
     child, model_cfg, ctx = await _prepare_subagent(
-        parent, goal, context, model_id, progress, label, title_hint, kind, read_only, write_scope, session_id)
+        parent, goal, context, model_id, progress, label, title_hint, kind, read_only, write_scope, session_id, activity)
     await _drive(ctx)
     return _subagent_report(child["id"], child.get("title") or title_hint, model_cfg)
+
+
+# 每個對話同時在跑的子代理數（設定 → 模型用途 → 子代理「同時最多幾個」）；超過的排隊，前面的跑完自動開始
+_SUB_RUNNING: dict[str, int] = {}
+_SUB_COND: list = []
+
+
+def sub_limit() -> int:
+    sp = (getattr(REG, "plugins", None) or {}).get("subagent")
+    try:
+        return max(1, min(64, int(((sp.settings if sp else None) or {}).get("max_parallel") or 3)))
+    except (TypeError, ValueError):
+        return 3
+
+
+def _sub_cond() -> asyncio.Condition:
+    loop = asyncio.get_running_loop()
+    if not _SUB_COND or _SUB_COND[0][0] is not loop:
+        _SUB_COND[:] = [(loop, asyncio.Condition())]
+    return _SUB_COND[0][1]
+
+
+class _SubSlot:
+    """拿一個名額才開始跑；名額滿了就排隊（等的時候呼叫 on_wait 一次）。"""
+
+    def __init__(self, root: str, on_wait: Callable[[int], Awaitable[None]] | None = None):
+        self.root, self.on_wait = root, on_wait
+
+    async def __aenter__(self):
+        cond = _sub_cond()
+        async with cond:
+            if _SUB_RUNNING.get(self.root, 0) >= sub_limit() and self.on_wait is not None:
+                await self.on_wait(sub_limit())
+            await cond.wait_for(lambda: _SUB_RUNNING.get(self.root, 0) < sub_limit())
+            _SUB_RUNNING[self.root] = _SUB_RUNNING.get(self.root, 0) + 1
+        return self
+
+    async def __aexit__(self, *exc):
+        cond = _sub_cond()
+        async with cond:
+            n = _SUB_RUNNING.get(self.root, 1) - 1
+            if n > 0:
+                _SUB_RUNNING[self.root] = n
+            else:
+                _SUB_RUNNING.pop(self.root, None)
+            cond.notify_all()
+        return False
 
 
 # 背景子代理：放著讓它跑，跑完自己把結果送回來（不要擋住主對話）
@@ -1452,12 +1509,22 @@ async def run_subagent_bg(parent: TurnContext, goal: str, context: str = "", mod
         status = "done"
         err = ""
         await parent.emit({"type": "run_start", "session_id": ctx.session_id})
+        root = getattr(parent, "root_session_id", parent.session_id)
+
+        async def queued(n: int) -> None:
+            text = f"排隊中：這個對話已經有 {n} 個子代理在跑（同時最多 {n} 個，設定 → 模型用途 → 子代理），前面的跑完就開始"
+            await parent.emit({"type": "notice", "session_id": ctx.session_id, "text": text})
+            if progress:
+                await progress(f"{label}{text}")
+
         try:
             if lock is None:
-                await _drive(ctx)
-            else:
-                async with lock:      # 寫入模式排隊：等前面那個寫完才開始，但主對話照樣能動
+                async with _SubSlot(root, queued):
                     await _drive(ctx)
+            else:
+                async with lock:      # 寫入模式排隊：等前面那個寫完才開始，但主對話照樣能動（等鎖的時候不佔名額）
+                    async with _SubSlot(root, queued):
+                        await _drive(ctx)
         except asyncio.CancelledError:
             # 被停掉也要回報，否則主對話會一直以為「它還在跑」而卡住
             err, status = "子代理被停止，沒有產出結論", "stopped"
@@ -1524,6 +1591,26 @@ async def resume_session(session_id: str, emit: Emit) -> None:
 
 def new_call_id() -> str:
     return "call_" + uuid.uuid4().hex[:16]
+
+
+def _unique_call_ids(ctx, content: list[dict]) -> None:
+    """有些模型的工具呼叫 id 是照順序編的（call_0、functions.terminal:0…），每一步都重複。
+    確認列、工具卡、工具結果都靠 id 對應，重複了會把「要確認」掛到舊的、早就跑完的那張卡上，
+    兩個對話同時等確認也會互相蓋掉。這裡在存檔、送出任何事件之前，把重複的換成新的。"""
+    seen = getattr(ctx, "_call_ids", None)
+    if seen is None:
+        seen = {b.get("id") for x in store.get_messages(ctx.session_id) if x["role"] == "assistant"
+                for b in x["content"] if b.get("type") == "tool_call"}
+        try:
+            ctx._call_ids = seen
+        except AttributeError:
+            pass
+    for b in content:
+        if b.get("type") != "tool_call":
+            continue
+        if not b.get("id") or b["id"] in seen or b["id"] in _approvals:
+            b["id"] = new_call_id()
+        seen.add(b["id"])
 
 
 IMG_SIDE = 1568            # 送給模型的圖最長邊（各家看圖模型內部也會縮到這附近，再大只是多傳）

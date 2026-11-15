@@ -36,6 +36,15 @@ def _python_hint(out: str) -> str:
             "系統 PATH 上的 python 沒有這些，改叫這一顆就好，不要重裝重試同一支指令。）")
 
 
+def _user_steered(session_id: str) -> bool:
+    """這個對話有使用者插話在排隊（背景指令結束這類內部通知不算）。"""
+    try:
+        from woof.agent.loop import peek_steer
+    except Exception:
+        return False
+    return any(not (it.get("meta") or {}).get("internal") for it in peek_steer(session_id))
+
+
 def _tail(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
@@ -117,7 +126,7 @@ def register(woof):
                 first = scope[0]
                 wd = first if first.is_dir() else first.parent
             cwd = str(wd)
-        timeout = min(int(args.get("timeout") or settings_num("default_timeout", 180)), 600)
+        timeout = max(1, int(args.get("timeout") or settings_num("default_timeout", 180)))   # 不設上限：超過就轉背景，不會卡住對話
         limit = settings_num("max_output", 30000)
 
         loop = asyncio.get_running_loop()
@@ -141,6 +150,7 @@ def register(woof):
                               f"{tip}\n目前輸出：\n{head}"}
 
         deadline = time.time() + timeout
+        steered = False
         try:
             while task.ended is None and time.time() < deadline:
                 await asyncio.sleep(0.25)
@@ -148,6 +158,10 @@ def register(woof):
                     chunk = "".join(pending)
                     pending.clear()
                     await ctx.output(chunk)
+                # 主對話裡使用者插話了：指令轉背景繼續跑，這一步先結束，插話馬上送給模型（不用等指令跑完）
+                if not sub and _user_steered(ctx.session_id):
+                    steered = True
+                    break
         except asyncio.CancelledError:
             procs.stop_task(task.id)
             raise
@@ -163,7 +177,8 @@ def register(woof):
             task.background = True
             _arm_notify(task, args, loop)
             tip = "結束時會自動通知你" if task.notify else "用 process 工具查看或結束"
-            return {"output": f"超過 {timeout} 秒仍在執行，已轉為背景任務 id={task.id}（PID {task.proc.pid}），{tip}。"
+            why = "使用者插話，先把這個指令轉到背景繼續跑" if steered else f"超過 {timeout} 秒仍在執行"
+            return {"output": f"{why}，已轉為背景任務 id={task.id}（PID {task.proc.pid}），{tip}。"
                               f"\n最近輸出：\n{_tail(out, 4000)}"}
         code = task.exit_code
         body = _tail(out, limit) or "(無輸出)"
@@ -230,7 +245,7 @@ def register(woof):
             "properties": {
                 "command": {"type": "string", "description": "要執行的指令"},
                 "workdir": {"type": "string", "description": "工作目錄，預設為 WOOF 工作目錄"},
-                "timeout": {"type": "integer", "description": "前景等待秒數，上限 600"},
+                "timeout": {"type": "integer", "description": "前景等待秒數，超過就轉背景繼續跑"},
                 "background": {"type": "boolean", "description": "直接放到背景執行"},
                 "notify": {"type": "boolean", "description": "背景指令結束時自動把結果送回對話（預設 true；不需要時設 false）"},
                 "open_gui": {"type": "boolean", "description": "使用者明確要你在他桌面打開檔案／網址時才設 true（start、explorer、Invoke-Item 這類）"},

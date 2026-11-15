@@ -1159,10 +1159,13 @@ def _api_retries_cfg(cfg: dict) -> int:
     return _clamp_int(cfg.get("api_retries", 3), 0, 10, 3)
 
 
+CMD_TIMEOUT_MAX = 10_000_000   # 指令逾時不設上限（超過只是轉背景，不會卡住對話）；這個數只防亂填
+
+
 def _cmd_timeout() -> int:
     p = REG.plugins.get("terminal")
     s = (getattr(p, "settings", None) or {}) if p else {}
-    return _clamp_int(s.get("default_timeout", 180), 10, 600, 180)
+    return _clamp_int(s.get("default_timeout", 180), 10, CMD_TIMEOUT_MAX, 180)
 
 
 @app.post("/api/settings")
@@ -1183,7 +1186,7 @@ async def put_settings(body: dict):
     if "idle_timeout" in body:
         cfg["idle_timeout"] = _clamp_int(body["idle_timeout"], 0, 3600, 120)
     if "cmd_timeout" in body:
-        v = _clamp_int(body["cmd_timeout"], 10, 600, 180)
+        v = _clamp_int(body["cmd_timeout"], 10, CMD_TIMEOUT_MAX, 180)
         if v != _cmd_timeout():   # 存在 terminal 插件的設定裡（插件頁那格也是它），記憶體裡的同一份一起改，馬上生效
             cur = dict((store.get_plugin_state("terminal") or {}).get("settings") or {})
             cur["default_timeout"] = v

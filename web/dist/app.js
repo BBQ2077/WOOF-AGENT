@@ -868,8 +868,12 @@ function onEvent(ev) {
       renderSessions(); if (sid === S.sid) { renderChat(); renderComposer(); renderTaskBar(); }
       break;
     case 'step_wait':   // 每一步送出模型前：記下等待上限，等待中的三個點旁顯示已等幾秒、第幾次重試
-      S.wait[sid] = { t0: Date.now(), first: ev.first_s || 0, idle: ev.idle_s || 0, n: ev.retry || 0, max: ev.retries || 0, retry: null };
+      S.wait[sid] = { t0: Date.now(), first: ev.first_s || 0, idle: ev.idle_s || 0, n: ev.retry || 0, max: ev.retries || 0, retry: null,
+        base: ev.first_base || 0, tok: ev.ctx_tok || 0, got: false };
       if (sid === S.sid) scheduleLive();
+      break;
+    case 'step_data':   // 模型有送資料（例如在寫工具參數，畫面上沒有字）：等待計時歸零，上限改用「多久沒資料」
+      if (S.wait[sid]) Object.assign(S.wait[sid], { t0: Date.now(), got: true, retry: null });
       break;
     case 'run_end':
       S.running.delete(sid); delete S.live[sid]; delete S.wait[sid];
@@ -882,7 +886,7 @@ function onEvent(ev) {
       break;
     case 'delta': {
       const l = S.live[sid] || (S.live[sid] = { thinking: '', text: '' });
-      if (S.wait[sid]) S.wait[sid].retry = null;
+      if (S.wait[sid]) Object.assign(S.wait[sid], { t0: Date.now(), got: true, retry: null });
       l[ev.kind] += ev.text;
       // 方案流程的每一步只送 flow_start、不送 run_start：沒記成執行中，畫面就沒有 #live，
       // 每一格都會退回整串重畫（一秒好幾次，點思考框、捲動都卡）。有字在串流就是在跑
@@ -931,6 +935,8 @@ function onEvent(ev) {
     case 'tool_end': {
       const t = S.tools[ev.id] || (S.tools[ev.id] = { sid, name: ev.name });
       Object.assign(t, { running: false, ms: ev.ms, is_error: ev.is_error, output: ev.output, images: ev.images });
+      // 工具跑完到下一步送出之間：從現在起算，不把剛才模型輸出、工具執行的時間算成「沒回應」
+      if (S.wait[sid]) Object.assign(S.wait[sid], { t0: Date.now(), got: false, first: 0 });
       if (sid === S.sid) renderChat();
       refreshTasks();
       break;
@@ -965,7 +971,13 @@ function onEvent(ev) {
       if (sid === S.sid) renderChat();
       attention();
       if (document.hidden && D && D.notify) D.notify('WOOF 需要你確認', `${ev.name}：${toolArgSummary(ev.name, ev.args)}`);
-      if (sid !== S.sid) notify('warn', '有工具等你確認', (S.sessions.find((x) => x.id === sid) || {}).title || '', undefined, sid);
+      {
+        // 每次跳確認都留紀錄：哪個指令、為什麼要問（誤判時回來查得到）
+        const full = ev.name === 'terminal' || ev.name === 'Bash' ? String((ev.args || {}).command || '') : toolArgSummary(ev.name, ev.args);
+        const title = `等你確認：${ev.name}${ev.reason ? `（${ev.reason}）` : ''}`;
+        if (sid !== S.sid) notify('warn', title, full, undefined, sid);
+        else nlogAdd('warn', title, full, sid || '');
+      }
       break;
     case 'ask':
       S.asks[ev.id] = ev;
@@ -2014,14 +2026,14 @@ function toolCard(call, result) {
       el.appendChild(bar);
     }
   }
-  const ap = S.approvals[call.id];
+  const ap = !result && S.approvals[call.id];   // 已經有結果的卡不掛確認列（舊卡跟新的呼叫撞 id 時不會掛錯）
   if (ap) {
     el.classList.add('ask', 'open');
     const bar = document.createElement('div');
     bar.className = 'approve';
     bar.innerHTML = `<span class="q"><b>需要你確認</b> · 允許執行 <code>${esc(call.name)}</code>？${ap.reason ? `<small class="ap-why${/^危險/.test(ap.reason) ? ' bad' : ''}">${esc(ap.reason)}</small>` : ''}</span>`
       + `<span class="btn sm" data-approve="deny" data-id="${esc(call.id)}">拒絕</span>`
-      + `<span class="btn sm" data-approve="always" data-id="${esc(call.id)}">這個對話都允許</span>`
+      + `<span class="btn sm" data-approve="always" data-id="${esc(call.id)}" title="這個對話之後的工具都直接執行（含危險指令；絕對禁止和黑名單照擋）。換權限模式就取消">這個對話都允許</span>`
       + `<span class="btn sm primary" data-approve="allow" data-id="${esc(call.id)}">允許</span>`;
     el.appendChild(bar);
   }
@@ -2651,7 +2663,7 @@ function renderChat(scrollBottom) {
     }
     // 子代理的工具確認：卡片不在這個對話裡，單獨列出
     for (const a of Object.values(S.approvals)) {
-      if (a.session_id !== S.sid || chat.querySelector(`.tool[data-id="${CSS.escape(a.id)}"]`)) continue;
+      if (a.session_id !== S.sid || chat.querySelector(`.tool[data-id="${CSS.escape(a.id)}"] .approve`)) continue;
       const card = toolCard({ id: a.id, name: a.name, args: a.args }, null);
       $('.approve .q', card).innerHTML = `<b>子代理需要你確認</b> · 允許執行 <code>${esc(a.name)}</code>？`;
       group.appendChild(card);
@@ -2904,7 +2916,12 @@ function waitText(sid) {
   const sec = Math.floor((now - w.t0) / 1000);
   const pre = w.n ? `第 ${w.n}/${w.max} 次重試 · ` : '';
   if (!pre && sec < 5) return ['', false];
-  const lim = w.first ? `（${w.first} 秒沒回應就${w.n < w.max ? '重試' : '報錯'}）` : '';
+  const act = w.n < w.max ? '重試' : '報錯';
+  if (w.got) {   // 模型已經在回（畫面上可能沒字，例如在寫工具參數）：顯示多久沒收到新資料
+    return [`${pre}模型在回應，${sec} 秒沒有新資料${w.idle ? `（連續 ${w.idle} 秒沒資料就${act}）` : ''}`, !!w.n];
+  }
+  const why = w.first && w.base && w.first > w.base ? `：基本 ${w.base}＋上下文約 ${Math.round(w.tok / 1000)}k token 每千多等 1 秒` : '';
+  const lim = w.first ? `（${w.first} 秒沒回應就${act}${why}）` : '';
   return [`${pre}等待回應 ${sec} 秒${lim}`, !!w.n];
 }
 function updateWaitText() {
@@ -5857,8 +5874,8 @@ function renderFlowSec(box) {
   const worst = f.plan_rounds + 1 + f.fix_rounds;
   box.innerHTML = `<div class="card">
     ${row('flRounds', '方案最多提幾版', '對抗審核打回、或你按「換個做法」時重提。到上限還沒過：問你要照最後一版做、交給模型自己判斷、還是取消；沒回就當作自己判斷，照最後一版繼續（收不回來的事留到最後）。/goal 不問，直接自己判斷。', num('plan_rounds', 1, 10, 1, '版'))}
-    ${row('flFix', '做完驗收後最多補幾輪', '審核模型驗收發現缺口時補做幾輪，每補一輪再驗一次。0＝不補，只把缺口告訴你。', num('fix_rounds', 0, 5, 1, '輪'))}
-    ${row('flWait', '每次審核／拓展最多等多久', '審核或拓展的子代理超過這個時間還沒結論，就不等了，照目前這版繼續。0＝一直等。', num('review_timeout', 0, 3600, 30, '秒'))}
+    ${row('flFix', '做完驗收後最多補幾輪', '審核模型驗收發現缺口時補做幾輪，每補一輪再驗一次；再驗時先核對上次列的缺口補好了沒，不會每次換一批新要求。0＝不補，只把缺口告訴你。', num('fix_rounds', 0, 5, 1, '輪'))}
+    ${row('flWait', '審核／拓展卡住多久就不等', '子代理在思考、輸出或跑工具都算有動靜，會一直等它想完；連續這麼久完全沒動靜才當作卡住，照目前這版繼續。0＝一直等。', num('review_timeout', 0, 3600, 30, '秒'))}
     ${row('flCtx', '附前文最多幾字', '你在對話中接著說（例如「0分」「不夠好 多想」）時，規劃、拓展、審核會一起看到之前在做什麼：你最近說的話，加上一輪回覆的結尾。中文一個字大約一個 token。0＝不附，只看這一句。', num('context_chars', 0, 20000, 500, '字'))}
     ${row('flGoal', '/goal 也照對話選的模式走', '開著：對話選了方案模式時，/goal 先審核或拓展再做；放著讓它自己跑，打回到上限或你沒回應都照最後一版做。關掉：/goal 直接拆步驟做，做完一樣驗收。', `<span class="sw${f.goal_gate ? ' on' : ''}" data-flgoal></span>`)}
     <div class="pm-ex"><span>依目前設定，一個方案最多審核 ${f.plan_rounds} 次、驗收 ${worst - f.plan_rounds} 次；加上等待上限，不會無限來回。</span></div>
@@ -6252,7 +6269,10 @@ function subagentRowHtml(n, tag) {
     + '<small>勾選子代理可以用的模型（可多選），主代理派工時依任務從勾選的裡面挑；沒指定時用標「預設」的那個，沒設預設就跟隨主模型。需要 API 型連線（Claude Code CLI 不行）。建議只勾便宜或免費的。</small>'
     + `<div class="now">${now}</div>`
     + `<div class="subeff"><button class="pill2" data-subeff><span class="pk">思考強度</span><b>${esc(subEffortNow().label)}</b><svg><use href="#i-down"/></svg></button>`
-    + '<small>拓展、審核一律跟隨主對話</small></div></div>'
+    + '<small>拓展、審核一律跟隨主對話</small></div>'
+    + `<div class="subnum"><label>同時最多<input type="number" min="1" max="64" step="1" data-subn="max_parallel" value="${esc(String((pl.settings || {}).max_parallel ?? 3))}" class="num">個</label>`
+    + `<label>每回合最多派<input type="number" min="0" step="1" data-subn="max_per_turn" value="${esc(String((pl.settings || {}).max_per_turn ?? 6))}" class="num">個</label>`
+    + '<small>同時最多：同一個對話同時在跑的子代理，超過的排隊、前面跑完自動開始（拓展、審核不算）。每回合最多：你送出一則訊息後這一輪最多派幾個，0＝不限。</small></div></div>'
     + mchkHtml('aux:subagent', list, {
       filter: (x) => auxFits('subagent', x), def,
       set: (sel, d) => {
@@ -6343,6 +6363,16 @@ function renderAux(box) {
   <div class="card">${auxRowHtml(...fb)}<div class="auxnote">這一項不受上面的「全部」影響；預設不設，出錯就停下來告訴你。</div></div>`;
   const mpl = (S.plugins || []).find((x) => x.name === 'media');
   gen.forEach((k) => renderGenParams(k, String(((mpl && mpl.settings) || {})[`${k}_model`] || '')));
+  box.querySelectorAll('[data-subn]').forEach((inp) => {
+    inp.onchange = () => {
+      const pl = (S.plugins || []).find((x) => x.name === 'subagent'); if (!pl) return;
+      const k = inp.dataset.subn, lo = k === 'max_parallel' ? 1 : 0, hi = k === 'max_parallel' ? 64 : 1000;
+      const v = Math.max(lo, Math.min(hi, Math.round(Number(inp.value) || lo)));
+      inp.value = v;
+      pl.settings = { ...(pl.settings || {}), [k]: v };
+      savePluginSetting('subagent', k, v);
+    };
+  });
   const eb = box.querySelector('[data-subeff]');
   if (eb) eb.onclick = () => openSpick(eb, SUB_EFFORT(), subEffortNow().v, (v) => {
     const pl = (S.plugins || []).find((x) => x.name === 'subagent'); if (!pl) return;
@@ -6361,7 +6391,7 @@ function renderGeneral(box) {
     <div class="frow" data-f="gRetry"><div><b>API 失敗自動重試</b><small>連線中斷、逾時、5xx、限流時等一下重送同一步（3、6、12…秒，最多 60 秒），用完才換備用模型或報錯。0＝不重試。</small></div><div class="fctl"><input data-g="api_retries" type="number" min="0" max="10" step="1" value="${esc(String(S.cfg.api_retries ?? 3))}" class="num"><span class="unit">次</span></div></div>
     <div class="frow" data-f="gFirstTimeout"><div><b>等待回應</b><small>送出後等模型第一筆資料最多幾秒，上下文每 1000 token 再多等 1 秒（200k 上下文＝再加 200 秒）。逾時照上面的次數重試。會先想很久又不傳思考過程的模型要調大。0＝不限。</small></div><div class="fctl"><input data-g="first_timeout" type="number" min="0" max="3600" step="10" value="${esc(String(S.cfg.first_timeout ?? 60))}" class="num"><span class="unit">秒</span></div></div>
     <div class="frow" data-f="gIdleTimeout"><div><b>回應中斷</b><small>模型開始回應後，連續幾秒完全沒有資料（思考、工具參數都算資料）就當卡住，照上面的次數重試。0＝不限。</small></div><div class="fctl"><input data-g="idle_timeout" type="number" min="0" max="3600" step="10" value="${esc(String(S.cfg.idle_timeout ?? 120))}" class="num"><span class="unit">秒</span></div></div>
-    <div class="frow" data-f="gCmdTimeout"><div><b>指令逾時</b><small>模型跑指令時前景最多等幾秒，超過就轉背景繼續跑（子代理則停止）。上限 600。</small></div><div class="fctl"><input data-g="cmd_timeout" type="number" min="10" max="600" step="10" value="${esc(String(S.cfg.cmd_timeout ?? 180))}" class="num"><span class="unit">秒</span></div></div>
+    <div class="frow" data-f="gCmdTimeout"><div><b>指令逾時</b><small>模型跑指令時前景最多等幾秒，超過就轉背景繼續跑（子代理則停止）。不設上限。</small></div><div class="fctl"><input data-g="cmd_timeout" type="number" min="10" step="10" value="${esc(String(S.cfg.cmd_timeout ?? 180))}" class="num"><span class="unit">秒</span></div></div>
     <div class="frow" data-f="gTerm"><div><b>終端機</b><small>右側「終端」新開分頁用的 shell。</small></div><div class="fctl"><select data-g="terminal_shell">${[['auto', '自動（有 Git Bash 用 Git Bash）'], ...Object.entries(S.ptyShells || { bash: 'Git Bash', powershell: 'PowerShell', cmd: '命令提示字元' })].map(([v, n]) => `<option value="${v}"${(S.cfg.terminal_shell || 'auto') === v ? ' selected' : ''}>${esc(n)}</option>`).join('')}</select></div></div>
   </div>
   <div class="card">
