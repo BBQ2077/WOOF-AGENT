@@ -2966,7 +2966,7 @@ class SteerDuringFlow(unittest.TestCase):
     def test_note_by_phase(self):
         t = self.tasks
         t._save(self.sid, goal={"objective": "x", "status": "planning"})
-        self.assertIn("規劃／審核", t.steer_note(self.sid))
+        self.assertIn("列 TODO", t.steer_note(self.sid))
         t._save(self.sid, goal={"objective": "x", "status": "running", "steps": ["a"]})
         self.assertIn("工具跑完", t.steer_note(self.sid))
         t.STAGE[self.sid] = "wait_bg"
