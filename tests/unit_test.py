@@ -3378,5 +3378,53 @@ class TerminalYieldsToSteer(unittest.TestCase):
         self.assertLess(dt, 8)
         self.assertIn("使用者插話", r["output"])
 
+
+class SubagentWriteMode(unittest.TestCase):
+    """要寫檔的子代理不能拿到唯讀工具組；寫入子代理範圍不重疊就同時跑。"""
+
+    def _mod(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("sub_plugin", ROOT / "plugins" / "subagent" / "__init__.py")
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        return m
+
+    def test_mode_and_text(self):
+        m = self._mod()
+        self.assertEqual(m._mode({"goal": "x"}), "read")
+        self.assertEqual(m._mode({"goal": "x", "scope": "lib/early"}), "write")
+        self.assertEqual(m._mode({"goal": "x", "mode": "read", "scope": "lib"}), "read")
+        self.assertIn("需要寫入權限", m._rules({"mode": "read"}))
+        src = (ROOT / "plugins" / "subagent" / "__init__.py").read_text(encoding="utf-8")
+        self.assertNotIn("全部工具", src)
+        self.assertIn("一定要 mode=write", src)
+
+    def test_scope_lock(self):
+        import asyncio
+        from pathlib import Path
+        m = self._mod()
+        base = Path("C:/lib").resolve()
+        log, waits = [], []
+
+        async def job(name, scope, dur):
+            async def w():
+                waits.append(name)
+            async with m._ScopeLock(scope, w):
+                log.append(("in", name, time.monotonic()))
+                await asyncio.sleep(dur)
+                log.append(("out", name, time.monotonic()))
+
+        async def main():
+            await asyncio.gather(job("a", [base / "early"], 0.3), job("b", [base / "late"], 0.3),
+                                 job("c", [base], 0.1), job("d", [base / "early" / "x"], 0.1))
+        asyncio.run(main())
+        t = {(k, n): v for k, n, v in log}
+        self.assertLess(abs(t[("in", "a")] - t[("in", "b")]), 0.1)        # 不重疊：同時跑
+        self.assertGreaterEqual(t[("in", "c")], t[("out", "a")] - 0.01)  # 上層資料夾：等裡面的寫完
+        self.assertGreaterEqual(t[("in", "c")], t[("out", "b")] - 0.01)
+        self.assertIn("c", waits)
+        self.assertNotIn("a", waits)
+        self.assertNotIn("b", waits)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

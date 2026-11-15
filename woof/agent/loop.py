@@ -1522,7 +1522,7 @@ async def run_subagent_bg(parent: TurnContext, goal: str, context: str = "", mod
                 async with _SubSlot(root, queued):
                     await _drive(ctx)
             else:
-                async with lock:      # 寫入模式排隊：等前面那個寫完才開始，但主對話照樣能動（等鎖的時候不佔名額）
+                async with lock:      # 寫入範圍跟正在寫的重疊才排隊（不重疊的同時跑）；主對話照樣能動，等的時候不佔名額
                     async with _SubSlot(root, queued):
                         await _drive(ctx)
         except asyncio.CancelledError:

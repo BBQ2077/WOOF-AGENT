@@ -11,13 +11,55 @@ from __future__ import annotations
 import asyncio
 import re
 
-# 寫入子代理同一時間只跑一個，避免互相覆蓋檔案
-_WRITE_LOCK = asyncio.Lock()
+class _ScopeLock:
+    """寫入子代理按範圍排隊：範圍不重疊的可以同時跑；同一個資料夾、或一個在另一個裡面才排隊。
+    沒給範圍的當成跟誰都重疊（照規範它不該改任何東西，先回報）。"""
+    _cond: "asyncio.Condition | None" = None
+    _busy: list = []
+
+    def __init__(self, scope: list, on_wait=None):
+        self.scope = list(scope or [])
+        self.on_wait = on_wait
+
+    @staticmethod
+    def _overlap(a: list, b: list) -> bool:
+        if not a or not b:
+            return True
+        return any(x == y or x in y.parents or y in x.parents for x in a for y in b)
+
+    def _clash(self) -> bool:
+        return any(self._overlap(self.scope, s) for s in _ScopeLock._busy)
+
+    async def __aenter__(self):
+        if _ScopeLock._cond is None:
+            _ScopeLock._cond = asyncio.Condition()
+        async with _ScopeLock._cond:
+            if self._clash() and self.on_wait:
+                await self.on_wait()
+            await _ScopeLock._cond.wait_for(lambda: not self._clash())
+            _ScopeLock._busy.append(self.scope)
+        return self
+
+    async def __aexit__(self, *exc):
+        async with _ScopeLock._cond:
+            _ScopeLock._busy.remove(self.scope)
+            _ScopeLock._cond.notify_all()
+        return False
+
+
+def _mode(t: dict) -> str:
+    """有給 scope 卻漏了 mode：scope 只對寫入有意義，當成 write。"""
+    m = str(t.get("mode") or "").strip().lower()
+    if m in ("read", "write"):
+        return m
+    return "write" if str(t.get("scope") or "").strip() else "read"
 
 
 def _rules(t: dict) -> str:
     if t.get("mode") != "write":
-        return "【派工規範】唯讀：只能讀取與查詢，不可修改任何檔案或外部狀態，不可再派子代理。"
+        return ("【派工規範】唯讀：只能讀取與查詢，不可修改任何檔案或外部狀態，不可再派子代理。"
+                "這個任務如果要建立或修改檔案，不要改用別的方式硬做、也不要假裝做完：立刻回報「需要寫入權限」，"
+                "列出要寫哪些檔案、放在哪個資料夾，主代理會改用寫入模式重派。")
     scope = str(t.get("scope") or "").strip()
     return ("【派工規範】寫入：只能修改下列範圍內的檔案：" + (scope or "（主代理沒指定範圍，請先回報，不要改動任何檔案）")
             + "。範圍外一律不動，只做這一個子任務，不可再派子代理。"
@@ -185,6 +227,8 @@ def register(woof):
             tasks = [{"goal": args["goal"], "context": args.get("context", "")}] + list(tasks)
         tasks = [{"mode": args.get("mode"), "scope": args.get("scope"), "model": args.get("model"), **t} for t in tasks if isinstance(t, dict)]
         tasks = [t for t in tasks if str(t.get("goal") or "").strip()]
+        for t in tasks:
+            t["mode"] = _mode(t)
         if not tasks:
             return {"output": "至少要給一個 goal", "is_error": True}
         # 一次給幾個都收：同一個對話同時在跑的超過「同時最多幾個」就排隊，前面的跑完自動開始（loop._SubSlot）
@@ -231,13 +275,17 @@ def register(woof):
                         last = (_t.last_text(sid, "assistant") or "").strip().replace("\n", " ")[:160]
                         return {"steered": True, "session_id": sid, "last": last}
                 write = t.get("mode") == "write"
-                if write:
-                    await progress(f"{label}寫入模式：排隊（同一時間只跑一個寫入子代理，主對話不用等）")
-                return await run_subagent_bg(
+
+                async def wait_scope():
+                    await progress(f"{label}寫入範圍跟另一個正在寫的子代理重疊，先排隊，它寫完就開始（主對話不用等）")
+                r = await run_subagent_bg(
                     parent, str(t["goal"]), ctx_text, str(t.get("model") or ""), None, label,
                     read_only=not write, write_scope=kw.get("write_scope"), session_id=sid,
                     kind="subagent_followup" if sid else "subagent_task",
-                    lock=_WRITE_LOCK if write else None)
+                    lock=_ScopeLock(kw.get("write_scope"), wait_scope) if write else None)
+                if isinstance(r, dict):
+                    r["mode"] = "write" if write else "read"
+                return r
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -261,8 +309,11 @@ def register(woof):
                              + (f"\n它最後在做的：{r['last']}" if r.get("last") else ""))
             elif r.get("background") or r.get("pending"):
                 sid = r.get("session_id") or ""
+                ro = r.get("mode") == "read"
                 parts.append(f"{head}已派出，不用等它" + ("（同時在跑的已到上限，這個先排隊，前面的跑完自動開始）" if i >= slots else "") + "。\n"
-                             f"對話 {sid}（{r.get('model') or '子代理模型'}）在背景跑，跑完會自己把報告送回來。"
+                             + ("這是唯讀子代理：只能讀、查、搜尋，不會建檔改檔。如果這個任務其實要寫檔，現在就用 mode=write 加 scope 重派"
+                                "（它回報「需要寫入權限」時也一樣，帶同一個 session_id 就能接著做）。\n" if ro else "")
+                             + f"對話 {sid}（{r.get('model') or '子代理模型'}）在背景跑，跑完會自己把報告送回來。"
                              f"你可以先用一句話跟使用者說「派出去了，我在這裡陪你等」，或繼續別的動作；"
                              f"不要停下來等它，也不要反覆呼叫 delegate_task 去催。"
                              f"使用者也可以直接在那條子對話裡打字跟它講話。")
@@ -274,7 +325,8 @@ def register(woof):
 
     woof.add_tool(
         "delegate_task",
-        "把能獨立做的子任務交給子代理（自己乾淨的上下文、全部工具，做完只回報告）：大量搜尋或讀檔、互不相關的平行工作、會塞爆上下文的調查；"
+        "把能獨立做的子任務交給子代理（自己乾淨的上下文，做完只回報告）：大量搜尋或讀檔、互不相關的平行工作、會塞爆上下文的調查；"
+        "預設唯讀（只能讀、查、搜尋）；要它建立或修改檔案（寫資料、寫程式、存檔），一定要 mode=write 並用 scope 給它能改的資料夾。"
         "也能生圖、生影片（見 model）。它看不到目前的對話，goal 和 context 要寫齊需求、路徑、限制。"
         "派出後不用等，主對話照常跟使用者說話，它跑完會自己送回報告。"
         "要問進度、追加要求或接著做，帶同一個 session_id 再呼叫：還在跑就是插話，跑完了就接同一份上下文繼續；不要重開，也不要反覆催。"
@@ -283,8 +335,10 @@ def register(woof):
             "goal": {"type": "string", "description": "單一子任務：要達成什麼、完成標準"},
             "context": {"type": "string", "description": "背景：路徑、已知事實、限制"},
             "mode": {"type": "string", "enum": ["read", "write"],
-                     "description": "read＝唯讀，可多個並行（預設）；write＝會改檔，同時只跑一個"},
-            "scope": {"type": "string", "description": "write 才需要：允許改的路徑，範圍外不准動"},
+                     "description": "read＝唯讀，只能讀、查、搜尋（預設）；write＝要建檔或改檔就用這個，搭配 scope。"
+                                    "scope 不重疊的寫入子代理可以同時跑，重疊才排隊"},
+            "scope": {"type": "string", "description": "write 用：允許改的資料夾或檔案（多個用 ; 分隔），範圍外不准動。"
+                                                       "平行派多個寫入時各給各的資料夾"},
             "model": {"type": "string", "description": "選填，不填＝預設子代理模型。只能用設定裡開放的（填錯會列出可用的），簡單量大的挑便宜的。"
                                                           "image／video＝生圖／影片，直接回傳檔案：goal 只寫畫面（可含比例、秒數），context 放參考圖路徑，scope 填存檔資料夾"},
             "session_id": {"type": "string", "description": "接續之前回傳的子代理 id"},
