@@ -27,7 +27,7 @@ localStorage.removeItem('woof.perm'); localStorage.removeItem('woof.effortWant')
 const S = {
   draft: {}, follow: true, chatShow: {},
   models: [], vendors: [], backends: [], plugins: [], keys: {}, sessions: [], sid: null, msgs: [],
-  running: new Set(), live: {}, tools: {}, errors: {}, usage: {}, attach: [], plugFilter: '全部', ws: null, approvals: {}, asks: {}, askDone: {}, todos: {}, planOn: {}, gate: {}, subOpen: new Set(), subShut: new Set(), act: {}, groups: [], drag: null,
+  running: new Set(), live: {}, wait: {}, tools: {}, errors: {}, usage: {}, attach: [], plugFilter: '全部', ws: null, approvals: {}, asks: {}, askDone: {}, todos: {}, planOn: {}, gate: {}, subOpen: new Set(), subShut: new Set(), act: {}, groups: [], drag: null,
   modelId: null, workdir: '', tasks: [], queue: {}, srvQ: {}, resumeHide: {}, interrupting: {}, askDraft: {},
   pins: new Set(JSON.parse(localStorage.getItem('woof.pins') || '[]')),
   profile: null,
@@ -797,8 +797,12 @@ function onEvent(ev) {
       S.running.add(sid); S.live[sid] = { thinking: '', text: '' }; delete S.errors[sid];
       renderSessions(); if (sid === S.sid) { renderChat(); renderComposer(); renderTaskBar(); }
       break;
+    case 'step_wait':   // 每一步送出模型前：記下等待上限，等待中的三個點旁顯示已等幾秒、第幾次重試
+      S.wait[sid] = { t0: Date.now(), first: ev.first_s || 0, idle: ev.idle_s || 0, n: ev.retry || 0, max: ev.retries || 0, retry: null };
+      if (sid === S.sid) scheduleLive();
+      break;
     case 'run_end':
-      S.running.delete(sid); delete S.live[sid];
+      S.running.delete(sid); delete S.live[sid]; delete S.wait[sid];
       if (ev.status === 'stopped') (S.errors[sid] = S.errors[sid] || []).push({ stopped: true });
       for (const t of Object.values(S.tools)) if (t.sid === sid && t.running) { t.running = false; t.stopped = ev.status === 'stopped'; }
       delete S.srvQ[sid];
@@ -808,6 +812,7 @@ function onEvent(ev) {
       break;
     case 'delta': {
       const l = S.live[sid] || (S.live[sid] = { thinking: '', text: '' });
+      if (S.wait[sid]) S.wait[sid].retry = null;
       l[ev.kind] += ev.text;
       // 方案流程的每一步只送 flow_start、不送 run_start：沒記成執行中，畫面就沒有 #live，
       // 每一格都會退回整串重畫（一秒好幾次，點思考框、捲動都卡）。有字在串流就是在跑
@@ -871,6 +876,14 @@ function onEvent(ev) {
       break;
     }
     case 'notice':
+      if (ev.retry) {
+        // 自動重試：顯示在這個對話等待中的三個點旁（原因＋倒數）；失敗那次已經吐出的思考清掉，重送會重來
+        const w = S.wait[sid] || (S.wait[sid] = { t0: Date.now(), first: 0, idle: 0, n: 0, max: ev.retry.max });
+        w.retry = { ...ev.retry, until: Date.now() + (ev.retry.wait || 0) * 1000 };
+        if (S.live[sid]) S.live[sid] = { thinking: '', text: '' };
+        if (sid === S.sid) scheduleLive(); else notify('info', ev.text || '');
+        break;
+      }
       notify('info', ev.text || '');
       break;
     case 'truncated':
@@ -2155,13 +2168,15 @@ function spdText(steps) {
     const inSum = known.reduce((a, s) => a + s.in_tok, 0), tSum = known.reduce((a, s) => a + s.ttft_s, 0);
     fillTxt = `填充 ${kTok(inSum / tSum)} tok/s（${kTok(steps[steps.length - 1].in_tok)} tok，${secTxt(fill)}）`;
   }
-  return [ok.length ? `生成 ${Math.round(tok / sec)} tok/s` : '', fillTxt].filter(Boolean).join(' · ');
+  const rt = steps.reduce((a, s) => a + (s.retries || []).length, 0);
+  return [ok.length ? `生成 ${Math.round(tok / sec)} tok/s` : '', fillTxt, rt ? `重試 ${rt} 次` : ''].filter(Boolean).join(' · ');
 }
 function spdTitle(steps) {
   if (!(steps || []).length) return '';
   const rows = steps.map((s, i) => `第 ${i + 1} 步：生成 ${stepRate(s) != null ? Math.round(stepRate(s)) + ' tok/s' : '一次回完'}，${s.tok_est ? '約 ' : ''}${s.out_tok} tokens，${s.gen_s} 秒；`
     + (s.in_tok ? `填充 ${s.ttft_s > 0 ? kTok(s.in_tok / s.ttft_s) + ' tok/s，' : ''}上下文 ${s.in_tok} tokens${s.cache_tok ? `（快取 ${s.cache_tok}）` : ''}，` : '填充 ')
-    + `等第一個字 ${s.ttft_s} 秒`);
+    + `等第一個字 ${s.ttft_s} 秒`
+    + ((s.retries || []).length ? `；先重試 ${s.retries.length} 次（${s.retries.map((r) => r.reason).join('；')}）` : ''));
   const head = '生成＝吐字速度（只算生成時間）；填充＝讀上下文的速度（上下文 token／送出到第一個字的時間，含網路與排隊）'
     + (steps.length > 1 ? '。多步時速度是整則平均，填充的 token 數是最後一步的上下文、秒數是每步加總' : '');
   return ` title="${esc(head + '\n' + rows.join('\n'))}"`;
@@ -2699,13 +2714,38 @@ $('#chat').addEventListener('click', (e) => {
 $('#toBottom').onclick = () => { S.follow = true; const c = $('#chat'); c.scrollTo({ top: c.scrollHeight, behavior: 'smooth' }); };
 // 直播區只更新有變的部分：整塊清掉重建時，中途量高度會讓瀏覽器把聊天區的捲動位置往上夾，看起來像卡住滑不下去
 // 思考框：使用者自己往上捲就不再強制捲到底，捲回底部才恢復；使用者自己展開／收合過就照他的
+// 等待中的三個點旁的字：重試倒數，或已等幾秒／上限（超過 5 秒或重試中才顯示）
+function waitText(sid) {
+  const w = S.wait[sid]; if (!w) return ['', false];
+  const now = Date.now();
+  if (w.retry && now < w.retry.until) {
+    return [`暫時失敗：${w.retry.reason} · ${Math.ceil((w.retry.until - now) / 1000)} 秒後重試（${w.retry.n}/${w.retry.max}）`, true];
+  }
+  if (w.retry) return [`重試中（${w.retry.n}/${w.retry.max}）…`, true];
+  const sec = Math.floor((now - w.t0) / 1000);
+  const pre = w.n ? `第 ${w.n}/${w.max} 次重試 · ` : '';
+  if (!pre && sec < 5) return ['', false];
+  const lim = w.first ? `（${w.first} 秒沒回應就${w.n < w.max ? '重試' : '報錯'}）` : '';
+  return [`${pre}等待回應 ${sec} 秒${lim}`, !!w.n];
+}
+function updateWaitText() {
+  const el = $('#live .waiting .wtx'); if (!el) return;
+  const [t, warn] = waitText(S.sid);
+  if (el.textContent !== t) el.textContent = t;
+  el.classList.toggle('warn', warn);
+}
+setInterval(updateWaitText, 1000);
 function fillLive(lv) {
   const l = S.live[S.sid] || { thinking: '', text: '' };
   const LT = S.liveThink || (S.liveThink = { sid: S.sid, open: null, pinned: true, top: 0 });
   if (LT.sid !== S.sid) Object.assign(LT, { sid: S.sid, open: null, pinned: true, top: 0 });
   const hasRunningTool = Object.values(S.tools).some((t) => t.sid === S.sid && t.running);
   const wait = $(':scope > .waiting', lv);
-  if (!l.thinking && !l.text && !hasRunningTool) { if (!wait) { lv.innerHTML = '<div class="waiting"><i></i><i></i><i></i></div>'; } return; }
+  if (!l.thinking && !l.text && !hasRunningTool) {
+    if (!wait) lv.innerHTML = '<div class="waiting"><i></i><i></i><i></i><span class="wtx"></span></div>';
+    updateWaitText();
+    return;
+  }
   if (wait) wait.remove();
   let d = $(':scope > details.think', lv);
   if (l.thinking) {
@@ -5405,6 +5445,7 @@ async function loadCfg() {
   const c = await api('GET', '/api/settings');
   S.cfg = {
     workdir: c.workdir || '', allowed_dirs: c.allowed_dirs || [], terminal_shell: c.terminal_shell || 'auto',
+    api_retries: c.api_retries, cmd_timeout: c.cmd_timeout, first_timeout: c.first_timeout, idle_timeout: c.idle_timeout,
     vendors: (c.vendors || []).map((v) => ({ ...v })), models: (c.models || []).map((m) => ({ ...m })),
     keys: (c.keys || []).map((k) => ({ ...k, key: '', orig: k.label })),
     aux: { ...(c.aux || {}) },
@@ -6115,6 +6156,8 @@ function renderGeneral(box) {
       <div class="seg">${['interrupt', 'steer', 'queue'].map((v) => `<b class="${busyMode() === v ? 'on' : ''}" data-busy="${v}" title="${BUSY_HINT[v]}">${BUSY_LABEL[v]}</b>`).join('')}</div></div>
     <div class="frow" data-f="gWorkdir"><div><b>預設工作目錄</b><small>新對話的工作目錄。每個對話可以在輸入框下方的資料夾或右側「檔案」另外換。</small></div><input data-g="workdir" value="${esc(S.cfg.workdir)}" class="mono"></div>
     <div class="frow" data-f="gRetry"><div><b>API 失敗自動重試</b><small>連線中斷、逾時、5xx、限流時等一下重送同一步（3、6、12…秒，最多 60 秒），用完才換備用模型或報錯。0＝不重試。</small></div><div class="fctl"><input data-g="api_retries" type="number" min="0" max="10" step="1" value="${esc(String(S.cfg.api_retries ?? 3))}" class="num"><span class="unit">次</span></div></div>
+    <div class="frow" data-f="gFirstTimeout"><div><b>等待回應</b><small>送出後等模型第一筆資料最多幾秒，上下文每 1000 token 再多等 1 秒（200k 上下文＝再加 200 秒）。逾時照上面的次數重試。會先想很久又不傳思考過程的模型要調大。0＝不限。</small></div><div class="fctl"><input data-g="first_timeout" type="number" min="0" max="3600" step="10" value="${esc(String(S.cfg.first_timeout ?? 60))}" class="num"><span class="unit">秒</span></div></div>
+    <div class="frow" data-f="gIdleTimeout"><div><b>回應中斷</b><small>模型開始回應後，連續幾秒完全沒有資料（思考、工具參數都算資料）就當卡住，照上面的次數重試。0＝不限。</small></div><div class="fctl"><input data-g="idle_timeout" type="number" min="0" max="3600" step="10" value="${esc(String(S.cfg.idle_timeout ?? 120))}" class="num"><span class="unit">秒</span></div></div>
     <div class="frow" data-f="gCmdTimeout"><div><b>指令逾時</b><small>模型跑指令時前景最多等幾秒，超過就轉背景繼續跑（子代理則停止）。上限 600。</small></div><div class="fctl"><input data-g="cmd_timeout" type="number" min="10" max="600" step="10" value="${esc(String(S.cfg.cmd_timeout ?? 180))}" class="num"><span class="unit">秒</span></div></div>
     <div class="frow" data-f="gTerm"><div><b>終端機</b><small>右側「終端」新開分頁用的 shell。</small></div><div class="fctl"><select data-g="terminal_shell">${[['auto', '自動（有 Git Bash 用 Git Bash）'], ...Object.entries(S.ptyShells || { bash: 'Git Bash', powershell: 'PowerShell', cmd: '命令提示字元' })].map(([v, n]) => `<option value="${v}"${(S.cfg.terminal_shell || 'auto') === v ? ' selected' : ''}>${esc(n)}</option>`).join('')}</select></div></div>
   </div>
@@ -7036,6 +7079,7 @@ async function saveSettings(opt = {}) {
   const run = (async () => {
     const r = await api('POST', '/api/settings', {
       workdir: S.cfg.workdir, allowed_dirs: S.cfg.allowed_dirs, terminal_shell: S.cfg.terminal_shell || 'auto', default_model: S.cfg.default_model || '',
+      api_retries: S.cfg.api_retries, cmd_timeout: S.cfg.cmd_timeout, first_timeout: S.cfg.first_timeout, idle_timeout: S.cfg.idle_timeout,
       vendors: S.cfg.vendors.map(clean), models: ready, aux: S.cfg.aux, prompts: S.cfg.prompts, flow: S.cfg.flow, redact_secrets: S.cfg.redact_secrets !== false,
       keys: S.cfg.keys.map((k) => ({ pool: k.pool, label: k.label, orig_label: k.orig || '', key: k.key || '' })),
     });

@@ -25,7 +25,7 @@ from woof.lazy import lazy_module
 openai = lazy_module("openai")
 
 from woof import caps
-from woof.agent.loop import load_image_b64, new_call_id
+from woof.agent.loop import load_image_b64, new_call_id, sdk_retries
 
 _RETRY_STATUS = {401, 402, 403, 429}
 
@@ -482,7 +482,7 @@ class OpenAICompat:
 
     async def _once_chat(self, key: str, model: dict, system: str, messages: list[dict], tools: list[dict], effort):
         client = openai.AsyncOpenAI(api_key=key, base_url=model.get("base_url"), timeout=600,
-                                    max_retries=int(model.get("max_retries", 2)))
+                                    max_retries=sdk_retries(model))
         chat = [{"role": "system", "content": system}] + _to_chat(
             messages, bool(model.get("vision")), _echo_mode(model))
         kw: dict = {
@@ -521,7 +521,11 @@ class OpenAICompat:
         usage = None
         finish = ""
         resp = await client.chat.completions.create(**kw)
+        alive = 0.0
         async for chunk in resp:
+            if time.monotonic() - alive > 1:   # 有資料在流（含工具參數這種不會變成字的）：讓上層的卡住偵測知道還活著
+                alive = time.monotonic()
+                yield {"type": "alive"}
             if getattr(chunk, "usage", None):
                 usage = chunk.usage
             if not chunk.choices:
@@ -602,7 +606,7 @@ class OpenAICompat:
         工具呼叫是 function_call item，回結果用 call_id 對應的 function_call_output。
         """
         client = openai.AsyncOpenAI(api_key=key, base_url=model.get("base_url"), timeout=600,
-                                    max_retries=int(model.get("max_retries", 2)))
+                                    max_retries=sdk_retries(model))
         echo = _echo_mode(model)
         kw: dict = {
             "model": model.get("model") or model["id"],
@@ -629,7 +633,11 @@ class OpenAICompat:
         out_det: dict = {}
         stop = ""
         resp = await client.responses.create(**kw)
+        alive = 0.0
         async for ev in resp:
+            if time.monotonic() - alive > 1:   # 有資料在流（含工具參數這種不會變成字的）：讓上層的卡住偵測知道還活著
+                alive = time.monotonic()
+                yield {"type": "alive"}
             kind = _get(ev, "type", "")
             if kind == "response.output_text.delta":
                 d = _get(ev, "delta") or ""

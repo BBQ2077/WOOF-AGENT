@@ -4,6 +4,11 @@
 # workdir = "D:/work"
 # 介面可以直接預覽的資料夾
 # allowed_dirs = ["D:/work"]
+# 等模型的上限（秒，0＝不限）：送出後等第一筆資料 first_timeout 秒（上下文每 1000 token 再多 1 秒）；
+# 開始回應後連續 idle_timeout 秒沒資料就算卡住。逾時照 api_retries 重試（預設 3 次）
+# first_timeout = 60
+# idle_timeout = 120
+# api_retries = 3
 
 # ── OpenAI 相容 API（OpenRouter、DeepSeek、xAI、NVIDIA NIM、Ollama 等都用這種寫法）──
 [[models]]

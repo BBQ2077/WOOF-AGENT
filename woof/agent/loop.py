@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import itertools
 import json
@@ -412,17 +413,31 @@ async def complete(model_cfg: dict, system: str, messages: list[dict], max_text:
         raise RuntimeError(f"「{model_cfg.get('label', model_cfg['id'])}」不能做輔助工作（{backend} 不是 API 型連線），"
                            "請在「設定 → 輔助模型」換一個")
     final = None
+    from woof.tokens import estimate_messages, estimate_text
+    first_s, idle_s = wait_limits(estimate_messages(messages) + estimate_text(system))
+    got = False
     # 呼叫端可以在 model_cfg 放 effort（例如寵物、五子棋照自己的設定）；沒放就不送，用模型預設
-    async for ev in provider.stream(model=model_cfg, system=system, messages=messages, tools=[],
-                                    effort=model_cfg.get("effort")):
-        if ev.get("type") == "message":
-            final = ev
-        elif ev.get("type") == "usage":
-            # 輔助呼叫（壓縮摘要、看圖、審核、標題）也記進用量，用量面板才不會少算
-            try:
-                store.log_usage("aux", model_cfg.get("id"), ev)
-            except Exception:
-                pass
+    try:
+        async with asyncio.timeout(first_s or None) as tmo:   # 卡住偵測同主回合（設定 → 一般的等待時間）
+            async for ev in provider.stream(model=model_cfg, system=system, messages=messages, tools=[],
+                                            effort=model_cfg.get("effort")):
+                if ev.get("type") in ("text_delta", "thinking_delta", "message"):
+                    got = True
+                lim = idle_s if got else first_s
+                tmo.reschedule(asyncio.get_running_loop().time() + lim + (60 if ev.get("type") == "notice" else 0) if lim else None)
+                if ev.get("type") == "message":
+                    final = ev
+                elif ev.get("type") == "usage":
+                    # 輔助呼叫（壓縮摘要、看圖、審核、標題）也記進用量，用量面板才不會少算
+                    try:
+                        store.log_usage("aux", model_cfg.get("id"), ev)
+                    except Exception:
+                        pass
+    except TimeoutError:
+        if not tmo.expired():
+            raise
+        raise StallTimeout(f"{model_cfg.get('label', model_cfg['id'])} "
+                           + (f"回應中途 {idle_s} 秒沒有動靜" if got else f"開始回應前 {first_s} 秒沒有動靜")) from None
     if final is None:
         raise RuntimeError("模型沒有回傳完整訊息")
     return "".join(b.get("text", "") for b in final["content"] if b.get("type") == "text").strip()
@@ -770,6 +785,8 @@ def is_transient_error(e: Exception) -> bool:
     """暫時性錯誤：等一下重送可能就好。金鑰、格式、額度、內容政策這類重送也一樣的不算。"""
     if is_too_large_error(e) or is_overflow_error(e):
         return False
+    if isinstance(e, TimeoutError):
+        return True
     code = _status(e)
     if code is not None:
         return int(code) in _TRANSIENT_STATUS
@@ -800,6 +817,39 @@ def retry_wait(e: Exception, n: int) -> int:
     if ra and ra > 0:
         return int(min(ra, 120)) or 1
     return max(1, min(60, int(3 * 2 ** (n - 1) * random.uniform(0.85, 1.15))))
+
+
+class StallTimeout(TimeoutError):
+    """模型連線卡住：開始回應前或回應中途太久沒有任何資料。算暫時性錯誤，照「API 失敗自動重試」重送。"""
+
+
+# 主回合呼叫模型時設成 0：SDK 自己不重試，失敗全交給 WOOF 重試（畫面看得到第幾次、為什麼）。
+# 輔助模型（標題、審核、壓縮等）沒設，照模型商的 max_retries（預設 2）
+SDK_RETRIES: contextvars.ContextVar[int | None] = contextvars.ContextVar("woof_sdk_retries", default=None)
+
+
+def sdk_retries(model: dict, default: int = 2) -> int:
+    """服務商插件建 SDK client 時用的重試次數。"""
+    v = SDK_RETRIES.get()
+    if v is not None:
+        return v
+    try:
+        return int(model.get("max_retries", default))
+    except (TypeError, ValueError):
+        return default
+
+
+def wait_limits(est_tokens: int) -> tuple[int, int]:
+    """這一步等模型的上限（設定 → 一般；config.toml 的 first_timeout、idle_timeout），0＝不限。
+    開始回應前：first_timeout 秒，再加上下文每 1000 token 多等 1 秒（上下文長，模型讀完要比較久）；
+    開始回應後：連續 idle_timeout 秒完全沒收到資料（思考也算資料）就當卡住。"""
+    def num(k: str, d: int) -> int:
+        try:
+            return max(0, min(3600, int(REG.config.get(k, d))))
+        except (TypeError, ValueError):
+            return d
+    first, idle = num("first_timeout", 60), num("idle_timeout", 120)
+    return (first + max(0, int(est_tokens)) // 1000 if first else 0), idle
 
 
 def _short_err(e: Exception) -> str:
@@ -902,6 +952,7 @@ async def run_model_loop(ctx: TurnContext) -> None:
     big_retry = 0        # 413（請求太大）：收起舊圖再送
     too_large = False
     api_retry = 0        # 連線／伺服器暫時性錯誤：等一下重送同一步（每一步成功就歸零）
+    retry_log: list[dict] = []   # 這一步重試過的原因，存進訊息 meta，訊息下方顯示「重試 N 次」
     ctx.fell_back = getattr(ctx, "fell_back", False)
     ctx.cont_counts = getattr(ctx, "cont_counts", None) or {}
     max_steps = MAX_STEPS
@@ -931,38 +982,53 @@ async def run_model_loop(ctx: TurnContext) -> None:
         text_buf = {"text": "", "thinking": ""}
         t_req, t_first, out_tok = time.time(), None, None
         in_tok = cache_tok = None
+        from woof.tokens import estimate_messages, estimate_text, estimate_tools
+        first_s, idle_s = wait_limits(estimate_messages(messages) + estimate_tools(specs) + estimate_text(system))
+        await ctx.emit({"type": "step_wait", "session_id": ctx.session_id, "first_s": first_s, "idle_s": idle_s,
+                        "retry": api_retry, "retries": api_retries()})
+        tmo = None
+        got = False   # 收到過模型的資料了沒（服務商自己的提示不算）
+        sdk_tok = SDK_RETRIES.set(0)
         try:
-            async for ev in provider.stream(
-                model=ctx.model_cfg, system=system, messages=messages,
-                tools=specs, effort=ctx.effort,
-            ):
-                t = ev.get("type")
-                if t_first is None and t in ("text_delta", "thinking_delta"):
-                    t_first = time.time()
-                if t in ("text_delta", "thinking_delta"):
-                    kind = "text" if t == "text_delta" else "thinking"
-                    text_buf[kind] += ev["text"]
-                    await ctx.emit({"type": "delta", "session_id": ctx.session_id, "kind": kind, "text": ev["text"]})
-                elif t == "usage":
-                    usage = {k: ev.get(k) for k in ("input_tokens", "output_tokens", "cache_read", "cache_write")}
-                    out_tok = ev.get("output_tokens") or out_tok
-                    in_tok = ev.get("input_tokens") or in_tok
-                    cache_tok = ev.get("cache_read") or cache_tok
-                    from woof.tokens import window_of
-                    usage["context_window"] = window_of(ctx.model_cfg) or None
-                    # input_tokens 已含快取讀寫；上下文用量＝輸入＋輸出。through＝這次請求包含到哪一則（用量錨點）
-                    usage["context_used"] = int(usage.get("input_tokens") or 0) + int(usage.get("output_tokens") or 0)
-                    usage["through"] = through
-                    await ctx.emit({"type": "usage", "session_id": ctx.session_id, **usage})
-                    st = store.get_session(ctx.session_id) or {}
-                    es = st.get("engine_state") or {}
-                    es["usage"] = usage
-                    store.update_session(ctx.session_id, engine_state=es)
-                    store.log_usage(ctx.session_id, ctx.model_cfg.get("id"), usage)
-                elif t == "notice":
-                    await ctx.emit({"type": "notice", "session_id": ctx.session_id, "text": ev.get("text", "")})
-                elif t == "message":
-                    final = ev
+            # 卡住偵測：開始回應前等 first_s 秒，之後每收到一筆資料就重新算 idle_s 秒；逾時丟 StallTimeout 走下面的重試
+            async with asyncio.timeout(first_s or None) as tmo:
+                async for ev in provider.stream(
+                    model=ctx.model_cfg, system=system, messages=messages,
+                    tools=specs, effort=ctx.effort,
+                ):
+                    t = ev.get("type")
+                    now = asyncio.get_running_loop().time()
+                    if t in ("text_delta", "thinking_delta", "message"):
+                        got = True
+                    lim = idle_s if got else first_s
+                    # 有任何資料（含 alive：工具參數之類不會變成字的）就重新起算；服務商在限流等待、換 key 時多給 60 秒
+                    tmo.reschedule(now + lim + (60 if t == "notice" else 0) if lim else None)
+                    if t_first is None and t in ("text_delta", "thinking_delta"):
+                        t_first = time.time()
+                    if t in ("text_delta", "thinking_delta"):
+                        kind = "text" if t == "text_delta" else "thinking"
+                        text_buf[kind] += ev["text"]
+                        await ctx.emit({"type": "delta", "session_id": ctx.session_id, "kind": kind, "text": ev["text"]})
+                    elif t == "usage":
+                        usage = {k: ev.get(k) for k in ("input_tokens", "output_tokens", "cache_read", "cache_write")}
+                        out_tok = ev.get("output_tokens") or out_tok
+                        in_tok = ev.get("input_tokens") or in_tok
+                        cache_tok = ev.get("cache_read") or cache_tok
+                        from woof.tokens import window_of
+                        usage["context_window"] = window_of(ctx.model_cfg) or None
+                        # input_tokens 已含快取讀寫；上下文用量＝輸入＋輸出。through＝這次請求包含到哪一則（用量錨點）
+                        usage["context_used"] = int(usage.get("input_tokens") or 0) + int(usage.get("output_tokens") or 0)
+                        usage["through"] = through
+                        await ctx.emit({"type": "usage", "session_id": ctx.session_id, **usage})
+                        st = store.get_session(ctx.session_id) or {}
+                        es = st.get("engine_state") or {}
+                        es["usage"] = usage
+                        store.update_session(ctx.session_id, engine_state=es)
+                        store.log_usage(ctx.session_id, ctx.model_cfg.get("id"), usage)
+                    elif t == "notice":
+                        await ctx.emit({"type": "notice", "session_id": ctx.session_id, "text": ev.get("text", "")})
+                    elif t == "message":
+                        final = ev
         except asyncio.CancelledError:
             if text_buf["thinking"]:
                 partial.append({"type": "thinking", "text": text_buf["thinking"]})
@@ -974,6 +1040,8 @@ async def run_model_loop(ctx: TurnContext) -> None:
             raise
         except Exception as e:
             name = ctx.model_cfg.get("label", ctx.model_cfg["id"])
+            if isinstance(e, TimeoutError) and tmo is not None and tmo.expired():
+                e = StallTimeout(f"回應中途 {idle_s} 秒沒有動靜" if got else f"開始回應前 {first_s} 秒沒有動靜")
             # 413 請求太大：多半是累積的工具圖。先只留最新一張圖重送；沒圖可收就當上下文太長去壓縮
             if is_too_large_error(e) and not text_buf["text"] and big_retry < 2:
                 big_retry += 1
@@ -989,8 +1057,11 @@ async def run_model_loop(ctx: TurnContext) -> None:
             if is_transient_error(e) and not text_buf["text"] and api_retry < api_retries():
                 api_retry += 1
                 wait = retry_wait(e, api_retry)
-                await ctx.emit({"type": "notice", "session_id": ctx.session_id, "retry": True,
-                                "text": f"{name} 暫時失敗（{_short_err(e)}），{wait} 秒後自動重試（{api_retry}/{api_retries()}）"})
+                why = _short_err(e)
+                retry_log.append({"reason": why, "wait": wait})
+                await ctx.emit({"type": "notice", "session_id": ctx.session_id,
+                                "retry": {"n": api_retry, "max": api_retries(), "wait": wait, "reason": why},
+                                "text": f"{name} 暫時失敗（{why}），{wait} 秒後自動重試（{api_retry}/{api_retries()}）"})
                 await asyncio.sleep(wait)
                 continue
             # 上下文超出模型上限：壓縮後重送這一步（最多兩次），不讓整個回合中斷
@@ -1011,7 +1082,12 @@ async def run_model_loop(ctx: TurnContext) -> None:
                 await ctx.emit({"type": "notice", "session_id": ctx.session_id,
                                 "text": f"{old} 失敗（{str(e)[:160]}），這一回合改用備用模型 {fb.get('label', fb['id'])} 接著做"})
                 continue
+            if isinstance(e, StallTimeout):
+                raise StallTimeout(f"{name} {e}" + (f"，已自動重試 {api_retry} 次" if api_retry else "")
+                                   + "。等待時間在「設定 → 一般」調整") from None
             raise
+        finally:
+            SDK_RETRIES.reset(sdk_tok)
 
         store.log_op(ctx.session_id, "model", ctx.model_cfg.get("id"), (time.time() - t_req) * 1000,
                      (t_first - t_req) * 1000 if t_first else None)
@@ -1048,6 +1124,8 @@ async def run_model_loop(ctx: TurnContext) -> None:
             await ctx.emit({"type": "message", "session_id": ctx.session_id, "message": m})
             return
         meta = {"model": ctx.model_cfg["id"], **fmeta, **_speed(t_req, t_first, out_tok, text_buf, in_tok, cache_tok)}
+        if retry_log:
+            meta["retries"], retry_log = retry_log, []
         m = store.add_message(ctx.session_id, "assistant", content, meta)
         await ctx.emit({"type": "message", "session_id": ctx.session_id, "message": m})
         await REG.events.emit("on_message", m, ctx)

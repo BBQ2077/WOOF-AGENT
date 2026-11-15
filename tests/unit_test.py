@@ -487,6 +487,97 @@ class SubagentTerminal(unittest.TestCase):
         self.assertIn("沒有指定寫入範圍", run({"command": "echo"}, ctx(str(scope)))["output"])
 
 
+class StallRetry(unittest.TestCase):
+    """模型卡住：開始回應前／回應中途太久沒資料就逾時，照 api_retries 重試，重試顯示在事件與訊息 meta；用假的服務商，不連網。"""
+
+    def _run(self, behaviors, **cfg):
+        from woof.agent import loop
+        calls, evs, sdk = [], [], []
+
+        class P:
+            async def stream(self, model, system, messages, tools, effort):
+                sdk.append(loop.sdk_retries({"max_retries": 2}))
+                b = behaviors.pop(0) if behaviors else "ok"
+                calls.append(b)
+                if b == "hang":
+                    await asyncio.sleep(30)
+                if b == "think_hang":
+                    yield {"type": "thinking_delta", "text": "想"}
+                    await asyncio.sleep(30)
+                if b == "alive":
+                    for _ in range(6):
+                        await asyncio.sleep(0.3)
+                        yield {"type": "alive"}
+                yield {"type": "text_delta", "text": "好"}
+                yield {"type": "message", "content": [{"type": "text", "text": "好"}], "meta": {}}
+
+        REG.config = {"models": [{"id": "E", "provider": "fe", "label": "E"}], "default_model": "E",
+                      "first_timeout": 1, "idle_timeout": 1, **cfg}
+        REG.providers = {"fe": P()}
+        s = store.create_session("E", None, "stall")
+
+        async def emit(ev):
+            evs.append(ev)
+
+        old = loop.retry_wait
+        loop.retry_wait = lambda e, n: 0
+        try:
+            asyncio.run(loop.run_turn(s["id"], [{"type": "text", "text": "嗨"}], emit))
+        finally:
+            loop.retry_wait = old
+        return store.get_messages(s["id"]), evs, calls, sdk
+
+    def test_first_stall_retries(self):
+        msgs, evs, calls, sdk = self._run(["hang", "ok"])
+        self.assertEqual(calls, ["hang", "ok"])
+        rt = [e["retry"] for e in evs if e.get("type") == "notice" and e.get("retry")]
+        self.assertEqual((rt[0]["n"], rt[0]["max"]), (1, 3))
+        self.assertIn("開始回應前 1 秒沒有動靜", rt[0]["reason"])
+        self.assertEqual([e["retry"] for e in evs if e.get("type") == "step_wait"], [0, 1])
+        self.assertEqual(len(msgs[-1]["meta"]["retries"]), 1)
+        self.assertEqual(sdk, [0, 0])   # 主回合關掉 SDK 自己的重試
+        from woof.agent import loop
+        self.assertEqual(loop.sdk_retries({"max_retries": 2}), 2)   # 回合外（輔助模型）照模型商設定
+
+    def test_idle_stall_mid_thinking(self):
+        msgs, evs, calls, _ = self._run(["think_hang", "ok"])
+        rt = [e["retry"] for e in evs if e.get("type") == "notice" and e.get("retry")]
+        self.assertIn("回應中途 1 秒沒有動靜", rt[0]["reason"])
+        self.assertEqual(msgs[-1]["content"][0]["text"], "好")
+
+    def test_alive_keeps_waiting(self):
+        msgs, evs, calls, _ = self._run(["alive"])   # 1.8 秒沒字，但一直有資料（例如在寫工具參數）
+        self.assertEqual(calls, ["alive"])
+        self.assertFalse([e for e in evs if e.get("type") == "notice" and e.get("retry")])
+
+    def test_exhausted_reports(self):
+        from woof.agent import loop
+        with self.assertRaises(loop.StallTimeout) as cm:   # 回合層（tasks）接住後顯示成錯誤
+            self._run(["hang", "hang"], api_retries=1)
+        self.assertIn("開始回應前 1 秒沒有動靜，已自動重試 1 次", str(cm.exception))
+
+    def test_limits(self):
+        from woof.agent import loop
+        REG.config = {}
+        self.assertEqual(loop.wait_limits(200000), (260, 120))
+        REG.config = {"first_timeout": 0, "idle_timeout": 0}
+        self.assertEqual(loop.wait_limits(200000), (0, 0))
+        self.assertTrue(loop.is_transient_error(loop.StallTimeout("x")))
+
+    def test_complete_times_out(self):
+        from woof.agent import loop
+
+        class P:
+            async def stream(self, model, system, messages, tools, effort):
+                await asyncio.sleep(30)
+                yield {}
+
+        REG.config = {"first_timeout": 1}
+        REG.providers = {"fe": P()}
+        with self.assertRaises(loop.StallTimeout):
+            asyncio.run(loop.complete({"id": "E", "provider": "fe", "label": "E"}, "", [{"role": "user", "content": [{"type": "text", "text": "x"}]}]))
+
+
 class EmptyReply(unittest.TestCase):
     """模型回空內容：先請它用文字回覆一次；還是空就明說；思考用完輸出上限時請它精簡思考。用假的服務商，不連網。"""
 

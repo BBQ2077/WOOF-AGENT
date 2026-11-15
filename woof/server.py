@@ -1098,6 +1098,8 @@ async def get_settings():
         "workdir": cfg.get("workdir") or "",
         "terminal_shell": cfg.get("terminal_shell") or "auto",
         "api_retries": _api_retries_cfg(cfg),
+        "first_timeout": _clamp_int(cfg.get("first_timeout", 60), 0, 3600, 60),
+        "idle_timeout": _clamp_int(cfg.get("idle_timeout", 120), 0, 3600, 120),
         "cmd_timeout": _cmd_timeout(),
         "allowed_dirs": cfg.get("allowed_dirs") or [],
         "vendors": cfg.get("vendors") or [],
@@ -1157,6 +1159,10 @@ async def put_settings(body: dict):
         cfg["terminal_shell"] = sh if sh in ("auto", "bash", "powershell", "pwsh", "cmd") else "auto"
     if "api_retries" in body:
         cfg["api_retries"] = _clamp_int(body["api_retries"], 0, 10, 3)
+    if "first_timeout" in body:   # 等模型回應的上限（0＝不限），見 loop.wait_limits
+        cfg["first_timeout"] = _clamp_int(body["first_timeout"], 0, 3600, 60)
+    if "idle_timeout" in body:
+        cfg["idle_timeout"] = _clamp_int(body["idle_timeout"], 0, 3600, 120)
     if "cmd_timeout" in body:
         v = _clamp_int(body["cmd_timeout"], 10, 600, 180)
         if v != _cmd_timeout():   # 存在 terminal 插件的設定裡（插件頁那格也是它），記憶體裡的同一份一起改，馬上生效

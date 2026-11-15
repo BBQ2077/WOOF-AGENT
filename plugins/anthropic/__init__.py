@@ -15,7 +15,7 @@ from woof.lazy import lazy_module
 # SDK 很大（約 24 MB、1.4 秒）：第一次真的呼叫 Claude 時才載入
 anthropic = lazy_module("anthropic")
 
-from woof.agent.loop import load_image_b64
+from woof.agent.loop import load_image_b64, sdk_retries
 
 
 def _to_anthropic(messages: list[dict]) -> list[dict]:
@@ -102,7 +102,7 @@ class AnthropicProvider:
             base_url = base_url[:-3]
         # 連線 10 秒、讀取 900 秒：長回合不要被讀取逾時誤殺
         return anthropic.AsyncAnthropic(api_key=key, base_url=base_url or None,
-                                        timeout=anthropic.Timeout(900.0, connect=10.0), max_retries=2)
+                                        timeout=anthropic.Timeout(900.0, connect=10.0), max_retries=sdk_retries(model))
 
     async def _once(self, key, model, system, messages, tools, effort):
         client = self._make_client(key, model)
@@ -133,7 +133,11 @@ class AnthropicProvider:
             kw["extra_body"] = {"output_config": {"effort": effort}}
 
         async with client.messages.stream(**kw) as stream:
+            alive = 0.0
             async for ev in stream:
+                if time.monotonic() - alive > 1:   # 有資料在流（含工具參數這種不會變成字的）：讓上層的卡住偵測知道還活著
+                    alive = time.monotonic()
+                    yield {"type": "alive"}
                 if ev.type == "content_block_delta":
                     d = ev.delta
                     if d.type == "text_delta":
