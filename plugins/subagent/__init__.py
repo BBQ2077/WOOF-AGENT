@@ -327,6 +327,29 @@ def register(woof):
                 parts.append(f"{head}\n{r}")
         return {"output": "\n\n".join(parts), "is_error": bad == len(results)}
 
+    async def stop_subagent(args, ctx):
+        from woof.agent import loop as _l
+
+        sid = str(args.get("session_id") or "").strip()
+        mine = {ctx.session_id, getattr(ctx, "root_session_id", ctx.session_id)}
+        if not sid:
+            kids = _l.bg_children(ctx.session_id)
+            return {"output": "要停哪一個：帶 session_id。還在跑的子代理：" + ("、".join(kids) if kids else "沒有"), "is_error": True}
+        if _l.BG_PARENT.get(sid) not in mine:
+            return {"output": f"{sid} 不是這個對話派出、還在跑的子代理", "is_error": True}
+        if not _l.stop_agent(sid):
+            return {"output": f"子代理 {sid} 已經結束了"}
+        return {"output": f"已停下子代理 {sid}，它停在哪、做了什麼會照樣送回報告；要它接著做或改做別的，帶同一個 session_id 呼叫 delegate_task"}
+
+    woof.add_tool(
+        "stop_subagent",
+        "停下自己派出、還在跑的背景子代理（帶它的 session_id）。只在你判斷它做的事已經不需要、方向錯了、或跟使用者剛說的衝突時用；"
+        "使用者插話不代表要停子代理，跟它無關就讓它繼續跑。停下後它的進度會照樣回報；要改方向就帶同一個 session_id 用 delegate_task 追加要求，不用停。",
+        {"type": "object", "properties": {"session_id": {"type": "string", "description": "要停的子代理 id（delegate_task 回傳的）"}},
+         "required": ["session_id"]},
+        stop_subagent,
+    )
+
     woof.add_tool(
         "delegate_task",
         "把能獨立做的子任務交給子代理（自己乾淨的上下文，做完只回報告）：大量搜尋或讀檔、互不相關的平行工作、會塞爆上下文的調查；"

@@ -422,13 +422,16 @@ class LoopFallbackAndReview(unittest.TestCase):
 
 
 class SubagentSteer(unittest.TestCase):
-    """子代理執行中，使用者在主對話插話：子代理做完這一步就停下回報。"""
+    """子代理執行中，使用者在主對話插話：子代理照樣做完（插話只交給主對話，要不要停由主模型決定）。"""
 
-    def test_stop_on_user_steer(self):
+    def test_user_steer_does_not_stop_subagent(self):
         from woof.agent import loop
 
         class Loopy:
             async def stream(self, model, system, messages, tools, effort):
+                if sum(1 for m in messages if m.get("role") == "tool") >= 3:
+                    yield {"type": "message", "content": [{"type": "text", "text": "做完了"}]}
+                    return
                 yield {"type": "text_delta", "text": "查一下"}
                 yield {"type": "message", "content": [{"type": "text", "text": "查一下"},
                                                       {"type": "tool_call", "id": f"t{len(messages)}", "name": "poke", "args": {}}]}
@@ -450,8 +453,8 @@ class SubagentSteer(unittest.TestCase):
         parent = loop.TurnContext(parent_s, REG.config["models"][0], None, emit)
         r = asyncio.run(loop.run_subagent(parent, "做很久的事"))
         text = r.get("answer") or r.get("text") or str(r)
-        self.assertIn("使用者在主對話插話", text)
-        self.assertEqual(len(loop.peek_steer(parent_s["id"])), 1)  # 插話留給主對話
+        self.assertIn("做完了", text)                              # 沒被插話停下
+        self.assertEqual(len(loop.peek_steer(parent_s["id"])), 3)  # 每句插話都留給主對話，子代理不吃
 
 
 class SubagentTerminal(unittest.TestCase):
@@ -2734,7 +2737,7 @@ class SubagentAlwaysReports(unittest.TestCase):
 
     def test_source_has_steer_and_report(self):
         lp = open(str(ROOT / "woof/agent/loop.py"), encoding="utf-8").read()
-        self.assertIn("子代理被停止，沒有產出結論", lp)
+        self.assertIn("子代理被停下（主對話用 stop_subagent 或你按了停止）", lp)
         self.assertIn("asyncio.shield(inject(parent_sid, \"bg_done\", report_text(r)))", lp)
         sp = open(str(ROOT / "plugins/subagent/__init__.py"), encoding="utf-8").read()
         self.assertIn("if sid in AGENT_RUNS:", sp)
@@ -3040,7 +3043,7 @@ class SteerDuringFlow(unittest.TestCase):
         self.assertIn("elif running or agent_running or flow_running:", sv)
         self.assertIn("or _tasks.is_running(sid):   # 方案流程在跑也排隊", sv)
         lp = (ROOT / "woof/agent/loop.py").read_text(encoding="utf-8")
-        self.assertIn('.get("kind") != "review"', lp)
+        self.assertNotIn("子代理先停在這裡", lp)   # 插話不會讓子代理停下
 
 
 class NotesLog(unittest.TestCase):

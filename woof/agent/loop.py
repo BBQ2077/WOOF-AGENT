@@ -1245,20 +1245,6 @@ async def run_model_loop(ctx: TurnContext) -> None:
         await ctx.emit({"type": "message", "session_id": ctx.session_id, "message": m})
         # 工具結果之後、下一次呼叫模型之前：把執行中插入的句子併入，模型這一步就看得到
         await flush_steer(ctx.session_id, ctx.emit)
-        # 子代理：使用者在主對話插話了，先停下把進度交回去，主代理看到插話再決定要不要重派
-        # 方案流程自己派的審核／拓展不停：它們的結果是流程要用的，插話等流程下一步送給執行的模型
-        if ctx.session.get("parent") and ((ctx.session.get("engine_state") or {}).get("sub") or {}).get("kind") != "review" \
-                and any(not (it.get("meta") or {}).get("internal")
-                                             for it in peek_steer(getattr(ctx, "root_session_id", ""))):
-            done = [x for x in store.get_messages(ctx.session_id) if x["role"] == "assistant"]
-            said = "\n".join(b.get("text", "") for x in done for b in x["content"] if b.get("type") == "text").strip()
-            steps = sum(1 for x in store.get_messages(ctx.session_id) if x["role"] == "tool")
-            text = (f"（使用者在主對話插話，子代理先停在這裡。已執行 {steps} 步工具，任務可能還沒完成。）"
-                    + (f"\n\n目前為止的進度：\n{said[-3000:]}" if said else ""))
-            m = store.add_message(ctx.session_id, "assistant", [{"type": "text", "text": text}],
-                                  {"model": ctx.model_cfg["id"], "interrupted_by_user": True})
-            await ctx.emit({"type": "message", "session_id": ctx.session_id, "message": m})
-            return
     s2 = mark_interrupted(ctx.session_id, f"已達單次最多 {max_steps} 步", "max_steps")
     if s2:
         await ctx.emit({"type": "session_updated", "session": s2})
@@ -1427,7 +1413,7 @@ async def _prepare_subagent(parent: TurnContext, goal: str, context: str = "", m
     ctx = TurnContext(child, model_cfg, effort, emit)
     ctx.root_session_id = getattr(parent, "root_session_id", parent.session_id)
     ctx.turn_mid = getattr(parent, "turn_mid", 0)
-    ctx.tool_exclude = set(parent.tool_exclude) | {"delegate_task"}
+    ctx.tool_exclude = set(parent.tool_exclude) | {"delegate_task", "stop_subagent"}
     ctx.tool_exclude |= mutating_tools(read_only)
     ctx.write_scope = None if read_only else list(write_scope or [])
     ctx.cwd = parent.cwd
@@ -1615,7 +1601,8 @@ async def run_subagent_bg(parent: TurnContext, goal: str, context: str = "", mod
                         await _drive(ctx)
         except asyncio.CancelledError:
             # 被停掉也要回報，否則主對話會一直以為「它還在跑」而卡住
-            err, status = "子代理被停止，沒有產出結論", "stopped"
+            err, status = ("子代理被停下（主對話用 stop_subagent 或你按了停止），任務還沒做完，上面是它停下前最後說的；"
+                           "要它接著做，帶同一個 session_id 呼叫 delegate_task"), "stopped"
             raise
         except Exception as e:  # 背景任務炸掉不能拖垮主對話
             err, status = f"{type(e).__name__}: {e}", "error"
@@ -1680,7 +1667,7 @@ async def resume_bg(child_id: str, rec: dict, emit: Emit) -> bool:
         return False
     pctx = TurnContext(parent, pm, parent.get("effort") or pm.get("default_effort"), emit)
     pctx.root_session_id = rec.get("root") or parent["id"]
-    pctx.tool_exclude = set(rec.get("exclude") or []) - {"delegate_task"}
+    pctx.tool_exclude = set(rec.get("exclude") or []) - {"delegate_task", "stop_subagent"}
     if rec.get("cwd"):
         pctx.cwd = rec["cwd"]
     scope = [Path(p) for p in rec.get("scope") or []]
