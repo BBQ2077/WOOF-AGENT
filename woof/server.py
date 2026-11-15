@@ -2474,6 +2474,11 @@ async def _recover_runs() -> None:
     from .agent import tasks as _tasks
     from .agent.loop import resume_bg
 
+    async def _stable(sid: str) -> None:
+        # 接回後撐過 2 分鐘沒當掉：計數歸零。上限只擋「一接回就讓程式當掉」的循環，不擋正常的長工作
+        await asyncio.sleep(120)
+        live.progress(sid)
+
     await asyncio.sleep(1)
     recs = live.take()
     if not recs:
@@ -2489,6 +2494,7 @@ async def _recover_runs() -> None:
             continue
         if rec.get("bg"):
             live.remark(sid, {"bg": rec["bg"], "n": rec.get("n")})
+            asyncio.create_task(_stable(sid))
             try:
                 if not await resume_bg(sid, rec["bg"], broadcast):
                     live.unmark(sid, "bg")
@@ -2507,11 +2513,13 @@ async def _recover_runs() -> None:
             if rec.get("flow"):
                 if _tasks.resume_goal(sid, broadcast, reason):
                     live.remark(sid, {"flow": True, "n": n})
+                    asyncio.create_task(_stable(sid))
                     await broadcast({"type": "notice", "session_id": sid, "text": "程式重開：自動接回方案"})
                     continue
                 if not rec.get("turn"):
                     continue   # 方案已經結束、或之後你下了新指令：沒有可接的，不另外開回合
             live.remark(sid, {"turn": True, "n": n})
+            asyncio.create_task(_stable(sid))
             RUNS[sid] = asyncio.create_task(_continue_turn(sid, reason))
             await broadcast({"type": "notice", "session_id": sid, "text": "程式重開：自動接著做"})
 
