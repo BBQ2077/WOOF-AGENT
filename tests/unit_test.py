@@ -3108,13 +3108,14 @@ class NotesLog(unittest.TestCase):
         html = (ROOT / "web/dist/index.html").read_text(encoding="utf-8")
         self.assertIn('data-p="paneNotes"', html)
         self.assertIn('id="paneNotes"', html)
-        self.assertIn('id="nlogBadge"', html)
+        self.assertNotIn('nlogBadge', html + js)   # 分頁上不顯示未讀紅點
+        self.assertNotIn('noteUnread', js.replace("localStorage.removeItem('woof.noteUnread')", ''))
         for k in ("function nlogAdd(", "function renderNotesLog(", "if (sid !== undefined || type === 'error' || type === 'warn') nlogAdd(",
                   "notify('info', ev.text || '', '', undefined, sid || '')"):
             self.assertIn(k, js)
         # 通知紀錄在 notify 前面定義，而且不能用到後面才宣告的 const（啟動時就可能跳通知）
         self.assertLess(js.index("function nlogAdd("), js.index("function notify("))
-        body = js[js.index("function nlogAdd("):js.index("function nlogBadge(")]
+        body = js[js.index("function nlogAdd("):js.index("function nlogWhen(")]
         self.assertNotIn("paneOn", body)
 
 

@@ -458,7 +458,8 @@ async function connectRemote() {
 // 後端送來的提示（方案進度、插話、重試、錯誤）全部留；畫面自己的小提示（已複製、已儲存）只留錯誤與警告。
 // 存在這台裝置（localStorage），重開程式還在，最多留 NLOG_MAX 則
 const NLOG_KEY = 'woof.noteLog', NLOG_MAX = 400;
-const NLOG = { items: [], unread: Number(localStorage.getItem('woof.noteUnread') || 0), filter: localStorage.getItem('woof.noteF') || 'all', open: new Set() };
+const NLOG = { items: [], filter: localStorage.getItem('woof.noteF') || 'all', open: new Set() };
+localStorage.removeItem('woof.noteUnread');
 try { const a = JSON.parse(localStorage.getItem(NLOG_KEY) || '[]'); if (Array.isArray(a)) NLOG.items = a; } catch {}
 let nlogSaveT = 0;
 function nlogAdd(type, title, detail, sid) {
@@ -472,16 +473,9 @@ function nlogAdd(type, title, detail, sid) {
   }
   const pn = $('#paneNotes'), rt = $('#right');
   const seen = !!(pn && rt && pn.classList.contains('on') && !rt.classList.contains('hide') && !document.hidden);
-  if (!seen) { NLOG.unread += 1; localStorage.setItem('woof.noteUnread', String(NLOG.unread)); }
   clearTimeout(nlogSaveT);
   nlogSaveT = setTimeout(() => { try { localStorage.setItem(NLOG_KEY, JSON.stringify(NLOG.items)); } catch {} }, 300);
-  nlogBadge();
   if (seen) renderNotesLog();
-}
-function nlogBadge() {
-  const b = $('#nlogBadge'); if (!b) return;
-  b.textContent = NLOG.unread > 99 ? '99+' : String(NLOG.unread || '');
-  b.hidden = !NLOG.unread;
 }
 function nlogWhen(ts) {
   const d = new Date(ts), now = new Date();
@@ -4083,13 +4077,12 @@ function openTab(id) {
   if (id === 'paneTerm') syncTerms();
   if (id === 'paneArts') renderArts();
   if (id === 'panePet') petLoad();
-  if (id === 'paneNotes') { NLOG.unread = 0; localStorage.setItem('woof.noteUnread', '0'); nlogBadge(); renderNotesLog(); }
+  if (id === 'paneNotes') renderNotesLog();
   localStorage.setItem('woof.rtab', id);
 }
 $('#togRight').onclick = () => setRight($('#right').classList.contains('hide'));
 setRight(localStorage.getItem('woof.right') !== '0');
 $$('.tabs div').forEach((t) => (t.onclick = () => openTab(t.dataset.p)));
-nlogBadge();
 $('#paneNotes').addEventListener('click', (e) => {
   const f = e.target.closest('[data-nf]');
   if (f) { NLOG.filter = f.dataset.nf; localStorage.setItem('woof.noteF', NLOG.filter); renderNotesLog(); return; }
@@ -4099,8 +4092,8 @@ $('#paneNotes').addEventListener('click', (e) => {
   if (a.dataset.nlog === 'clear') {
     modal({ title: '清除通知紀錄？', desc: `${NLOG.items.length} 則通知會全部刪掉`, ok: '清除', danger: true }).then((ok) => {
       if (!ok) return;
-      NLOG.items = []; NLOG.open.clear(); NLOG.unread = 0;
-      localStorage.removeItem(NLOG_KEY); localStorage.setItem('woof.noteUnread', '0'); nlogBadge(); renderNotesLog();
+      NLOG.items = []; NLOG.open.clear();
+      localStorage.removeItem(NLOG_KEY); renderNotesLog();
     });
     return;
   }

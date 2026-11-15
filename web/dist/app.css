@@ -1936,9 +1936,6 @@ body.pane2 #paneA{padding:0}
 .askmulti-done .askd .a{margin-top:2px}
 .askmulti-done > .a{margin-top:6px}
 /* ---- 右側「通知」分頁：彈窗的紀錄 ---- */
-.right .tabs div[data-p="paneNotes"]{position:relative;gap:4px}
-.nbadge{min-width:16px;height:16px;padding:0 4px;box-sizing:border-box;border-radius:8px;background:var(--bad);color:#fff;font-size:10px;font-weight:700;line-height:16px;text-align:center}
-.nbadge[hidden]{display:none}
 #paneNotes{padding:10px 10px 16px}
 .nlog-hd{display:flex;align-items:center;gap:8px;margin-bottom:10px}
 .nlog-seg b{padding:4px 9px;font-size:12px;display:inline-flex;align-items:center;gap:5px}
