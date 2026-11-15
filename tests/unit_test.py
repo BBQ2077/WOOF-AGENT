@@ -3426,5 +3426,28 @@ class SubagentWriteMode(unittest.TestCase):
         self.assertNotIn("a", waits)
         self.assertNotIn("b", waits)
 
+
+class ResumeAfterSteer(unittest.TestCase):
+    """方案執行中插過話，程式重開後按「繼續」仍接回原方案，不會從規劃重來；正式的新指令才讓方案作廢。"""
+
+    def test_steer_keeps_goal(self):
+        from woof.agent import tasks
+
+        sid = store.create_session("m", None, "續接測試")["id"]
+        try:
+            store.add_message(sid, "user", [{"type": "text", "text": "做一個遊戲"}])
+            tasks._goal_save(sid, "做一個遊戲", "running", ["第一步", "第二步"], 1, new=True)
+            store.add_message(sid, "assistant", [{"type": "text", "text": "做第一步"}])
+            store.add_message(sid, "user", [{"type": "text", "text": "子代理最多 6 個"}], {"steer": True})
+            self.assertIsNotNone(tasks.resumable_goal(sid))
+            store.add_message(sid, "user", [{"type": "text", "text": "改做別的"}])
+            self.assertIsNone(tasks.resumable_goal(sid))
+        finally:
+            store.delete_session(sid)
+
+    def test_server_marks_steer(self):
+        src = (ROOT / "woof" / "server.py").read_text(encoding="utf-8")
+        self.assertIn('push_steer(sid, blocks, {"steer": True})', src)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

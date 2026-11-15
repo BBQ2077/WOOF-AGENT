@@ -2754,7 +2754,7 @@ async def ws_endpoint(ws: WebSocket):
 
                         if _tasksx.skip_ask(sid):
                             await broadcast({"type": "notice", "session_id": sid, "text": "已用你這則訊息回答剛才的提問"})
-                        push_steer(sid, blocks)
+                        push_steer(sid, blocks, {"steer": True})   # 標成插話：「繼續」時不當成新指令（方案照樣接得回來）
                         steered = True
                         if agent_running:
                             # 子代理還在自己那條對話裡跑：這一步跑完就會看到追加要求，不用重開

@@ -648,7 +648,9 @@ def resumable_goal(session_id: str) -> dict | None:
         return None
     since = int(g.get("since") or 0)
     for m in store.get_messages(session_id, after=since):
-        if m["role"] == "user" and not (m.get("meta") or {}).get("internal"):
+        meta = m.get("meta") or {}
+        # 插話（方案執行中補充的話）不算新指令：模型已經看到了，方案照樣接回
+        if m["role"] == "user" and not meta.get("internal") and not meta.get("steer"):
             return None
     return g
 
