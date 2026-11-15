@@ -1165,7 +1165,9 @@ async def run_model_loop(ctx: TurnContext) -> None:
         # 工具結果之後、下一次呼叫模型之前：把執行中插入的句子併入，模型這一步就看得到
         await flush_steer(ctx.session_id, ctx.emit)
         # 子代理：使用者在主對話插話了，先停下把進度交回去，主代理看到插話再決定要不要重派
-        if ctx.session.get("parent") and any(not (it.get("meta") or {}).get("internal")
+        # 方案流程自己派的審核／拓展不停：它們的結果是流程要用的，插話等流程下一步送給執行的模型
+        if ctx.session.get("parent") and ((ctx.session.get("engine_state") or {}).get("sub") or {}).get("kind") != "review" \
+                and any(not (it.get("meta") or {}).get("internal")
                                              for it in peek_steer(getattr(ctx, "root_session_id", ""))):
             done = [x for x in store.get_messages(ctx.session_id) if x["role"] == "assistant"]
             said = "\n".join(b.get("text", "") for x in done for b in x["content"] if b.get("type") == "text").strip()

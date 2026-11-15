@@ -28,7 +28,7 @@ const S = {
   draft: {}, follow: true, chatShow: {},
   models: [], vendors: [], backends: [], plugins: [], keys: {}, sessions: [], sid: null, msgs: [],
   running: new Set(), live: {}, wait: {}, tools: {}, errors: {}, usage: {}, attach: [], plugFilter: '全部', ws: null, approvals: {}, asks: {}, askDone: {}, todos: {}, planOn: {}, gate: {}, subOpen: new Set(), subShut: new Set(), act: {}, groups: [], drag: null,
-  modelId: null, workdir: '', tasks: [], queue: {}, srvQ: {}, resumeHide: {}, interrupting: {}, askDraft: {},
+  modelId: null, workdir: '', tasks: [], queue: {}, srvQ: {}, resumeHide: {}, interrupting: {}, askDraft: {}, askSel: {},
   pins: new Set(JSON.parse(localStorage.getItem('woof.pins') || '[]')),
   profile: null,
   cfg: null, dirty: false, setSec: localStorage.getItem('woof.setSec') || 'vendors', openVendors: new Set(),
@@ -454,9 +454,79 @@ async function connectRemote() {
   loginSet('');
   location.reload();
 }
-// ---- 通知：右上角堆疊。錯誤不會自己消失，可展開詳細、可複製。
-function notify(type, title, detail = '', ms) {
+// ---- 通知紀錄（右側「通知」分頁）：彈窗一閃就沒了，錯過就不知道剛才怎麼了，所以每則都留一份。
+// 後端送來的提示（方案進度、插話、重試、錯誤）全部留；畫面自己的小提示（已複製、已儲存）只留錯誤與警告。
+// 存在這台裝置（localStorage），重開程式還在，最多留 NLOG_MAX 則
+const NLOG_KEY = 'woof.noteLog', NLOG_MAX = 400;
+const NLOG = { items: [], unread: Number(localStorage.getItem('woof.noteUnread') || 0), filter: localStorage.getItem('woof.noteF') || 'all', open: new Set() };
+try { const a = JSON.parse(localStorage.getItem(NLOG_KEY) || '[]'); if (Array.isArray(a)) NLOG.items = a; } catch {}
+let nlogSaveT = 0;
+function nlogAdd(type, title, detail, sid) {
+  const last = NLOG.items[NLOG.items.length - 1];
+  const now = Date.now();
+  if (last && last.title === title && last.detail === detail && last.sid === sid && now - last.at < 5000) { last.n = (last.n || 1) + 1; last.at = now; }
+  else {
+    const s = sid ? (S.sessions || []).find((x) => x.id === sid) : null;
+    NLOG.items.push({ id: now.toString(36) + Math.random().toString(36).slice(2, 6), at: now, type, title, detail, sid: sid || '', st: s ? s.title || '' : '' });
+    if (NLOG.items.length > NLOG_MAX) NLOG.items.splice(0, NLOG.items.length - NLOG_MAX);
+  }
+  const pn = $('#paneNotes'), rt = $('#right');
+  const seen = !!(pn && rt && pn.classList.contains('on') && !rt.classList.contains('hide') && !document.hidden);
+  if (!seen) { NLOG.unread += 1; localStorage.setItem('woof.noteUnread', String(NLOG.unread)); }
+  clearTimeout(nlogSaveT);
+  nlogSaveT = setTimeout(() => { try { localStorage.setItem(NLOG_KEY, JSON.stringify(NLOG.items)); } catch {} }, 300);
+  nlogBadge();
+  if (seen) renderNotesLog();
+}
+function nlogBadge() {
+  const b = $('#nlogBadge'); if (!b) return;
+  b.textContent = NLOG.unread > 99 ? '99+' : String(NLOG.unread || '');
+  b.hidden = !NLOG.unread;
+}
+function nlogWhen(ts) {
+  const d = new Date(ts), now = new Date();
+  const hm = d.toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+  if (d.toDateString() === now.toDateString()) return hm;
+  const y = new Date(now); y.setDate(now.getDate() - 1);
+  if (d.toDateString() === y.toDateString()) return '昨天 ' + hm;
+  return `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
+}
+function renderNotesLog() {
+  const pane = $('#paneNotes'); if (!pane) return;
+  const f = NLOG.filter;
+  const all = NLOG.items;
+  const shown = all.filter((x) => f === 'all' || (f === 'cur' ? x.sid && x.sid === S.sid : x.type === 'error' || x.type === 'warn')).slice().reverse();
+  const nErr = all.filter((x) => x.type === 'error' || x.type === 'warn').length;
+  const head = `<div class="nlog-hd"><div class="seg nlog-seg">${[['all', '全部', all.length], ['cur', '此對話', all.filter((x) => x.sid && x.sid === S.sid).length], ['err', '錯誤與警告', nErr]]
+    .map(([k, l, n]) => `<b class="${f === k ? 'on' : ''}" data-nf="${k}">${l}<i>${n}</i></b>`).join('')}</div>`
+    + (all.length ? `<a class="nlog-clear" data-nlog="clear" title="清掉全部通知紀錄">清除</a>` : '') + `</div>`;
+  if (!shown.length) {
+    pane.innerHTML = head + `<div class="blank">${all.length ? '這個分類沒有通知' : '還沒有通知'}<small>跳出來的提示（方案進度、插話、重試、錯誤）都會留在這裡，錯過了可以回來看</small></div>`;
+    return;
+  }
+  let day = '';
+  const rows = shown.map((x) => {
+    const d = new Date(x.at).toDateString();
+    const sep = d !== day ? `<div class="nlog-day">${esc(d === new Date().toDateString() ? '今天' : new Date(x.at).toLocaleDateString('zh-TW', { month: 'numeric', day: 'numeric', weekday: 'short' }))}</div>` : '';
+    day = d;
+    const s = x.sid ? (S.sessions || []).find((y) => y.id === x.sid) : null;
+    const st = s ? s.title || '未命名對話' : x.st;
+    const icon = { error: 'alert', warn: 'alert', ok: 'check', info: 'info' }[x.type] || 'info';
+    const long = (x.detail || '').length > 160 || (x.detail || '').split(NL).length > 4;
+    return sep + `<div class="nlog-it ${esc(x.type)}${NLOG.open.has(x.id) ? ' open' : ''}" data-nid="${esc(x.id)}">`
+      + `<span class="ni">${ico(icon)}</span><div class="nb">`
+      + `<div class="nt">${esc(x.title)}${x.n > 1 ? `<span class="nn">×${x.n}</span>` : ''}</div>`
+      + (x.detail ? `<div class="nd${long ? ' long' : ''}">${esc(x.detail)}</div>` : '')
+      + `<div class="nm"><span>${esc(nlogWhen(x.at))}</span>`
+      + (x.sid ? `<span class="dot">·</span>${s ? `<a data-nsid="${esc(x.sid)}" title="打開這個對話">${esc(st)}</a>` : `<span title="這個對話已刪除">${esc(st || '已刪除的對話')}</span>`}` : '')
+      + (long ? `<span class="dot">·</span><a data-nlog="more">${NLOG.open.has(x.id) ? '收合' : '展開'}</a>` : '')
+      + `<span class="dot">·</span><a data-nlog="copy">複製</a></div></div></div>`;
+  }).join('');
+  pane.innerHTML = head + `<div class="nlog-list">${rows}</div>`;
+}
+function notify(type, title, detail = '', ms, sid) {
   if (PANE2) return;   // 並排的第二個畫面不再跳通知，母視窗已經跳過一次
+  if (sid !== undefined || type === 'error' || type === 'warn') nlogAdd(type, String(title || ''), String(detail || ''), sid || '');
   const box = $('#notes');
   const el = document.createElement('div');
   el.className = 'note ' + type;
@@ -872,7 +942,7 @@ function onEvent(ev) {
       (S.errors[sid] = S.errors[sid] || []).push(ev.text);
       if (sid === S.sid) renderChat();
       const s = S.sessions.find((x) => x.id === sid);
-      notify('error', sid === S.sid ? '模型回覆失敗' : `「${s ? s.title : '背景對話'}」出錯`, ev.text);
+      notify('error', sid === S.sid ? '模型回覆失敗' : `「${s ? s.title : '背景對話'}」出錯`, ev.text, undefined, sid || '');
       break;
     }
     case 'notice':
@@ -881,10 +951,10 @@ function onEvent(ev) {
         const w = S.wait[sid] || (S.wait[sid] = { t0: Date.now(), first: 0, idle: 0, n: 0, max: ev.retry.max });
         w.retry = { ...ev.retry, until: Date.now() + (ev.retry.wait || 0) * 1000 };
         if (S.live[sid]) S.live[sid] = { thinking: '', text: '' };
-        if (sid === S.sid) scheduleLive(); else notify('info', ev.text || '');
+        if (sid === S.sid) { scheduleLive(); nlogAdd('info', ev.text || '', '', sid || ''); } else notify('info', ev.text || '', '', undefined, sid || '');
         break;
       }
-      notify('info', ev.text || '');
+      notify('info', ev.text || '', '', undefined, sid || '');
       break;
     case 'truncated':
       if (sid === S.sid) { S.msgs = S.msgs.filter((m) => !(typeof m.id === 'number' && m.id >= ev.from_id)); delete S.errors[sid]; renderChat(); }
@@ -895,7 +965,7 @@ function onEvent(ev) {
       if (sid === S.sid) renderChat();
       attention();
       if (document.hidden && D && D.notify) D.notify('WOOF 需要你確認', `${ev.name}：${toolArgSummary(ev.name, ev.args)}`);
-      if (sid !== S.sid) notify('warn', '有工具等你確認', (S.sessions.find((x) => x.id === sid) || {}).title || '');
+      if (sid !== S.sid) notify('warn', '有工具等你確認', (S.sessions.find((x) => x.id === sid) || {}).title || '', undefined, sid);
       break;
     case 'ask':
       S.asks[ev.id] = ev;
@@ -1849,9 +1919,15 @@ function errPreview(name, out) {
 }
 
 function toolCard(call, result) {
+  if (call.name === 'ask_user' && result && !result.is_error && askArgsMulti(call.args)) {
+    const el = askDoneMulti(call.args, String(result.output || ''));
+    el.dataset.id = call.id;
+    return el;
+  }
   if (call.name === 'ask_user' && result && !result.is_error) {
     const out = String(result.output || '');
-    const d = { id: call.id, question: (call.args || {}).question || '' };
+    const q0 = ((call.args || {}).questions || [])[0];
+    const d = { id: call.id, question: (call.args || {}).question || (q0 && (q0.question || q0)) || '' };
     const w = out.match(/等了 (?:(\d+) 分(?: (\d+) 秒)?(?:鐘)?|(\d+) 秒)都沒回/);
     if (out.startsWith(NO_REPLY_TAG)) { d.timedOut = true; d.waited = w ? (Number(w[1] || 0) * 60 + Number(w[2] || 0) + Number(w[3] || 0)) : 0; }
     else { d.answer = out.replace(/^使用者回答：/, ''); d.skipped = d.answer === ASK_SKIP || /^（?略過/.test(d.answer); }
@@ -2191,6 +2267,7 @@ setInterval(() => {
 }, 1000);
 const ASK_TOUCHED = {};
 function askTouch(id) {
+  id = String(id).split('|')[0];   // 多題卡片的輸入框是「卡片 id|題號」
   const a = S.asks[id]; if (!a || !a.deadline || Date.now() - (ASK_TOUCHED[id] || 0) < 5000) return;
   ASK_TOUCHED[id] = Date.now();
   a.deadline = Date.now() / 1000 + (a.timeout || 0);   // 先在畫面上重設，後端回來再對齊
@@ -2198,6 +2275,7 @@ function askTouch(id) {
 }
 // 點了輸入框＝要自己回答：這一題不再倒數（後端也不會自動略過），慢慢想、慢慢打
 function askHold(id) {
+  id = String(id).split('|')[0];
   const a = S.asks[id]; if (!a || !a.deadline) return;
   a.deadline = 0; a.held = true;
   const el = document.querySelector(`[data-askcd="${CSS.escape(id)}"]`);
@@ -2224,8 +2302,101 @@ function askDoneCard(d, tag) {
     + `<div class="a">${askDoneText(d)}</div>`;
   return el;
 }
+// ---- 多題提問卡片（ask_user 的 questions）：一張卡片列出每一題，選完或打完一次送出
+// 單選點一下選中、再點取消；複選可以點多個；每題都能自己打字（單選時打的字優先，複選時一起送）
+function askIsMulti(a) { return !!(a && Array.isArray(a.questions) && (a.questions.length > 1 || (a.questions[0] && a.questions[0].multi))); }
+function askArgsMulti(args) {
+  const qs = (args || {}).questions;
+  return Array.isArray(qs) && (qs.length > 1 || !!(qs[0] && qs[0].multi_select && (qs[0].options || qs[0].choices || []).length));
+}
+function askMultiHtml(a) {
+  const sel = S.askSel[a.id] || (S.askSel[a.id] = {});
+  const qs = a.questions.map((q, i) => {
+    const cur = sel[q.qid];
+    const on = (o) => (q.multi ? (Array.isArray(cur) && cur.includes(o)) : cur === o);
+    const opts = (q.options || []).map((o, j) => `<button class="btn${on(o) ? ' on' : ''}" data-askpick="${esc(a.id)}" data-qid="${esc(q.qid)}" data-val="${esc(o)}">`
+      + (q.multi ? `<span class="mck">${on(o) ? ico('check') : ''}</span>` : '')
+      + `<span class="ol">${esc(o)}</span>${j === 0 && q.options.length > 1 ? '<span class="rec">推薦</span>' : ''}</button>`).join('');
+    return `<div class="askq" data-askq="${esc(q.qid)}"><div class="q"><span class="qn">${i + 1}</span><span class="qt">${esc(q.question)}</span>`
+      + (q.multi ? '<span class="qm">可複選</span>' : '') + `</div>`
+      + (opts ? `<div class="opts">${opts}</div>` : '')
+      + `<input class="askq-in" data-askin="${esc(a.id)}|${esc(q.qid)}" placeholder="${q.options && q.options.length ? (q.multi ? '另外補充…' : '或自己輸入…') : '輸入回答…'}"></div>`;
+  }).join('');
+  return `<div class="askcard askmulti"><div class="ask-head">${ico('help')}${a.questions.length > 1 ? `${a.questions.length} 個問題，答完一次送出；不想答的題目留空就好` : '可以選多個，選完送出'}</div>${qs}`
+    + `<div class="ansrow askm-foot"><span class="askm-n" data-askn="${esc(a.id)}"></span>`
+    + `<button class="btn primary" data-askmsend="${esc(a.id)}">送出</button>`
+    + `<button class="btn ghost ask-skip" data-askskip="${esc(a.id)}" title="都不回答，讓模型自己判斷">全部略過</button></div>`
+    + (a.deadline ? `<div class="ask-cd" data-askcd="${esc(a.id)}">${esc(askLeft(a))}</div>`
+      : a.held ? `<div class="ask-cd" data-askcd="${esc(a.id)}">已停止倒數，慢慢想，回答或按略過才會繼續</div>` : '') + `</div>`;
+}
+function askMultiAnswers(id) {
+  const a = S.asks[id]; if (!a) return {};
+  const sel = S.askSel[id] || {}, out = {};
+  for (const q of a.questions) {
+    const el = document.querySelector(`[data-askin="${CSS.escape(id + '|' + q.qid)}"]`);
+    const typed = el ? el.value.trim() : (S.askDraft[id + '|' + q.qid] || '').trim();
+    const pick = sel[q.qid];
+    if (q.multi) { const v = [...(Array.isArray(pick) ? pick : []), ...(typed ? [typed] : [])]; out[q.qid] = v.length ? v : null; }
+    else out[q.qid] = typed || pick || null;
+  }
+  return out;
+}
+function askMultiCount(id) {
+  const a = S.asks[id], el = document.querySelector(`[data-askn="${CSS.escape(id)}"]`); if (!a || !el) return;
+  const ans = askMultiAnswers(id), n = a.questions.filter((q) => ans[q.qid]).length;
+  el.textContent = `已答 ${n}／${a.questions.length}`;
+  el.classList.toggle('full', n === a.questions.length);
+}
+function askMultiPick(btn) {
+  const id = btn.dataset.askpick, qid = btn.dataset.qid, v = btn.dataset.val, a = S.asks[id]; if (!a) return;
+  const q = a.questions.find((x) => x.qid === qid); if (!q) return;
+  const sel = S.askSel[id] || (S.askSel[id] = {});
+  if (q.multi) {
+    const cur = Array.isArray(sel[qid]) ? sel[qid] : [];
+    sel[qid] = cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v];
+  } else {
+    sel[qid] = sel[qid] === v ? null : v;
+    const inp = document.querySelector(`[data-askin="${CSS.escape(id + '|' + qid)}"]`);
+    if (inp && sel[qid]) { inp.value = ''; delete S.askDraft[id + '|' + qid]; }   // 單選點了選項就以選項為準
+  }
+  for (const b of btn.parentElement.querySelectorAll('[data-askpick]')) {
+    const on = q.multi ? sel[qid].includes(b.dataset.val) : sel[qid] === b.dataset.val;
+    b.classList.toggle('on', on);
+    const ck = b.querySelector('.mck'); if (ck) ck.innerHTML = on ? ico('check') : '';
+  }
+  askTouch(id);
+  askMultiCount(id);
+}
+function askMultiSend(id) { answerAsk(id, askMultiAnswers(id)); }
+// 對話紀錄裡的多題提問：題目從工具參數來，回答從工具結果（【n】題目 → 回答）解析
+function askDoneMulti(args, out) {
+  const qs = ((args || {}).questions || []).map((q) => String((q && q.question) || q || ''));
+  const ans = {};
+  for (const m of out.matchAll(/【(\d+)】[\s\S]*?\n→ (.*)/g)) ans[Number(m[1]) - 1] = m[2];
+  const el = document.createElement('div');
+  el.className = 'askcard askdone kept askmulti-done';
+  let body;
+  if (out.startsWith(NO_REPLY_TAG)) {
+    const w = out.match(/等了 (?:(\d+) 分(?: (\d+) 秒)?(?:鐘)?|(\d+) 秒)都沒回/);
+    const sec = w ? (Number(w[1] || 0) * 60 + Number(w[2] || 0) + Number(w[3] || 0)) : 0;
+    body = qs.map((q, i) => `<div class="askd"><div class="q">${i + 1}. ${esc(q)}</div></div>`).join('')
+      + `<div class="a">你 ${esc(askSpan(sec))}沒回應，已自動略過，讓模型自己判斷繼續</div>`;
+  } else if (/^使用者沒有填提問卡片，直接回話：/.test(out)) {
+    body = qs.map((q, i) => `<div class="askd"><div class="q">${i + 1}. ${esc(q)}</div></div>`).join('')
+      + `<div class="a">你直接回話：${esc(out.split(NL)[0].replace(/^使用者沒有填提問卡片，直接回話：/, ''))}</div>`;
+  } else {
+    body = qs.map((q, i) => {
+      const v = ans[i] || '';
+      const skip = !v || /^（略過/.test(v);
+      return `<div class="askd"><div class="q">${i + 1}. ${esc(q)}</div><div class="a">${skip ? '已略過' : '已回答：' + esc(v)}</div></div>`;
+    }).join('');
+  }
+  el.innerHTML = `<div class="ktag">${ico('help')}問你 ${qs.length} 題</div>${body}`;
+  return el;
+}
 async function answerAsk(id, text) {
-  try { await api('POST', `/api/asks/${id}`, { answer: text }); } catch (e) { notify('error', '回答送出失敗', e.message); return; }
+  const body = text && typeof text === 'object' ? { answers: text } : { answer: text };   // 多題卡片送 {qid: 回答}
+  try { await api('POST', `/api/asks/${id}`, body); } catch (e) { notify('error', '回答送出失敗', e.message); return; }
   // 先標記已送出、讓卡片收起來，但不要刪掉那個 ask：後端回的 ask_done 要靠它才知道題目是什麼
   const a = S.asks[id];
   if (a) a._sent = text;
@@ -2491,6 +2662,17 @@ function renderChat(scrollBottom) {
     if (a.session_id !== S.sid || a._sent) continue;
     const div = document.createElement('div');
     div.className = 'msg bot askmsg';
+    if (askIsMulti(a)) {
+      div.innerHTML = `<div class="who">${esc(whoLine({ model: (cur() || {}).model }))}</div>` + askMultiHtml(a);
+      chat.appendChild(div);
+      for (const inp of div.querySelectorAll('[data-askin]')) {
+        const k = inp.dataset.askin;
+        if (S.askDraft[k]) inp.value = S.askDraft[k];
+        if (k === askFocusId) { inp.focus(); const p = Math.min(askCaret == null ? inp.value.length : askCaret, inp.value.length); inp.setSelectionRange(p, p); }
+      }
+      askMultiCount(a.id);
+      continue;
+    }
     div.innerHTML = `<div class="who">${esc(whoLine({ model: (cur() || {}).model }))}</div>`
       + `<div class="askcard"><div class="q">${esc(a.question)}</div>`
       + `<div class="opts">${(a.options || []).map((o) => `<button class="btn" data-ask="${esc(a.id)}" data-val="${esc(o)}">${esc(o)}</button>`).join('')}</div>`
@@ -2517,7 +2699,8 @@ function renderChat(scrollBottom) {
       + `<div class="a">${d.timedOut ? `你 ${esc(askSpan(d.waited))}沒回應，已自動略過，讓模型自己判斷繼續` : d.skipped ? '已略過' : d.answer ? '已回答：' + esc(d.answer) : '已停止'}</div></div>`;
     chat.appendChild(div);
   }
-  for (const id of Object.keys(S.askDraft)) if (!S.asks[id]) delete S.askDraft[id];
+  for (const id of Object.keys(S.askDraft)) if (!S.asks[id.split('|')[0]]) delete S.askDraft[id];
+  for (const id of Object.keys(S.askSel)) if (!S.asks[id]) delete S.askSel[id];
   groups.forEach((g, i) => {
     const gi = g._info;
     if (!gi.lastId || (running && i === groups.length - 1)) return;
@@ -3883,11 +4066,35 @@ function openTab(id) {
   if (id === 'paneTerm') syncTerms();
   if (id === 'paneArts') renderArts();
   if (id === 'panePet') petLoad();
+  if (id === 'paneNotes') { NLOG.unread = 0; localStorage.setItem('woof.noteUnread', '0'); nlogBadge(); renderNotesLog(); }
   localStorage.setItem('woof.rtab', id);
 }
 $('#togRight').onclick = () => setRight($('#right').classList.contains('hide'));
 setRight(localStorage.getItem('woof.right') !== '0');
 $$('.tabs div').forEach((t) => (t.onclick = () => openTab(t.dataset.p)));
+nlogBadge();
+$('#paneNotes').addEventListener('click', (e) => {
+  const f = e.target.closest('[data-nf]');
+  if (f) { NLOG.filter = f.dataset.nf; localStorage.setItem('woof.noteF', NLOG.filter); renderNotesLog(); return; }
+  const o = e.target.closest('[data-nsid]');
+  if (o) { showView('chat'); openSession(o.dataset.nsid); return; }
+  const a = e.target.closest('[data-nlog]'); if (!a) return;
+  if (a.dataset.nlog === 'clear') {
+    modal({ title: '清除通知紀錄？', desc: `${NLOG.items.length} 則通知會全部刪掉`, ok: '清除', danger: true }).then((ok) => {
+      if (!ok) return;
+      NLOG.items = []; NLOG.open.clear(); NLOG.unread = 0;
+      localStorage.removeItem(NLOG_KEY); localStorage.setItem('woof.noteUnread', '0'); nlogBadge(); renderNotesLog();
+    });
+    return;
+  }
+  const it = e.target.closest('[data-nid]'); if (!it) return;
+  const x = NLOG.items.find((y) => y.id === it.dataset.nid); if (!x) return;
+  if (a.dataset.nlog === 'more') { NLOG.open.has(x.id) ? NLOG.open.delete(x.id) : NLOG.open.add(x.id); renderNotesLog(); }
+  if (a.dataset.nlog === 'copy') {
+    navigator.clipboard.writeText(`[${new Date(x.at).toLocaleString('zh-TW', { hour12: false })}] ${x.title}${x.detail ? NL + x.detail : ''}`);
+    a.textContent = '已複製'; setTimeout(() => { a.textContent = '複製'; }, 1200);
+  }
+});
 setTimeout(() => { const t = localStorage.getItem('woof.rtab'); if (t && $('#' + t) && t !== 'paneTasks') openTab(t); }, 0);
 $('#sbTasks').onclick = () => { showView('chat'); setRight(true); openTab('paneTasks'); };
 $('#sbDir').onclick = (e) => {
@@ -6838,9 +7045,9 @@ function renderAbout(box) {
       </div>
     </div>`;
   if (!(D && D.appInfo)) return;
-  D.appInfo().then((i) => {
-    $('#aboutVer').textContent = `版本 ${i.version} · ${i.packaged ? '安裝版' : '開發模式'}`;
-    const rows = [['版本', i.version], ['類型', i.packaged ? '安裝版（WOOF.exe）' : '開發模式'], ['Electron', i.electron], ['程式位置', i.exe], ['專案資料夾', i.root || '—']];
+  Promise.all([D.appInfo(), appVer()]).then(([i, ver]) => {
+    $('#aboutVer').textContent = `版本 ${ver || i.version} · ${i.packaged ? '安裝版' : '開發模式'}`;
+    const rows = [['版本', ver || i.version], ['外殼', i.version], ['類型', i.packaged ? '安裝版（WOOF.exe）' : '開發模式'], ['Electron', i.electron], ['程式位置', i.exe], ['專案資料夾', i.root || '—']];
     $('#aboutGrid').innerHTML = rows.map(([k, v]) => `<div><dt>${k}</dt><dd title="${esc(v || '')}">${esc(v || '—')}</dd></div>`).join('');
     $('#abLnk').hidden = $('#abLnkH').hidden = !i.packaged;
     $('#abLnk').onclick = async (e) => {
@@ -7055,7 +7262,13 @@ async function renderSnapshotsSec(box) {
   };
 }
 // 狀態列右下角版本：點一下開「設定 → 進階」
-if (D && D.appInfo) D.appInfo().then((i) => { $('#sbVerTxt').textContent = 'v' + i.version; $('#sbVer').title = `WOOF ${i.version}${i.packaged ? '' : '（開發模式）'} · 點一下看詳情`; });
+// 版本號看程式本身（pyproject.toml）：只換 B 包時外殼版本不變；後端舊版沒有這支 API 就退回外殼版本
+let _appVer = null;
+function appVer() {
+  if (!_appVer) _appVer = api('GET', '/api/version').then((r) => r.version || '').catch(() => '');
+  return _appVer;
+}
+if (D && D.appInfo) Promise.all([D.appInfo(), appVer()]).then(([i, ver]) => { const v = ver || i.version; $('#sbVerTxt').textContent = 'v' + v; $('#sbVer').title = `WOOF ${v}${i.packaged ? '' : '（開發模式）'} · 點一下看詳情`; });
 $('#sbVer').onclick = () => openSettings('about');
 
 // ---- 儲存
@@ -7141,8 +7354,12 @@ function askClick(e) {
     answerAsk(id, v || ASK_SKIP, !v);
     return true;
   }
+  const pk = e.target.closest('[data-askpick]');
+  if (pk) { askMultiPick(pk); return true; }
+  const ms = e.target.closest('[data-askmsend]');
+  if (ms) { askMultiSend(ms.dataset.askmsend); return true; }
   const k = e.target.closest('[data-askskip]');
-  if (k) { answerAsk(k.dataset.askskip, ASK_SKIP, true); return true; }
+  if (k) { const id = k.dataset.askskip; answerAsk(id, askIsMulti(S.asks[id]) ? {} : ASK_SKIP, true); return true; }
   return false;
 }
 $('#taskBar').addEventListener('click', askClick);
@@ -7151,10 +7368,30 @@ $('#chat').addEventListener('keydown', (e) => {
   const el = e.target.closest && e.target.closest('[data-askin]');
   if (!el || e.key !== 'Enter' || e.isComposing) return;
   e.preventDefault();
+  const k = el.dataset.askin;
+  if (k.includes('|')) {   // 多題卡片：Enter 跳下一題，最後一題（或 Ctrl+Enter）送出
+    const all = [...el.closest('.askmulti').querySelectorAll('[data-askin]')];
+    const nx = all[all.indexOf(el) + 1];
+    if (nx && !e.ctrlKey) nx.focus(); else askMultiSend(k.split('|')[0]);
+    return;
+  }
   const v = el.value.trim();
-  if (v) answerAsk(el.dataset.askin, v);
+  if (v) answerAsk(k, v);
 });
-$('#chat').addEventListener('input', (e) => { const el = e.target.closest && e.target.closest('[data-askin]'); if (el) askTouch(el.dataset.askin); });
+$('#chat').addEventListener('input', (e) => {
+  const el = e.target.closest && e.target.closest('[data-askin]'); if (!el) return;
+  askTouch(el.dataset.askin);
+  const k = el.dataset.askin;
+  if (k.includes('|')) {
+    S.askDraft[k] = el.value;
+    const [id, qid] = k.split('|'), a = S.asks[id], q = a && a.questions.find((x) => x.qid === qid);
+    if (q && !q.multi && el.value.trim() && (S.askSel[id] || {})[qid]) {   // 單選打了字就以打的為準，選項取消
+      S.askSel[id][qid] = null;
+      for (const b of el.parentElement.querySelectorAll('[data-askpick]')) b.classList.remove('on');
+    }
+    askMultiCount(id);
+  }
+});
 for (const t of ['focusin', 'pointerdown']) $('#chat').addEventListener(t, (e) => { const el = e.target.closest && e.target.closest('[data-askin]'); if (el) askHold(el.dataset.askin); });
 
 i18nApply();   // 介面語言：開啟時套用一次，之後新出現的畫面由 MutationObserver 接手

@@ -1909,3 +1909,55 @@ body.pane2 #paneA{padding:0}
 .pnote.pcut{font-size:10.5px;margin:8px 0;padding:2px 10px;border-top:1px dashed var(--line);border-bottom:1px dashed var(--line)}
 .flink.missing{text-decoration:line-through dotted;opacity:.7}
 .chatmore{text-align:center;font-size:11.5px;color:var(--faint);padding:6px 0 10px}
+/* ---- 多題提問卡片（ask_user 的 questions）：每題一段，選項可選中／複選，最後一次送出 ---- */
+.askmulti .ask-head{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dim);margin-bottom:2px}
+.askmulti .ask-head svg{width:14px;height:14px;color:var(--acc)}
+.askmulti .askq{padding:12px 0 10px;border-bottom:1px solid var(--line)}
+.askmulti .askq:last-of-type{border-bottom:0;padding-bottom:4px}
+.askmulti .askq .q{display:flex;align-items:flex-start;gap:8px;margin-bottom:8px;font-weight:600;line-height:1.6}
+.askmulti .askq .qn{flex:none;display:inline-grid;place-items:center;width:20px;height:20px;margin-top:2px;border-radius:50%;background:var(--acc-soft);color:var(--acc);font-size:11.5px;font-weight:700}
+.askmulti .askq .qt{flex:1;min-width:0;white-space:pre-wrap;word-break:break-word}
+.askmulti .askq .qm{flex:none;margin-top:3px;padding:0 6px;height:18px;line-height:18px;border-radius:9px;font-size:11px;font-weight:500;color:var(--dim);border:1px solid var(--line2)}
+.askmulti .opts .btn{gap:6px;transition:background .12s,border-color .12s}
+.askmulti .opts .btn .ol{flex:1;min-width:0}
+.askmulti .opts .btn .rec{flex:none;font-size:11px;font-weight:500;color:var(--acc)}
+.askmulti .opts .btn .mck{width:16px;height:16px;border:1px solid var(--line2);border-radius:4px}
+.askmulti .opts .btn .mck svg{width:12px;height:12px}
+.askmulti .opts .btn.on{border-color:var(--acc);background:var(--acc-soft);color:var(--text);box-shadow:inset 0 0 0 1px var(--acc);font-weight:600}
+.askmulti .opts .btn.on .mck{border-color:var(--acc);background:var(--acc)}
+.askmulti .opts .btn.on .mck svg{color:var(--on-acc)!important}
+.askmulti .askq-in{display:block;width:100%;box-sizing:border-box;border:1px solid var(--line2);border-radius:8px;padding:6px 8px;background:transparent;color:inherit;font:inherit}
+.askmulti .askq-in:focus{outline:none;border-color:var(--acc)}
+.askmulti .askm-foot{margin-top:10px;padding-top:10px;border-top:1px solid var(--line)}
+.askmulti .askm-n{margin-right:auto;font-size:12px;color:var(--faint)}
+.askmulti .askm-n.full{color:var(--acc)}
+.askmulti-done .askd{padding:4px 0}
+.askmulti-done .askd + .askd{border-top:1px dashed var(--line)}
+.askmulti-done .askd .a{margin-top:2px}
+.askmulti-done > .a{margin-top:6px}
+/* ---- 右側「通知」分頁：彈窗的紀錄 ---- */
+.right .tabs div[data-p="paneNotes"]{position:relative;gap:4px}
+.nbadge{min-width:16px;height:16px;padding:0 4px;box-sizing:border-box;border-radius:8px;background:var(--bad);color:#fff;font-size:10px;font-weight:700;line-height:16px;text-align:center}
+.nbadge[hidden]{display:none}
+#paneNotes{padding:10px 10px 16px}
+.nlog-hd{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.nlog-seg b{padding:4px 9px;font-size:12px;display:inline-flex;align-items:center;gap:5px}
+.nlog-seg b i{font-style:normal;font-size:10.5px;color:var(--faint);font-weight:500}
+.nlog-clear{margin-left:auto;font-size:12px;color:var(--faint);cursor:pointer}
+.nlog-clear:hover{color:var(--bad)}
+.nlog-day{font-size:11px;color:var(--faint);font-weight:600;margin:12px 2px 6px}
+.nlog-day:first-child{margin-top:2px}
+.nlog-it{display:flex;gap:9px;padding:9px 10px;border:1px solid var(--line);border-radius:var(--r);background:var(--panel2);margin-bottom:6px}
+.nlog-it .ni{flex:none;width:18px;height:18px;border-radius:50%;display:grid;place-items:center;color:#fff;background:var(--faint);margin-top:1px}
+.nlog-it .ni svg{width:11px;height:11px}
+.nlog-it.error{border-color:color-mix(in srgb,var(--bad) 35%,var(--line))}
+.nlog-it.error .ni{background:var(--bad)}.nlog-it.warn .ni{background:var(--warn)}.nlog-it.ok .ni{background:var(--ok)}
+.nlog-it .nb{flex:1;min-width:0}
+.nlog-it .nt{font-size:12.5px;line-height:1.6;white-space:pre-wrap;word-break:break-word}
+.nlog-it .nn{margin-left:6px;font-size:11px;color:var(--faint)}
+.nlog-it .nd{margin-top:3px;font-size:12px;line-height:1.55;color:var(--dim);white-space:pre-wrap;word-break:break-word}
+.nlog-it .nd.long{display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden}
+.nlog-it.open .nd.long{display:block}
+.nlog-it .nm{margin-top:5px;display:flex;flex-wrap:wrap;align-items:center;gap:4px;font-size:11px;color:var(--faint)}
+.nlog-it .nm a{cursor:pointer;color:var(--dim);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nlog-it .nm a:hover{color:var(--acc);text-decoration:underline}

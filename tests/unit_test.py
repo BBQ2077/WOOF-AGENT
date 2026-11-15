@@ -2871,5 +2871,251 @@ class SubagentProgress(unittest.TestCase):
         self.assertIn("子代理", txt)
         self.assertIn("不會再回報", txt)
 
+
+class AppVersion(unittest.TestCase):
+    """畫面上的版本號看程式本身（pyproject.toml），只換 B 包也會跟著變。"""
+
+    def test_version_from_pyproject(self):
+        import asyncio
+        import tomllib
+
+        from woof import server
+
+        with open(ROOT / "pyproject.toml", "rb") as f:
+            want = tomllib.load(f)["project"]["version"]
+        self.assertEqual(asyncio.run(server.app_version()), {"version": want})
+        js = (ROOT / "web/dist/app.js").read_text(encoding="utf-8")
+        self.assertIn("api('GET', '/api/version')", js)
+        self.assertIn("['外殼', i.version]", js)
+
+
+class AskMany(unittest.TestCase):
+    """ask_user 一次問多題：一張卡片、一次送出，回傳依題目順序。"""
+
+    def test_normalize(self):
+        from woof.agent import tasks
+
+        qs, err = tasks.ask_questions([{"question": "顏色", "options": ["紅", "藍", "綠", "黃", "黑"], "multi_select": True},
+                                       "要不要動畫", {"question": "字型", "choices": ["A"]}])
+        self.assertEqual(err, "")
+        self.assertEqual([q["qid"] for q in qs], ["q0", "q1", "q2"])
+        self.assertEqual(qs[0]["options"], ["紅", "藍", "綠", "黃"])        # 最多 4 個
+        self.assertTrue(qs[0]["multi"])
+        self.assertEqual((qs[1]["options"], qs[1]["multi"]), ([], False))   # 沒選項＝自由回答，不能複選
+        self.assertEqual(qs[2]["options"], ["A"])                            # choices 也收
+        self.assertTrue(tasks.ask_questions([])[1])
+        self.assertTrue(tasks.ask_questions([{"question": str(i)} for i in range(6)])[1])
+        self.assertTrue(tasks.ask_questions([{"options": ["x"]}])[1])
+
+    def test_result_text(self):
+        from woof.agent import tasks
+
+        qs, _ = tasks.ask_questions([{"question": "顏色", "options": ["紅", "藍"], "multi_select": True}, "名稱", "動畫"])
+        t = tasks.ask_result(qs, {"q0": ["紅", "藍"], "q1": " 小狗\n時鐘 ", "q2": None})
+        self.assertTrue(t.startswith("使用者回答了 2／3 題"))
+        self.assertIn("【1】顏色\n→ 紅、藍", t)
+        self.assertIn("【2】名稱\n→ 小狗 時鐘", t)
+        self.assertIn("【3】動畫\n→ （略過", t)
+        self.assertIn("直接回話：改用藍色", tasks.ask_result(qs, "改用藍色"))
+        no = tasks.no_reply_text(200)
+        self.assertEqual(tasks.ask_result(qs, no), no)
+        self.assertTrue(tasks.timed_out(tasks.ask_result(qs, no)))
+
+    def test_flow_answer_skip_and_direct_reply(self):
+        import asyncio
+
+        from woof.agent import tasks
+
+        qs, _ = tasks.ask_questions(["一", "二"])
+        evs = []
+
+        class Turn:
+            session_id = "askmany"
+
+            async def emit(self, ev):
+                evs.append(ev)
+
+        async def run(answer):
+            evs.clear()
+            t = asyncio.create_task(tasks.ask_many(Turn(), qs, timeout=60))
+            await asyncio.sleep(0.02)
+            aid = evs[0]["id"]
+            self.assertEqual(evs[0]["questions"], qs)
+            self.assertTrue(tasks.has_ask("askmany"))
+            if answer is None:
+                tasks.skip_ask("askmany", "直接打字")
+            else:
+                self.assertTrue(tasks.resolve_ask(aid, answer))
+            return await t, evs[-1]
+
+        out, done = asyncio.run(run({"q0": "甲", "q1": ""}))
+        self.assertIn("使用者回答了 1／2 題", out)
+        self.assertEqual((done["type"], done["tool"], done["skipped"]), ("ask_done", True, False))
+        out, done = asyncio.run(run({}))
+        self.assertIn("使用者回答了 0／2 題", out)
+        self.assertTrue(done["skipped"])
+        out, _ = asyncio.run(run(None))
+        self.assertIn("直接回話：直接打字", out)
+        self.assertFalse(tasks.has_ask("askmany"))
+
+    def test_tool_routes(self):
+        import asyncio
+        from unittest import mock
+
+        import importlib.util
+        import types
+
+        from woof.agent import tasks
+
+        spec = importlib.util.spec_from_file_location("woof_plugin_tasks_t", ROOT / "plugins/tasks/__init__.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        reg = {}
+        mod.register(types.SimpleNamespace(add_tool=lambda name, desc, schema, fn: reg.__setitem__(name, (schema, fn))))
+        tool = types.SimpleNamespace(schema=reg["ask_user"][0], fn=reg["ask_user"][1])
+        seen = {}
+
+        async def one(turn, q, opts, **k):
+            seen["one"] = (q, opts)
+            return "好"
+
+        async def many(turn, qs, **k):
+            seen["many"] = [q["question"] for q in qs]
+            return "多題"
+
+        class C:
+            turn = type("T", (), {"session_id": "x"})()
+
+        with mock.patch.object(tasks, "ask", one), mock.patch.object(tasks, "ask_many", many):
+            r1 = asyncio.run(tool.fn({"questions": [{"question": "要嗎", "options": ["要", "不要"]}]}, C()))
+            r2 = asyncio.run(tool.fn({"questions": ["a", "b"]}, C()))
+            r3 = asyncio.run(tool.fn({"question": "舊的", "options": ["x"]}, C()))
+            r4 = asyncio.run(tool.fn({"questions": [{"question": "c", "options": ["1", "2"], "multi_select": True}]}, C()))
+            r5 = asyncio.run(tool.fn({"questions": [{"question": str(i)} for i in range(6)]}, C()))
+        self.assertEqual(r1["output"], "使用者回答：好")          # 單一單選題照舊用原本的卡片
+        self.assertEqual(r2["output"], "多題")
+        self.assertEqual(seen["one"], ("舊的", ["x"]))           # 舊寫法還能用
+        self.assertEqual(r4["output"], "多題")                    # 單題複選也用多題卡片
+        self.assertTrue(r5["is_error"])
+        self.assertEqual(tool.schema["required"], ["questions"])
+        self.assertEqual(tool.schema["properties"]["questions"]["maxItems"], 5)
+
+    def test_frontend(self):
+        js = (ROOT / "web/dist/app.js").read_text(encoding="utf-8")
+        for k in ("function askMultiHtml(", "data-askpick", "data-askmsend", "{ answers: text }", "function askDoneMulti("):
+            self.assertIn(k, js)
+        sv = (ROOT / "woof/server.py").read_text(encoding="utf-8")
+        self.assertIn('isinstance(body.get("answers"), dict)', sv)
+
+
+class SteerDuringFlow(unittest.TestCase):
+    """方案流程在跑時插話：排進佇列交給執行的模型，不丟掉、不另開一回合搶跑。"""
+
+    def setUp(self):
+        from woof.agent import tasks
+
+        self.sid = store.create_session("m", None, "插話測試")["id"]
+        self.tasks = tasks
+
+    def tearDown(self):
+        from woof.agent.loop import pop_steer
+
+        pop_steer(self.sid)
+        store.delete_session(self.sid)
+
+    def test_note_by_phase(self):
+        t = self.tasks
+        t._save(self.sid, goal={"objective": "x", "status": "planning"})
+        self.assertIn("規劃／審核", t.steer_note(self.sid))
+        t._save(self.sid, goal={"objective": "x", "status": "running", "steps": ["a"]})
+        self.assertIn("工具跑完", t.steer_note(self.sid))
+        t._save(self.sid, goal={"objective": "x", "status": "running", "steps": ["a"], "idx": 1})
+        self.assertIn("正在驗收", t.steer_note(self.sid))
+
+    def test_flush_before_step(self):
+        import asyncio
+
+        from woof.agent import internal
+        from woof.agent.loop import peek_steer, push_steer
+
+        evs = []
+
+        async def emit(ev):
+            evs.append(ev)
+
+        push_steer(self.sid, [{"type": "text", "text": "改成藍色"}])
+        note = asyncio.run(self.tasks._flush_user_steer(self.sid, emit))
+        self.assertIn("以使用者說的為準", note)
+        self.assertEqual(peek_steer(self.sid), [])
+        texts = [b.get("text") for m in store.get_messages(self.sid) for b in m["content"]]
+        self.assertIn("改成藍色", texts)
+        # 只有內部通知（背景指令結束）：照樣寫進對話，但不附「使用者插話」的提醒
+        push_steer(self.sid, [{"type": "text", "text": "背景指令結束"}], internal.meta("bg_done"))
+        self.assertEqual(asyncio.run(self.tasks._flush_user_steer(self.sid, emit)), "")
+        self.assertEqual(asyncio.run(self.tasks._flush_user_steer(self.sid, emit)), "")
+
+    def test_after_flow_hook(self):
+        import asyncio
+
+        from woof import server
+
+        self.assertIs(self.tasks.AFTER_FLOW, server._after_flow)
+        called = []
+
+        async def hook(sid):
+            called.append(sid)
+
+        async def body():
+            old = self.tasks.AFTER_FLOW
+            self.tasks.AFTER_FLOW = hook
+            try:
+                async def ok():
+                    return None
+
+                async def emit(ev):
+                    pass
+
+                await self.tasks._track(self.sid, ok(), emit)
+                await asyncio.sleep(0.01)
+                t = self.tasks._track(self.sid, asyncio.sleep(5), emit)
+                await asyncio.sleep(0)
+                t.cancel()
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    pass
+                await asyncio.sleep(0.01)
+            finally:
+                self.tasks.AFTER_FLOW = old
+
+        asyncio.run(body())
+        self.assertEqual(called, [self.sid])   # 停止的流程不接著跑
+
+    def test_server_no_longer_drops(self):
+        sv = (ROOT / "woof/server.py").read_text(encoding="utf-8")
+        self.assertNotIn("這則沒有送出去", sv)
+        self.assertIn("elif running or agent_running or flow_running:", sv)
+        self.assertIn("or _tasks.is_running(sid):   # 方案流程在跑也排隊", sv)
+        lp = (ROOT / "woof/agent/loop.py").read_text(encoding="utf-8")
+        self.assertIn('.get("kind") != "review"', lp)
+
+
+class NotesLog(unittest.TestCase):
+    """右側「通知」分頁：彈窗留紀錄。"""
+
+    def test_frontend(self):
+        js = (ROOT / "web/dist/app.js").read_text(encoding="utf-8")
+        html = (ROOT / "web/dist/index.html").read_text(encoding="utf-8")
+        self.assertIn('data-p="paneNotes"', html)
+        self.assertIn('id="paneNotes"', html)
+        self.assertIn('id="nlogBadge"', html)
+        for k in ("function nlogAdd(", "function renderNotesLog(", "if (sid !== undefined || type === 'error' || type === 'warn') nlogAdd(",
+                  "notify('info', ev.text || '', '', undefined, sid || '')"):
+            self.assertIn(k, js)
+        # 通知紀錄在 notify 前面定義，而且不能用到後面才宣告的 const（啟動時就可能跳通知）
+        self.assertLess(js.index("function nlogAdd("), js.index("function notify("))
+        body = js[js.index("function nlogAdd("):js.index("function nlogBadge(")]
+        self.assertNotIn("paneOn", body)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

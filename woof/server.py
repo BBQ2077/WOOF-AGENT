@@ -197,6 +197,25 @@ async def state():
     }
 
 
+@app.get("/api/version")
+async def app_version():
+    """程式本身的版本（pyproject.toml）。只換 B 包時外殼版本不變，畫面上的版本號看這個。"""
+    return {"version": _app_version()}
+
+
+_VER: list[str] = []
+
+
+def _app_version() -> str:
+    if not _VER:
+        try:
+            with open(config.ROOT / "pyproject.toml", "rb") as f:
+                _VER.append(str(tomllib.load(f)["project"]["version"]))
+        except Exception:
+            _VER.append("")
+    return _VER[0]
+
+
 # ---------------------------------------------------------------- 設定組
 def _profile_state() -> dict:
     from . import profiles
@@ -2344,6 +2363,25 @@ async def _resume_turn(sid: str) -> None:
     await _close_or_resume(sid, status, _resume_turn)
 
 
+async def _after_flow(sid: str) -> None:
+    """方案／目標流程做完時還有沒送進去的插話（驗收那段送的、或最後一步剛結束才送到）：接著開一回合處理，不能就這樣不見"""
+    async with TURN_LOCK:
+        if not peek_steer(sid) or (sid in RUNS and not RUNS[sid].done()) or _flow_running(sid):
+            return
+        RUNS[sid] = asyncio.create_task(_steer_turn(sid))
+
+
+def _flow_running(sid: str) -> bool:
+    from .agent import tasks as _tasks
+
+    return _tasks.is_running(sid)
+
+
+async def _steer_turn(sid: str) -> None:
+    await broadcast({"type": "run_start", "session_id": sid})
+    await _resume_turn(sid)
+
+
 async def _gated_send(sid: str, blocks: list[dict], text: str, gate: str, extra: str = "") -> bool:
     """方案模式下的一則要求：存進對話，交給方案流程（拓展／審核 → 照做 → 驗收）。成功開始回 True。"""
     from .agent import tasks as _tasks
@@ -2373,8 +2411,10 @@ async def inject_internal(sid: str, kind: str, text: str) -> None:
     if not store.get_session(sid):
         return
     blocks = [{"type": "text", "text": text}]
+    from .agent import tasks as _tasks
+
     async with TURN_LOCK:
-        if sid in RUNS and not RUNS[sid].done():
+        if (sid in RUNS and not RUNS[sid].done()) or _tasks.is_running(sid):   # 方案流程在跑也排隊，不另開一回合搶跑
             push_steer(sid, blocks, _imeta(kind))
             await broadcast({"type": "queue", "session_id": sid,
                              "items": [{"text": it["blocks"][0].get("text", "") if it["blocks"] else "",
@@ -2398,6 +2438,15 @@ async def _inject_turn(sid: str) -> None:
 
 
 REG.inject = inject_internal
+
+
+def _hook_after_flow() -> None:
+    from .agent import tasks as _tasks
+
+    _tasks.AFTER_FLOW = _after_flow
+
+
+_hook_after_flow()
 
 
 @app.get("/api/mcp")
@@ -2458,6 +2507,8 @@ async def mcp_toggle(name: str, body: dict):
 async def answer_ask(aid: str, body: dict):
     from woof.agent import tasks
 
+    if isinstance(body.get("answers"), dict):   # 多題卡片：{qid: 文字或陣列}
+        return {"ok": tasks.resolve_ask(aid, {str(k): v for k, v in body["answers"].items()})}
     return {"ok": tasks.resolve_ask(aid, str(body.get("answer") or "").strip() or "（空白）")}
 
 
@@ -2676,11 +2727,15 @@ async def ws_endpoint(ws: WebSocket):
                     await broadcast({"type": "notice", "session_id": sid, "text": "已用你這則訊息回答剛才的提問"})
                     continue
                 switch_from = None
+                steer_note = "已插入，這一步結束後送給模型"
                 async with TURN_LOCK:
+                    from woof.agent import tasks as _tasks
+
                     running = sid in RUNS and not RUNS[sid].done()
                     agent_running = (not running) and sid in AGENT_RUNS
+                    # 方案／目標流程在跑（規劃、審核、照步驟做、驗收）：插話跟一般回合一樣排進去，不能丟掉或另開一回合搶跑
+                    flow_running = (not running) and (not agent_running) and _tasks.is_running(sid)
                     gate = ((store.get_session(sid) or {}).get("engine_state") or {}).get("gate") or "off"
-                    from woof.agent import tasks as _tasks
 
                     if (running and gate in ("human", "model", "expand") and (msg.get("text") or "").strip()
                             and not _tasks.is_running(sid)):
@@ -2689,7 +2744,7 @@ async def ws_endpoint(ws: WebSocket):
                         steered = False
                         switch_from = RUNS[sid]
                         switch_from.cancel()
-                    elif running or agent_running:
+                    elif running or agent_running or flow_running:
                         # 有提問卡在等：使用者這次送訊息就當成回答，先把它結掉，
                         # 否則回合會卡在等那張卡（插話也要等這一步結束才送得進去）
                         from woof.agent import tasks as _tasksx
@@ -2702,14 +2757,11 @@ async def ws_endpoint(ws: WebSocket):
                             # 子代理還在自己那條對話裡跑：這一步跑完就會看到追加要求，不用重開
                             await broadcast({"type": "notice", "session_id": sid,
                                              "text": "已把追加要求送給子代理，它這一步跑完就會看到"})
+                        elif flow_running:
+                            steer_note = _tasks.steer_note(sid)
                     else:
                         steered = False
                         if gate in ("human", "model", "expand") and (msg.get("text") or "").strip():
-                            if _tasks.is_running(sid):
-                                # 已經有方案在跑：不要存這則也不要開新的（原本會存進去再被擋下，看起來像沒反應）
-                                await ws.send_json({"type": "notice", "session_id": sid,
-                                                    "text": "方案／目標還在跑：要回答它的提問直接打字送，要中止按停止。這則沒有送出去"})
-                                continue
                             await _gated_send(sid, blocks, msg["text"].strip(), gate)
                         else:
                             RUNS[sid] = asyncio.create_task(_turn(sid, blocks))
@@ -2732,7 +2784,7 @@ async def ws_endpoint(ws: WebSocket):
                         await _gated_send(sid, blocks, text0, gate, note)
                 if steered:
                     await broadcast({"type": "steer", "session_id": sid, "content": blocks})
-                    await broadcast({"type": "notice", "session_id": sid, "text": "已插入，這一步結束後送給模型"})
+                    await broadcast({"type": "notice", "session_id": sid, "text": steer_note})
             elif t == "continue" and sid:
                 # 「繼續」：上一回合沒做完（出錯、停止、步數上限、程式關閉），請模型從中斷處接著做
                 async with TURN_LOCK:

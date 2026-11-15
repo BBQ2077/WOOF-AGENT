@@ -22,10 +22,21 @@ def register(woof):
         from woof.agent import tasks
 
         turn = getattr(tctx, "turn", None)
-        q = str(args.get("question") or "").strip()
-        if turn is None or not q:
-            return {"output": "需要 question，且只能在對話中使用", "is_error": True}
-        answer = await tasks.ask(turn, q, args.get("options") or [], record=False)
+        if turn is None:
+            return {"output": "只能在對話中使用", "is_error": True}
+        raw = args.get("questions")
+        if raw:
+            qs, err = tasks.ask_questions(raw)
+            if err:
+                return {"output": err, "is_error": True}
+            if len(qs) > 1 or qs[0]["multi"]:
+                return {"output": await tasks.ask_many(turn, qs)}
+            q, opts = qs[0]["question"], qs[0]["options"]
+        else:   # 舊寫法：單一 question＋options
+            q, opts = str(args.get("question") or "").strip(), args.get("options") or []
+        if not q:
+            return {"output": "需要 questions（或 question）", "is_error": True}
+        answer = await tasks.ask(turn, q, opts, record=False)
         if tasks.timed_out(answer):
             return {"output": answer}
         return {"output": f"使用者回答：{answer}"}
@@ -53,12 +64,23 @@ def register(woof):
     )
     woof.add_tool(
         "ask_user",
-        "向使用者提問並等待回答。遇到需要使用者決定的事（方向、偏好、有風險的操作）就用這個，不要自己猜。"
-        "可以給 options 讓使用者點選；使用者也可以自己輸入。"
-        "使用者一段時間（預設 3 分鐘）沒回應會自動略過，回傳會寫明人不在；這時自己判斷繼續，收不回來的事留到最後再問。",
+        "向使用者提問並等待回答。遇到需要使用者決定的事（方向、偏好、有風險的操作）就用這個，不要自己猜；小事自己決定。"
+        "所有問題放在 questions（1～5 題）：只問一題就是一個元素的陣列；幾個彼此獨立的問題放在同一次一起問"
+        "（一張卡片勝過連續問好幾次），某題的答案會改變另一題時才分開問。"
+        "每題可以單選（options 最多 4 個，把你推薦的放第一個，畫面會標「推薦」）、複選（multi_select=true）、"
+        "或不給 options 讓使用者自由回答；每題使用者都可以不選、改成自己打字。選項只放在 options，不要寫在題目文字裡（寫在題目裡點不到）。"
+        "回傳依題目順序寫出每題的回答，沒答的標「略過」。使用者一段時間（預設 3 分鐘）沒回應會自動略過，回傳會寫明人不在；"
+        "這時自己判斷繼續，收不回來的事留到最後再問。",
         {"type": "object", "properties": {
-            "question": {"type": "string", "description": "要問的問題，說清楚為什麼要問"},
-            "options": {"type": "array", "items": {"type": "string"}, "description": "可選的答案，最多 6 個"}},
-         "required": ["question"]},
+            "questions": {
+                "type": "array", "minItems": 1, "maxItems": 5,
+                "description": "要問的問題，依序顯示在同一張卡片上",
+                "items": {"type": "object", "properties": {
+                    "question": {"type": "string", "description": "題目，說清楚為什麼要問；不要把選項寫在這裡"},
+                    "options": {"type": "array", "items": {"type": "string"}, "maxItems": 4,
+                                "description": "可選的答案，推薦的放第一個；不給就是自由回答"},
+                    "multi_select": {"type": "boolean", "description": "可以複選"}},
+                    "required": ["question"]}}},
+         "required": ["questions"]},
         ask_user,
     )

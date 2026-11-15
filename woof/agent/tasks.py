@@ -171,6 +171,88 @@ async def ask(turn, question: str, options: list[str] | None = None, timeout: fl
                          "record": bool(record and str(answer)), "tool": not record})
 
 
+ASK_MAX_Q = 5        # 一次最多問幾題
+ASK_MAX_OPTS = 4     # 多題卡片每題最多幾個選項（第一個是推薦；選項外一律可以自己打字）
+
+
+def ask_questions(raw) -> tuple[list[dict] | None, str]:
+    """整理 ask_user 的 questions：回（[{qid, question, options, multi}], 錯誤訊息）。"""
+    if not isinstance(raw, list) or not raw:
+        return None, "questions 要是非空陣列：[{question, options?, multi_select?}]"
+    if len(raw) > ASK_MAX_Q:
+        return None, f"一次最多問 {ASK_MAX_Q} 題；有先後關係的分開問"
+    out = []
+    for i, it in enumerate(raw):
+        if isinstance(it, str):
+            it = {"question": it}
+        if not isinstance(it, dict) or not str(it.get("question") or "").strip():
+            return None, f"questions[{i}] 要有 question"
+        opts = it.get("options", it.get("choices")) or []
+        if not isinstance(opts, list):
+            return None, f"questions[{i}].options 要是字串陣列"
+        opts = [str(o).strip() for o in opts if str(o).strip()][:ASK_MAX_OPTS]
+        out.append({"qid": f"q{i}", "question": str(it["question"]).strip(), "options": opts,
+                    "multi": bool(it.get("multi_select")) and bool(opts)})
+    return out, ""
+
+
+def _ask_line(v) -> str:
+    if isinstance(v, list):
+        v = "、".join(str(x).strip() for x in v if str(x).strip())
+    return " ".join(str(v or "").split())
+
+
+def ask_result(qs: list[dict], answer) -> str:
+    """多題卡片的結果交給模型：每題一段【n】題目 → 回答／（略過）。
+    answer 是 {qid: 文字或陣列}；字串表示使用者沒填卡片、直接在輸入框回話（或逾時）。"""
+    if isinstance(answer, str):
+        if timed_out(answer):
+            return answer
+        return f"使用者沒有填提問卡片，直接回話：{answer}\n（卡片上每一題都當沒回答，從這句話判斷要怎麼做）"
+    rows, n = [], 0
+    for i, q in enumerate(qs):
+        v = _ask_line((answer or {}).get(q["qid"]))
+        n += bool(v)
+        rows.append(f"【{i + 1}】{q['question']}\n→ {v or '（略過，你自己判斷）'}")
+    return f"使用者回答了 {n}／{len(qs)} 題：\n" + "\n".join(rows)
+
+
+async def ask_many(turn, qs: list[dict], timeout: float | None = None) -> str:
+    """一張卡片問多題（ask_user 的 questions），使用者一次送出。回交給模型的文字（見 ask_result）。"""
+    aid = uuid.uuid4().hex[:12]
+    limit = ask_timeout() if timeout is None else max(0, int(timeout))
+    t0 = time.time()
+    fut = asyncio.get_running_loop().create_future()
+    ASKS[aid] = {"future": fut, "session_id": turn.session_id, "limit": limit,
+                 "deadline": t0 + limit if limit else 0}
+    head = qs[0]["question"] if len(qs) == 1 else f"{len(qs)} 個問題"
+    await turn.emit({"type": "ask", "session_id": turn.session_id, "id": aid, "question": head, "options": [],
+                     "questions": qs, "timeout": limit, "deadline": ASKS[aid]["deadline"]})
+    answer = ""
+    try:
+        while True:
+            dl = ASKS[aid]["deadline"]
+            left = (dl - time.time()) if dl else None
+            if left is not None and left <= 0:
+                answer = no_reply_text(time.time() - t0)
+                ASKS[aid]["timed_out"] = True
+                return ask_result(qs, answer)
+            try:
+                answer = await asyncio.wait_for(asyncio.shield(fut), min(left, 30) if left is not None else None)
+                return ask_result(qs, answer)
+            except asyncio.TimeoutError:
+                continue
+    finally:
+        a = ASKS.pop(aid, None) or {}
+        if not fut.done():
+            fut.cancel()
+        await turn.emit({"type": "ask_done", "session_id": turn.session_id, "id": aid, "question": head,
+                         "options": [], "answer": answer if isinstance(answer, str) else ask_result(qs, answer),
+                         "skipped": bool(a.get("skipped")), "timed_out": bool(a.get("timed_out")),
+                         "waited": int(time.time() - t0), "at": time.time(), "after": 0,
+                         "record": False, "tool": True})
+
+
 def touch_ask(aid: str) -> float:
     """使用者正在卡片上打字：期限從現在重新算，免得打到一半被略過。回傳新的期限（0＝不限）。"""
     a = ASKS.get(aid)
@@ -208,11 +290,12 @@ def has_ask(session_id: str) -> bool:
     return any(a.get("session_id") == session_id and not a["future"].done() for a in ASKS.values())
 
 
-def resolve_ask(aid: str, answer: str) -> bool:
+def resolve_ask(aid: str, answer) -> bool:
+    """answer：一般提問是文字；多題卡片是 {qid: 文字或陣列}。"""
     a = ASKS.get(aid)
     if not a or a["future"].done():
         return False
-    a["skipped"] = "略過" in str(answer)
+    a["skipped"] = (not any(_ask_line(v) for v in answer.values())) if isinstance(answer, dict) else "略過" in str(answer)
     a["future"].set_result(answer)
     return True
 
@@ -406,6 +489,18 @@ async def final_check(ctx, session_id: str, objective: str, steps: list[str], em
     return ok, gaps
 
 
+async def _flush_user_steer(session_id: str, emit) -> str:
+    """步驟開始前，把規劃／審核／上一步結束時送到的插話先寫進對話（排在這一步的指示前面）。
+    有使用者自己打的字就回一句提醒附在步驟指示後面，不然模型照方案往下做會略過它。"""
+    from woof.agent.loop import flush_steer, peek_steer
+
+    said = any(not (it.get("meta") or {}).get("internal") for it in peek_steer(session_id))
+    if not await flush_steer(session_id, emit) or not said:
+        return ""
+    return ("\n\n（使用者在方案進行中插話了，見上面那則：照他說的調整這一步和之後的做法；"
+            "跟方案衝突時以使用者說的為準，他要停下或改方向就照做。）")
+
+
 async def _run_step(ctx, session_id: str, objective: str, step: str, idx: int, total: int, emit,
                     plan: list[str] | None = None, notes: str = "", ref: dict | None = None) -> bool:
     """做一步：不再每步派子代理審核（那是八股與卡住的來源），做完就往下。
@@ -420,6 +515,7 @@ async def _run_step(ctx, session_id: str, objective: str, step: str, idx: int, t
                      "實作中想到更好的就用更好的；做哪些、怎麼做由你判斷，以查到的和實際做出來的為準，不要照著猜的內容硬做。"
                      "目標是把成品做好，不是做到能交差。）")
     text = _prompt("goal_step", objective=objective, n=idx + 1, total=total, step=step, plan=plan_txt)
+    text += await _flush_user_steer(session_id, emit)
     m = store.add_message(session_id, "user", [{"type": "text", "text": text}], meta=internal.meta("goal_step"))
     await emit({"type": "message", "session_id": session_id, "message": m})
     try:
@@ -436,7 +532,7 @@ async def _run_fix(ctx, session_id: str, gaps: list[str], emit) -> bool:
     """驗收後補缺口：用「補做沒做到的部分」提示詞（設定 → 方案模式可改），不是再塞一個「步驟 9/8」。"""
     from woof.agent.loop import run_model_loop
 
-    text = _prompt("review_fail", reason="；".join(gaps))
+    text = _prompt("review_fail", reason="；".join(gaps)) + await _flush_user_steer(session_id, emit)
     m = store.add_message(session_id, "user", [{"type": "text", "text": text}], meta=internal.meta("review_feedback"))
     await emit({"type": "message", "session_id": session_id, "message": m})
     try:
@@ -659,6 +755,19 @@ async def run_goal(session_id: str, objective: str, emit, steps: list[str] | Non
         await emit({"type": "notice", "session_id": session_id, "text": f"目標執行失敗：{e}"})
 
 
+AFTER_FLOW = None   # server 掛上：流程正常結束還有沒送進去的插話，接著開一回合處理
+
+
+def steer_note(session_id: str) -> str:
+    """方案流程在跑時插話：告訴使用者這則什麼時候會送到模型。"""
+    g = _state(session_id).get("goal") or {}
+    if g.get("status") == "planning":
+        return "已插入：方案還在規劃／審核，開始做第一步時一起送給執行的模型"
+    if g.get("steps") and int(g.get("idx") or 0) >= len(g["steps"]):
+        return "已插入：步驟都做完了、正在驗收，驗收完接著處理這則"
+    return "已插入，這一步的工具跑完就送給模型"
+
+
 def _track(session_id: str, coro, emit) -> asyncio.Task:
     """跑目標／方案流程。結束（做完、出錯、被停）時補送一個事件：
     流程裡最後一個事件（回覆的 run_end）送出時流程還沒結束，帶的 busy 是 True；
@@ -670,7 +779,10 @@ def _track(session_id: str, coro, emit) -> asyncio.Task:
 
     def _done(_t):
         try:
-            asyncio.get_running_loop().create_task(emit({"type": "flow_end", "session_id": session_id}))
+            loop = asyncio.get_running_loop()
+            loop.create_task(emit({"type": "flow_end", "session_id": session_id}))
+            if AFTER_FLOW is not None and not _t.cancelled():
+                loop.create_task(AFTER_FLOW(session_id))
         except RuntimeError:
             pass
 
