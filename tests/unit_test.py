@@ -1733,6 +1733,10 @@ class VisionModeAndFlow(unittest.TestCase):
         self.assertTrue(e["tok_est"])
         self.assertGreater(e["out_tok"], 0)
         self.assertEqual(_speed(now, None, 5, {}), {})
+        # 填充速度要用的上下文 token：有回就記，沒回就不記（前端退回只顯示秒數）
+        f = _speed(now - 3, now - 2, 100, {}, 32000, 30000)
+        self.assertEqual((f["in_tok"], f["cache_tok"]), (32000, 30000))
+        self.assertNotIn("in_tok", d)
 
 
 class CatalogVisionHint(unittest.TestCase):

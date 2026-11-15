@@ -2140,18 +2140,31 @@ const NO_REPLY_TAG = '（使用者沒有回應';   // 後端 no_reply_text 的�
 // 問題卡片的倒數：時間到後端會自動略過；點了卡片的輸入框就停止倒數
 // 生成速度：每一步的 out_tok／gen_s（woof/agent/loop.py _speed）。一次整段吐出來的（gen_s 太短）不算速度
 function stepRate(s) { return s.gen_s >= 0.3 ? s.out_tok / s.gen_s : null; }
+const kTok = (n) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 100000 ? 0 : 1)}k` : String(Math.round(n)));
+const secTxt = (s) => (s < 10 ? s.toFixed(1) : String(Math.round(s))) + 's';
 function spdText(steps) {
   steps = steps || []; if (!steps.length) return '';
   const ok = steps.filter((s) => stepRate(s) != null);
   const tok = ok.reduce((a, s) => a + s.out_tok, 0), sec = ok.reduce((a, s) => a + s.gen_s, 0);
-  // 填充：送出到第一個字（模型讀完上下文、開始吐字前）；多步加總
+  // 填充：送出到第一個字（模型讀完上下文、開始吐字前）。速度＝上下文 token／等待秒數，多步取總平均；
+  // 括號裡是最後一步的上下文長度和每步等待加總。舊訊息沒記上下文 token，只顯示秒數
   const fill = steps.reduce((a, s) => a + (s.ttft_s || 0), 0);
-  return [ok.length ? `${Math.round(tok / sec)} tok/s` : '', `填充 ${fill < 10 ? fill.toFixed(1) : Math.round(fill)}s`].filter(Boolean).join(' · ');
+  const known = steps.filter((s) => s.in_tok && s.ttft_s > 0);
+  let fillTxt = `填充 ${secTxt(fill)}`;
+  if (known.length === steps.length) {
+    const inSum = known.reduce((a, s) => a + s.in_tok, 0), tSum = known.reduce((a, s) => a + s.ttft_s, 0);
+    fillTxt = `填充 ${kTok(inSum / tSum)} tok/s（${kTok(steps[steps.length - 1].in_tok)} tok，${secTxt(fill)}）`;
+  }
+  return [ok.length ? `生成 ${Math.round(tok / sec)} tok/s` : '', fillTxt].filter(Boolean).join(' · ');
 }
 function spdTitle(steps) {
   if (!(steps || []).length) return '';
-  const rows = steps.map((s, i) => `第 ${i + 1} 步：${stepRate(s) != null ? Math.round(stepRate(s)) + ' tok/s' : '一次回完'}，${s.tok_est ? '約 ' : ''}${s.out_tok} tokens，生成 ${s.gen_s} 秒，第一個字等了 ${s.ttft_s} 秒`);
-  return ` title="${esc((steps.length > 1 ? 'tok/s 是整則平均（只算生成時間），填充是每步等第一個字的時間加總\n' : '填充＝送出到第一個字的時間（模型讀上下文）\n') + rows.join('\n'))}"`;
+  const rows = steps.map((s, i) => `第 ${i + 1} 步：生成 ${stepRate(s) != null ? Math.round(stepRate(s)) + ' tok/s' : '一次回完'}，${s.tok_est ? '約 ' : ''}${s.out_tok} tokens，${s.gen_s} 秒；`
+    + (s.in_tok ? `填充 ${s.ttft_s > 0 ? kTok(s.in_tok / s.ttft_s) + ' tok/s，' : ''}上下文 ${s.in_tok} tokens${s.cache_tok ? `（快取 ${s.cache_tok}）` : ''}，` : '填充 ')
+    + `等第一個字 ${s.ttft_s} 秒`);
+  const head = '生成＝吐字速度（只算生成時間）；填充＝讀上下文的速度（上下文 token／送出到第一個字的時間，含網路與排隊）'
+    + (steps.length > 1 ? '。多步時速度是整則平均，填充的 token 數是最後一步的上下文、秒數是每步加總' : '');
+  return ` title="${esc(head + '\n' + rows.join('\n'))}"`;
 }
 function askSpan(sec) { const s = Math.max(0, Math.round(sec)); return s >= 60 ? `${Math.floor(s / 60)} 分${s % 60 ? ` ${s % 60} 秒` : '鐘'}` : `${s} 秒`; }
 function askLeft(a) {
