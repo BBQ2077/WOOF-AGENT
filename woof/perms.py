@@ -60,7 +60,7 @@ TOOL_CAT = {
 # 危險指令：全自動以外，會自動執行的時候改成先問
 DANGER = [
     (r"\brm\s+(?:-{1,2}[\w-]+\s+)*(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\b", "rm -rf 遞迴刪除"),
-    (r"\b(del|erase)\s+.*(/s|/q)", "del /s 大量刪除"),
+    (r"\b(del|erase)\b(?=.*(?:\s/s\b|\*))", "del /s 大量刪除"),   # /q 只是不問確認，刪單一檔案常用，不算
     (r"\b(rd|rmdir)\s+.*?/s", "rmdir /s 刪除資料夾"),
     (r"Remove-Item\b.*-Recurse", "Remove-Item -Recurse 遞迴刪除"),
     (r"\bgit\s+push\b.*(--force|-f\b)", "git push --force 強制推送"),

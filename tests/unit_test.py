@@ -46,6 +46,9 @@ class Perms(unittest.TestCase):
         self.assertEqual(self.d("auto_ask", "terminal", {"command": "rm -rf build"}), "ask")
         self.assertEqual(self.d("auto_ask", "terminal", {"command": "rm -f -R build"}), "ask")
         self.assertEqual(self.d("auto_ask", "terminal", {"command": "rm -f tmp.py"}), "auto")  # 刪單一檔案不是遞迴刪除
+        self.assertEqual(self.d("auto_ask", "terminal", {"command": "del /f /q a.txt"}), "auto")  # /q 只是不問確認
+        self.assertEqual(self.d("auto_ask", "terminal", {"command": "del /s /q build"}), "ask")
+        self.assertEqual(self.d("auto_ask", "terminal", {"command": "del /q *.*"}), "ask")
         self.assertEqual(self.d("auto", "terminal", {"command": "format c:"}), "deny")
         self.assertEqual(self.d("auto", "terminal", {"command": "sudo shutdown now"}), "deny")
 
