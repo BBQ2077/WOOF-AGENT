@@ -3402,8 +3402,13 @@ class SteerDuringPlanning(unittest.TestCase):
         from woof.agent import tasks, loop
 
         reg = sys.modules["woof.loader"].REG
-        orig = (loop.run_model_loop, tasks.review_plan, tasks.final_check, reg.model_cfg, reg.providers)
-        reviews, done = [], []
+        orig = (loop.run_model_loop, tasks.review_plan, tasks.final_check, reg.model_cfg, reg.providers, tasks.expand_plan)
+        reviews, done, expands = [], [], []
+
+        async def fake_expand(ctx, objective, steps):
+            expands.append(list(steps))
+            return {"ideas": ["加深色"], "checks": []}, ""
+        tasks.expand_plan = fake_expand
 
         def setup(chat):
             sid = store.create_session("m", None, "TODO 流程")["id"]
@@ -3440,21 +3445,23 @@ class SteerDuringPlanning(unittest.TestCase):
             pass
         try:
             sid = setup(False)
-            asyncio.run(tasks.run_gated(sid, "做遊戲", emit, "model"))
+            asyncio.run(tasks.run_gated(sid, "做遊戲", emit, "expand"))
             self.assertEqual(reviews, [["A", "B"]])                  # 只審一次
+            self.assertEqual(expands, [["A", "B"]])                  # 拓展在 TODO 列好後才跑，只給意見
             self.assertEqual(done, ["A", "B", "C", "D"])             # 審核意見讓模型加了 C；做 B 時自己加了 D
             self.assertEqual(tasks._state(sid)["goal"]["status"], "done")
             store.delete_session(sid)
 
-            reviews.clear(); done.clear()
+            reviews.clear(); done.clear(); expands.clear()
             sid = setup(True)
-            asyncio.run(tasks.run_gated(sid, "這是什麼？", emit, "model"))
-            self.assertEqual(reviews, [])                            # 問答：不審、不做步驟
+            asyncio.run(tasks.run_gated(sid, "這是什麼？", emit, "expand"))
+            self.assertEqual(reviews, [])                            # 問答：不審、不拓展、不做步驟
+            self.assertEqual(expands, [])
             self.assertEqual(done, [])
             self.assertEqual([t["text"] for t in tasks._state(sid)["todos"]], ["舊的"])
             store.delete_session(sid)
         finally:
-            loop.run_model_loop, tasks.review_plan, tasks.final_check, reg.model_cfg, reg.providers = orig
+            loop.run_model_loop, tasks.review_plan, tasks.final_check, reg.model_cfg, reg.providers, tasks.expand_plan = orig
 
     def _goal_env(self, check):
         """run_goal 的測試環境：一步、假的模型回合、假的驗收。回（session id, 紀錄, 還原函式）。"""

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from woof.prompts import get as _prompt
 from woof.agent import internal
@@ -18,6 +19,8 @@ import time
 import uuid
 
 from woof import store
+
+log = logging.getLogger("woof.tasks")
 
 TODO_STATUS = ("pending", "doing", "done", "skipped", "failed")
 PLAN_TOOLS = {"write_file", "patch", "terminal", "process"}
@@ -1085,46 +1088,61 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
     try:
         since = _last_mid(session_id)
         save_planning()
-        if gate == "expand":
-            while True:
-                try:
-                    await _stage(session_id, emit, "expand", "思維拓展中：拓展模型（子代理）在想（可以直接插話）")
-                    ref, notes = await _or_steer(session_id, expand_plan(ctx, objective, []))
-                    break
-                except _Steered:
-                    # 拓展途中你插話：停掉這次拓展，插話寫進對話、併進目標，照你說的重新拓展
-                    said = await _take_steer(session_id, emit)
-                    if said:
-                        extra += "\n【使用者補充（以這些為準，跟前面衝突時照這裡）】\n" + said
-                    objective = _with_context(session_id, raw_objective) + extra
-                    save_planning()
-                    await emit({"type": "notice", "session_id": session_id, "text": "收到插話：照你說的重新拓展"})
-            if ref["ideas"] or ref["checks"]:
-                await emit({"type": "notice", "session_id": session_id,
-                            "text": f"拓展模型（子代理）想到 {len(ref['ideas'])} 個方向、{len(ref['checks'])} 個該先查的"
-                                    + (f"：{notes}" if notes else "") + "（只當參考，交給執行的模型自己判斷）"})
         said = raw_objective + extra
-        steps = await _model_todo(ctx, session_id, said, emit, ref, notes)
+        # 先由主模型判斷要不要動手：問答、閒聊直接回答，不拓展、不審核；要動手才列 TODO
+        steps = await _model_todo(ctx, session_id, said, emit)
         if not steps:
-            # 問答、閒聊：模型已經直接回了，不做審核與驗收；原本的 TODO 放回去
+            # 問答、閒聊：模型已經直接回了；原本的 TODO 放回去
             if old_todos and not (_state(session_id).get("todos") or []):
                 set_todos(session_id, old_todos)
                 await _push_todos(emit, session_id, old_todos)
             _save(session_id, goal={"objective": raw_objective, "status": "chat", "at": time.time()})
             return
         if gate in ("model", "expand"):
-            await _stage(session_id, emit, "plan_review", f"審核 TODO（{len(steps)} 項）：審核模型（子代理）在看（可以直接插話）")
+            # 拓展、審核只給意見：兩個子代理同時看這份 TODO，意見交回主模型自己判斷、調一次 TODO 就開始做
+            who = "拓展、審核模型（子代理）" if gate == "expand" else "審核模型（子代理）"
+            await _stage(session_id, emit, "plan_review", f"{who}在看 TODO（{len(steps)} 項）（可以直接插話）")
+
+            async def opinions():
+                jobs = [review_plan(ctx, objective, steps, "")]
+                if gate == "expand":
+                    jobs.append(expand_plan(ctx, objective, steps))
+                return await asyncio.gather(*jobs, return_exceptions=True)
+
+            fb = []
             try:
-                ok, reason = await _or_steer(session_id, review_plan(ctx, objective, steps, ""))
+                res = await _or_steer(session_id, opinions())
+                rv = res[0]
+                if isinstance(rv, BaseException):
+                    log.warning("審核 TODO 失敗：%s", rv)
+                else:
+                    ok, reason = rv
+                    if reason and not ok:
+                        fb.append("【審核】" + reason)
+                    await emit({"type": "notice", "session_id": session_id,
+                                "text": f"審核模型（子代理）看過 TODO（{len(steps)} 項）："
+                                        + (f"意見：{reason}" if reason and not ok else "沒意見" + (f"。{reason}" if reason else ""))})
+                if gate == "expand" and len(res) > 1:
+                    ex = res[1]
+                    if isinstance(ex, BaseException):
+                        log.warning("拓展失敗：%s", ex)
+                    else:
+                        ref, notes = ex
+                        idea = _ref_text(ref) + (f"\n{notes}" if notes else "")
+                        if idea.strip():
+                            fb.append("【拓展（沒查證，只當參考）】" + idea.strip())
+                        if ref.get("ideas") or ref.get("checks"):
+                            await emit({"type": "notice", "session_id": session_id,
+                                        "text": f"拓展模型（子代理）想到 {len(ref['ideas'])} 個方向、{len(ref['checks'])} 個該先查的"
+                                                + (f"：{notes}" if notes else "") + "（只當參考，交給主模型自己判斷）"})
             except _Steered:
-                ok, reason = True, ""   # 你插話了：不審了，插話在第一項開始前交給模型
-            if ok or not reason:
-                await emit({"type": "notice", "session_id": session_id,
-                            "text": f"審核模型（子代理）看過 TODO（{len(steps)} 項）：通過" + (f"。{reason}" if reason else "")})
-            else:
-                await emit({"type": "notice", "session_id": session_id,
-                            "text": f"審核模型（子代理）對 TODO 的意見：{reason}（交給執行的模型自己判斷、調一次就開始做）"})
-                steps = await _model_todo(ctx, session_id, said, emit, feedback=reason) or steps
+                # 你插話了：不等意見，插話寫進對話，主模型照你說的調 TODO
+                if await _take_steer(session_id, emit):
+                    fb.append("【使用者剛插話（在對話裡，以他說的為準）】")
+                await emit({"type": "notice", "session_id": session_id, "text": "收到插話：交給主模型照你說的調整 TODO"})
+            if fb:
+                steps = await _model_todo(ctx, session_id, said, emit, feedback="\n\n".join(fb)) or steps
+            ref, notes = None, ""   # 意見已經交給主模型併進 TODO，做的時候照 TODO 走，不再另外附
         else:
             rnd = 1
             while len(steps) > 1:
