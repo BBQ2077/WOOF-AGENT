@@ -40,8 +40,25 @@ const S = {
 //      所以右側面板、TODO、額度、終端機一律跟著目前的分頁走，不會指錯對話。
 const TAB_MAX = 4;
 S.tabs = []; S.tab = 0;
+// 輸入框草稿：每個對話各自記在本機，重新整理、重開 WOOF 都還在；還沒送出的新對話記在 '__new'
+const DRAFTS_KEY = 'woof.drafts';
+let DRAFTS = {};
+try { const d = JSON.parse(localStorage.getItem(DRAFTS_KEY) || '{}'); if (d && typeof d === 'object') DRAFTS = d; } catch { DRAFTS = {}; }
+const draftGet = (sid) => DRAFTS[sid || '__new'] || '';
+function draftPut(sid, text) {
+  const k = sid || '__new';
+  if (text && text.trim()) DRAFTS[k] = text; else delete DRAFTS[k];
+  try { localStorage.setItem(DRAFTS_KEY, JSON.stringify(DRAFTS)); } catch {}
+}
+// 把目前輸入框的字記到目前分頁的對話底下（打字、換對話、換分頁、關視窗前呼叫）
+function draftFlush() {
+  const t = S.tabs[S.tab];
+  if (!t || t.page) return;
+  t.text = input.value;
+  draftPut(t.sid, input.value);
+}
 // page：插件頁面的分頁（例如五子棋），這種分頁沒有對話
-const tabNew = (sid, page) => ({ sid: sid || null, page: page || '', msgs: [], follow: true, attach: [], files: [], draft: {}, liveThink: null, top: 0, loaded: false, text: '' });
+const tabNew = (sid, page) => ({ sid: sid || null, page: page || '', msgs: [], follow: true, attach: [], files: [], draft: {}, liveThink: null, top: 0, loaded: false, text: page ? '' : draftGet(sid) });
 const tab = () => S.tabs[S.tab] || (S.tabs[S.tab] = tabNew(null));
 const tabOf = (sid) => (sid ? S.tabs.find((t) => t.sid === sid) : null);
 for (const k of ['sid', 'msgs', 'follow', 'attach', 'files', 'draft', 'liveThink']) {
@@ -56,6 +73,9 @@ function restoreTabs() {
   let arr = [];
   try { const raw = JSON.parse(localStorage.getItem('woof.tabs') || '[]'); if (Array.isArray(raw)) arr = raw; } catch { arr = []; }
   const ids = new Set(S.sessions.map((s) => s.id));
+  // 對話已經刪掉的草稿一起清掉
+  const stale = Object.keys(DRAFTS).filter((k) => k !== '__new' && !ids.has(k));
+  if (stale.length && S.sessions.length) { stale.forEach((k) => delete DRAFTS[k]); try { localStorage.setItem(DRAFTS_KEY, JSON.stringify(DRAFTS)); } catch {} }
   const pages = new Set(uiPlugins().map((p) => p.ui.page));
   const tabs = arr.slice(0, TAB_MAX)
     .filter((sid) => !(typeof sid === 'string' && sid.startsWith('page:') && !pages.has(sid.slice(5))))
@@ -150,7 +170,7 @@ async function showTab(i, fresh) {
 async function switchTab(i) {
   if (!S.tabs[i]) return;
   if (i === S.tab) { const t = tab(); if (!t.loaded) { await loadTab(t); renderAll(); } return; }
-  tab().text = input.value;
+  draftFlush();
   await showTab(i);
   $('#input').focus();
 }
@@ -277,7 +297,7 @@ function openPage(id) {
   const i = S.tabs.findIndex((t) => t.page === id);
   if (i >= 0) { switchTab(i); return; }
   if (S.tabs.length >= TAB_MAX) { notify('warn', `最多只能開 ${TAB_MAX} 個分頁`, '先關掉一個分頁再開。'); return; }
-  tab().text = input.value;
+  draftFlush();
   const prev = tab(); if (prev.sid) prev.top = $('#chat').scrollTop;
   S.tabs.push(tabNew(null, id));
   showTab(S.tabs.length - 1);
@@ -998,9 +1018,11 @@ async function openSession(sid) {
   // 側邊欄按一下：這個對話已經開在某個分頁就切過去，不然就用目前這個分頁開
   const open = tabOf(sid);
   if (open && open !== tab()) { await switchTab(S.tabs.indexOf(open)); return; }
+  draftFlush();
   leavePage();
   const t = tab();
   t.sid = sid; t.msgs = []; t.loaded = false; t.top = 0; t.follow = true;
+  t.text = draftGet(sid); input.value = t.text; autosize();
   if (sid && !cur()) await loadSessions().catch(() => {});
   localStorage.setItem('woof.sid', sid || '');
   if (sid) await loadTab(t); else t.loaded = true;
@@ -1012,9 +1034,11 @@ async function openSession(sid) {
 
 function newSession() {
   // 分頁已滿：新對話直接取代目前分頁（原本那個對話仍然存在側邊欄，不會被刪掉）
+  draftFlush();
   leavePage();
   const t = tab();
   t.sid = null; t.msgs = []; t.loaded = true; t.top = 0; t.follow = true; t.attach = []; t.files = []; t.draft = {}; t.liveThink = null;
+  t.text = draftGet(null); input.value = t.text; autosize();
   localStorage.setItem('woof.sid', '');
   showView('chat');
   renderAll();
@@ -2748,6 +2772,8 @@ function autosize() {
   });
 }
 input.addEventListener('input', autosize);
+input.addEventListener('input', draftFlush);   // 每打一個字就存（視窗在背景時計時器會被拖慢，不用延遲存）
+window.addEventListener('beforeunload', draftFlush);
 // 每敲一個字都重設 innerHTML 會讓整顆按鈕重建（含 SVG），打字就會頓。狀態沒變就不碰 DOM。
 let sendSig = '';
 function renderSendState() {
@@ -2866,6 +2892,7 @@ async function send() {
     notify('warn', '還沒有模型', '先到「設定 → 模型商」新增一個。'); return;
   }
   if (!m.available) { notify('error', `「${m.label}」不能用`, '它需要的插件沒有載入，到插件頁看看是不是停用或載入失敗。'); return; }
+  const wasNew = !S.sid;
   if (S.attach.length && !m.vision) notify('warn', `${m.label} 不能直接看圖`, '圖片會先交給「輔助模型 → 看圖」轉成文字再送。判斷錯了可以到「設定 → 模型商」把這個模型的看圖改成「能看」。');
   if (!S.sid) {
     const s = await api('POST', '/api/sessions', { model: m.id, effort: effortWant(), perm: currentPerm() });
@@ -2881,6 +2908,7 @@ async function send() {
   const upFiles = (S.files || []).filter((f) => f.data).map((f) => ({ name: f.name, data: f.data, media_type: f.media_type }));
   if (!wsSend({ type: 'send', session_id: S.sid, text: body, images: S.attach, files: upFiles })) return;
   input.value = ''; S.attach = []; S.files = []; renderAttach(); autosize();
+  draftFlush(); if (wasNew) draftPut(null, '');
 }
 function stop() { if (isBusy(S.sid)) wsSend({ type: 'stop', session_id: S.sid }); }
 // 子代理：只停那一條，不影響主對話
@@ -2987,7 +3015,7 @@ function renderSlash() {
 function runSlash(cmd) {
   const c = SLASH.find((x) => x[0] === cmd); if (!c) return;
   $('#slashMenu').classList.remove('on');
-  input.value = ''; autosize();
+  input.value = ''; autosize(); draftFlush();
   c[2]();
 }
 // ---- 語言（目前涵蓋指令說明與輸入區提示）
@@ -3024,7 +3052,7 @@ function busySubmit(ctrl) {
   // 有 ask_user 在等：這一則就是那一題的回答。不用先點選項、也不會卡在排隊等一個永遠不會結束的回合
   const typed = input.value.trim();
   if (ask && typed) {
-    input.value = ''; autosize();
+    input.value = ''; autosize(); draftFlush();
     answerAsk(ask.id, typed);
     return;
   }
@@ -3173,7 +3201,7 @@ function queueMsg() {
     text: withFileRefs(text), images: S.attach.slice(),
     files: (S.files || []).filter((f) => f.data).map((f) => ({ name: f.name, data: f.data, media_type: f.media_type })),
   });
-  input.value = ''; S.attach = []; S.files = []; renderAttach(); autosize(); renderQueue();
+  input.value = ''; S.attach = []; S.files = []; renderAttach(); autosize(); renderQueue(); draftFlush();
 }
 function renderQueue() {
   const box = $('#queueBox'); if (!box) return;
@@ -3195,7 +3223,7 @@ function renderQueue() {
 $('#queueBox').addEventListener('click', (e) => {
   const q = (S.sid && S.queue[S.sid]) || [];
   const ins = e.target.closest('[data-qins]'), del = e.target.closest('[data-qdel]'), ed = e.target.closest('[data-qedit]');
-  if (ed) { const it = q.splice(Number(ed.dataset.qedit), 1)[0]; renderQueue(); if (it) { input.value = it.text || ''; S.attach = it.images || []; renderAttach(); autosize(); input.focus(); } return; }
+  if (ed) { const it = q.splice(Number(ed.dataset.qedit), 1)[0]; renderQueue(); if (it) { input.value = it.text || ''; S.attach = it.images || []; renderAttach(); autosize(); draftFlush(); input.focus(); } return; }
   if (ins) { const it = q.splice(Number(ins.dataset.qins), 1)[0]; renderQueue(); if (it) wsSend({ type: 'send', session_id: S.sid, text: it.text, images: it.images || [] }); }
   if (del) { q.splice(Number(del.dataset.qdel), 1); renderQueue(); }
 });
@@ -7036,6 +7064,7 @@ if (D) {
     await loadSessions();
     restoreTabs();
     const cur0 = tab();
+    if (!cur0.page && !input.value) { input.value = cur0.text || ''; autosize(); }
     if (cur0.sid) { await loadTab(cur0); showView('chat'); renderAll(); }
     else { showView('chat'); renderAll(); renderChat(true); }
     loadWorkdir();
@@ -7573,6 +7602,14 @@ function petAttHtml(m) {
     : `<span class="pdoc" data-pet="attdoc" data-path="${esc(a.path || '')}" title="${esc((a.read === false ? '這種格式他讀不到內容 · ' : '') + '點一下打開')}">📄 ${esc(a.name || '檔案')}</span>`).join('')}</div>`;
 }
 $('#petAttIn').onchange = (e) => { petAddFiles(e.target.files); e.target.value = ''; };
+// 寵物輸入框的草稿也記在本機，重開還在
+{
+  const pi = $('#petIn');
+  const saved = localStorage.getItem('woof.petDraft');
+  if (saved && !pi.value) { pi.value = saved; requestAnimationFrame(() => { try { petGrow(); } catch {} }); }
+  const put = () => { if (pi.value.trim()) localStorage.setItem('woof.petDraft', pi.value); else localStorage.removeItem('woof.petDraft'); };
+  pi.addEventListener('input', put);
+}
 $('#petIn').addEventListener('paste', (e) => {
   const fs = [...(e.clipboardData && e.clipboardData.files || [])];
   if (fs.length) { e.preventDefault(); petAddFiles(fs); }
@@ -7598,7 +7635,7 @@ async function petSay(forced) {
   const att = forced ? [] : PET.att.slice();
   if (!text && !att.length) return;
   petRxClose();
-  PET.busy = true; inp.value = ''; petGrow();
+  PET.busy = true; inp.value = ''; petGrow(); localStorage.removeItem('woof.petDraft');
   if (att.length) { PET.att = []; petPaintAtt(); }
   PET.stick = true;
   PET.hist.push({ role: 'user', text, id: '', att: att.map((a) => ({ name: a.name, preview: a.preview, kind: a.preview ? 'image' : 'file' })) });
@@ -7616,7 +7653,7 @@ async function petSay(forced) {
     if (att.length) { PET.att = att.concat(PET.att); petPaintAtt(); }
     petPaint();
     notify('error', '他沒聽到', e.message);
-    inp.value = text;
+    inp.value = text; if (!forced) localStorage.setItem('woof.petDraft', text);
   } finally {
     PET.busy = false; petGrow();
     // 只在焦點還留在寵物欄（按了送出鈕、建議句）或沒停在任何地方時拉回寵物輸入框；已經去別的輸入框打字就不搶
