@@ -2679,7 +2679,7 @@ class ExpandGate(unittest.TestCase):
     def test_wiring(self):
         src = open(str(ROOT / "woof/agent/tasks.py"), encoding="utf-8").read()
         self.assertIn('if gate == "expand":', src)
-        self.assertIn("ref, notes = await expand_plan(ctx, objective, steps)", src)
+        self.assertIn("ref, notes = await _or_steer(session_id, expand_plan(ctx, objective, steps))", src)
         self.assertIn("steps = [RESEARCH_STEP] + steps", src)      # 拓展完先查證再做
         self.assertIn('if gate in ("model", "expand"):', src)   # 拓展完也要審核
         sv = open(str(ROOT / "woof/server.py"), encoding="utf-8").read()
@@ -3448,6 +3448,81 @@ class ResumeAfterSteer(unittest.TestCase):
     def test_server_marks_steer(self):
         src = (ROOT / "woof" / "server.py").read_text(encoding="utf-8")
         self.assertIn('push_steer(sid, blocks, {"steer": True})', src)
+
+
+class SteerDuringPlanning(unittest.TestCase):
+    """規劃／拓展／審核途中插話：馬上停下手上那個，插話寫進對話，依插話重新規劃，不算版數。"""
+
+    def test_steer_replans(self):
+        import asyncio
+        from woof.agent import tasks, loop
+
+        sid = store.create_session("m", None, "規劃插話測試")["id"]
+        calls, events = [], []
+        orig = (tasks.plan_steps, tasks.expand_plan, tasks.review_plan, tasks.run_goal, tasks.flow_settings)
+        reg = sys.modules["woof.loader"].REG
+        orig_cfg = reg.model_cfg
+
+        async def fake_plan(cfg, objective, feedback=""):
+            calls.append(("plan", objective))
+            return ["做一件事", "再做一件事"]
+
+        async def fake_expand(ctx, objective, steps):
+            return {"ideas": [], "checks": []}, ""
+
+        async def fake_review(ctx, objective, steps, prev=""):
+            calls.append(("review", objective))
+            if len([c for c in calls if c[0] == "review"]) == 1:
+                loop.push_steer(sid, [{"type": "text", "text": "不要附書名"}], {"steer": True})
+                await asyncio.sleep(30)          # 審核還在跑：要被插話打斷，不能等它跑完
+            return True, ""
+
+        async def fake_goal(session_id, objective, emit, **kw):
+            calls.append(("goal", objective))
+
+        async def emit(ev):
+            events.append(ev)
+
+        fs = dict(orig[4]())
+        fs["plan_rounds"] = 1
+        tasks.plan_steps, tasks.expand_plan, tasks.review_plan, tasks.run_goal = fake_plan, fake_expand, fake_review, fake_goal
+        tasks.flow_settings = lambda: fs
+        orig_prov = reg.providers
+        reg.providers = {**orig_prov, "fake_prov": object()}
+        reg.model_cfg = lambda name: {"provider": "fake_prov", "id": "m", "name": "m"}
+        try:
+            store.add_message(sid, "user", [{"type": "text", "text": "做遊戲卡片"}])
+            t0 = time.monotonic()
+            asyncio.run(tasks.run_gated(sid, "做遊戲卡片", emit, "model"))
+            self.assertLess(time.monotonic() - t0, 5)
+            kinds = [c[0] for c in calls]
+            self.assertEqual(kinds, ["plan", "review", "plan", "review", "goal"])   # 只給 1 版也能重來：不算版數
+            self.assertIn("不要附書名", calls[2][1])
+            self.assertIn("不要附書名", calls[-1][1])
+            msgs = store.get_messages(sid)
+            self.assertTrue(any((m.get("meta") or {}).get("steer") for m in msgs))
+            self.assertEqual(loop.peek_steer(sid), [])
+            self.assertIn("不要附書名", (tasks._state(sid).get("goal") or {}).get("extra", ""))
+            self.assertTrue(any("重新規劃" in (e.get("text") or "") for e in events))
+        finally:
+            tasks.plan_steps, tasks.expand_plan, tasks.review_plan, tasks.run_goal, tasks.flow_settings = orig
+            reg.model_cfg = orig_cfg
+            reg.providers = orig_prov
+            loop.pop_steer(sid)
+            store.delete_session(sid)
+
+    def test_internal_does_not_interrupt(self):
+        import asyncio
+        from woof.agent import tasks, loop
+
+        async def work():
+            loop.push_steer("x_int", [{"type": "text", "text": "背景任務結束"}], {"internal": "bg_done"})
+            await asyncio.sleep(0.8)
+            return 7
+        try:
+            self.assertEqual(asyncio.run(tasks._or_steer("x_int", work())), 7)
+        finally:
+            loop.pop_steer("x_int")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
