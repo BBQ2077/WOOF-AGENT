@@ -1024,19 +1024,23 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
                 feedback = "使用者要換一個做法"
             except _Steered:
                 # 規劃／拓展／審核途中你插話：手上這個已經停掉，插話寫進對話（重開也不會丟），
-                # 併進目標依你說的重新規劃；這次重來不算版數，上一版的審核意見和拓展也作廢（以你說的為準）
+                # 併進目標依你說的重新規劃；這次重來不算版數。前文照樣附（_with_context 從原本那句往前抓）；
+                # 上一版的審核意見留著，跟插話衝突時以插話為準；拓展依新目標重跑（舊的是照沒插話前的目標想的）
                 said = await _take_steer(session_id, emit)
                 if said:
                     extra += "\n【規劃途中使用者補充（以這些為準，跟前面衝突時照這裡）】\n" + said
                 objective = _with_context(session_id, raw_objective) + extra
-                feedback, ref, notes = "", None, ""
+                if feedback and said and "插話前的審核意見" not in feedback:
+                    feedback += "（這是使用者插話前的審核意見；跟插話衝突的照插話）"
+                ref, notes = None, ""
                 rnd -= 1
                 await emit({"type": "notice", "session_id": session_id,
                             "text": "收到插話：停下手上的規劃，依你說的重新規劃（不算版數）"})
         if not approved:
-            # 版數用完：/goal 不停下來；其他模式問你，但沒回或按「你自己判斷」都繼續做（最後的審核意見交給執行的模型自己判斷要不要補），只有按取消才不做
+            # 版數用完：模型審核／思維拓展不問使用者，照最後一版做，最後的審核意見交給執行的模型自己判斷要不要補。
+            # 只有人工審核照舊問：最後一版是使用者自己退的，不能替他決定照做
             fix_note = f"方案審核最後還沒過的地方（你自己判斷要不要補、怎麼補）：{feedback}"
-            ans = "你自己判斷" if auto else await ask(
+            ans = "你自己判斷" if auto or gate != "human" else await ask(
                 ctx, f"提了 {rounds} 版，審核（{gate_name}）都沒過，最後一次意見：{feedback}。要怎麼做？",
                 ["照最後這版做", "你自己判斷", "取消"])
             if timed_out(ans):
