@@ -1007,6 +1007,11 @@ async def run_model_loop(ctx: TurnContext) -> None:
     retry_log: list[dict] = []   # 這一步重試過的原因，存進訊息 meta，訊息下方顯示「重試 N 次」
     ctx.fell_back = getattr(ctx, "fell_back", False)
     ctx.cont_counts = getattr(ctx, "cont_counts", None) or {}
+    if not ctx.session.get("parent"):
+        # 一回合＝最近一則使用者訊息起算（方案模式每做一項 TODO 是一回合）；子代理每回合上限、改檔快照都靠它
+        last_user = next((x for x in reversed(store.get_messages(ctx.session_id)) if x["role"] == "user"), None)
+        if last_user:
+            ctx.turn_mid = last_user["id"]
     max_steps = MAX_STEPS
     for p in await REG.events.collect("max_steps", ctx):
         max_steps = int(p) if int(p) > 0 else 0  # 0＝不限

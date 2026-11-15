@@ -217,7 +217,13 @@ def register(woof):
 
     _loop.SCOPE_LOCK = _ScopeLock   # 程式重開後接回寫入型子代理時，一樣照範圍排隊
 
-    used: dict[str, int] = {}  # 每個使用者回合已派出的子代理數（擋住模型反覆派工燒錢）
+    used: dict[str, set] = {}   # 每個回合新派出的子代理 id（擋住模型一回合派一大堆燒錢）
+    held: dict[str, int] = {}   # 正在派、還沒拿到 id 的數量（同一步同時呼叫好幾次時不會一起超過）
+
+    def _alive(key: str) -> int:
+        # 只算還在跑或排隊的：停掉、做完、派不出去的都空出名額
+        from woof.agent.loop import BG_BY_SID
+        return sum(1 for s in used.get(key, ()) if s in BG_BY_SID and not BG_BY_SID[s].done()) + held.get(key, 0)
 
     async def delegate_task(args: dict, tctx) -> dict:
         from woof.agent.loop import run_subagent_bg
@@ -247,12 +253,15 @@ def register(woof):
             t["model"], err = _pick_model(woof, t)
             if err:
                 return {"output": err, "is_error": True}
+        # 上限只算這一回合新派、而且還在跑或排隊的；帶 session_id 對已派出的子代理插話、追加要求、叫它接著做都不算
+        new = len(tasks) - (1 if follow else 0)
         cap = int(woof.settings.get("max_per_turn") or 0)
         key = f"{getattr(parent, 'root_session_id', parent.session_id)}:{getattr(parent, 'turn_mid', 0)}"
-        if cap and used.get(key, 0) + len(tasks) > cap:
-            return {"output": f"這一回合已經派了 {used.get(key, 0)} 個子代理，上限 {cap} 個（設定 → 插件 → subagent）。"
-                              "剩下的自己做，或回報使用者", "is_error": True}
-        used[key] = used.get(key, 0) + len(tasks)
+        if new and cap and _alive(key) + new > cap:
+            return {"output": f"這一回合新派的子代理還有 {_alive(key)} 個在跑或排隊，上限 {cap} 個（設定 → 插件 → subagent）。"
+                              "等其中一個做完、或用 stop_subagent 停掉不需要的，就能再派；對已派出的子代理追加要求（帶 session_id）不受這個限制",
+                    "is_error": True}
+        held[key] = held.get(key, 0) + new
         if len(used) > 200:
             for k in list(used)[:100]:
                 used.pop(k, None)
@@ -300,7 +309,13 @@ def register(woof):
         import uuid as _uuid
         slots = max(0, sub_limit() - _SUB_RUNNING.get(getattr(parent, "root_session_id", parent.session_id), 0))
         SUB_BATCH.set(_uuid.uuid4().hex[:8])   # 這一次派出的算同一批；gather 會把這個值帶進每個子任務
-        results = await asyncio.gather(*[one(i, t) for i, t in enumerate(tasks)])
+        try:
+            results = await asyncio.gather(*[one(i, t) for i, t in enumerate(tasks)])
+        finally:
+            held[key] = max(0, held.get(key, 0) - new)
+        for i, r in enumerate(results):
+            if isinstance(r, dict) and r.get("session_id") and not (follow and i == 0):
+                used.setdefault(key, set()).add(r["session_id"])
         parts, bad = [], 0
         for i, r in enumerate(results):
             head = f"## 子任務 {i + 1}" if len(results) > 1 else "## 子代理"
@@ -335,10 +350,13 @@ def register(woof):
         if not sid:
             kids = _l.bg_children(ctx.session_id)
             return {"output": "要停哪一個：帶 session_id。還在跑的子代理：" + ("、".join(kids) if kids else "沒有"), "is_error": True}
-        if _l.BG_PARENT.get(sid) not in mine:
-            return {"output": f"{sid} 不是這個對話派出、還在跑的子代理", "is_error": True}
+        from woof import store as _store
+
+        child = _store.get_session(sid)
+        if not child or child.get("parent") not in mine:
+            return {"output": f"{sid} 不是這個對話派出的子代理", "is_error": True}
         if not _l.stop_agent(sid):
-            return {"output": f"子代理 {sid} 已經結束了"}
+            return {"output": f"子代理 {sid} 已經結束了，不用停；要它再做事就帶這個 session_id 呼叫 delegate_task"}
         return {"output": f"已停下子代理 {sid}，它停在哪、做了什麼會照樣送回報告；要它接著做或改做別的，帶同一個 session_id 呼叫 delegate_task"}
 
     woof.add_tool(

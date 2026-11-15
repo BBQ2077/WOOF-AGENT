@@ -2793,7 +2793,32 @@ class SubagentProgress(unittest.TestCase):
             w = W()
             m.register(w)
             loop.AGENT_RUNS.add("childA")
-            r = asyncio.run(w.fn({"goal": "進度怎樣？", "session_id": "childA"}, Ctx()))
+            for _ in range(5):   # 追加要求不算新派：超過每回合上限 3 也照樣送得到
+                r = asyncio.run(w.fn({"goal": "進度怎樣？", "session_id": "childA"}, Ctx()))
+                self.assertFalse(r.get("is_error"), r)
+            # 上限只算還在跑的：3 個在跑時第 4 個擋下；停掉其中一個就能再派
+            class T:
+                def __init__(self): self.d = False
+                def done(self): return self.d
+            n = iter(range(100))
+
+            async def fake_bg(parent, goal, *a, **kw):
+                sid = f"new{next(n)}"
+                loop.BG_BY_SID[sid] = T()
+                return {"background": True, "session_id": sid}
+            real_bg = loop.run_subagent_bg
+            loop.run_subagent_bg = fake_bg
+            m._pick_model = lambda woof, t: ("x", None)
+            try:
+                for _ in range(3):
+                    self.assertFalse(asyncio.run(w.fn({"goal": "做事"}, Ctx())).get("is_error"))
+                self.assertTrue(asyncio.run(w.fn({"goal": "第四個"}, Ctx())).get("is_error"))
+                loop.BG_BY_SID["new0"].d = True
+                self.assertFalse(asyncio.run(w.fn({"goal": "第四個"}, Ctx())).get("is_error"))
+            finally:
+                loop.run_subagent_bg = real_bg
+                for k in [k for k in loop.BG_BY_SID if k.startswith("new")]:
+                    loop.BG_BY_SID.pop(k)
         finally:
             loop.AGENT_RUNS.discard("childA")
             loop.push_steer, tasks.last_text = real_steer, real_last
