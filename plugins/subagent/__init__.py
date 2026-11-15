@@ -275,26 +275,21 @@ def register(woof):
 
     woof.add_tool(
         "delegate_task",
-        "把獨立、可以分開做的子任務交給子代理；也用來生圖、生影片（model 填 image／video，goal 寫畫面描述，直接回傳檔案）。"
-        "子代理有自己乾淨的上下文和全部工具，做完只回傳報告，"
-        "適合：大量搜尋或讀檔、互不相關的平行工作、會塞爆上下文的調查。"
-        "子代理看不到目前的對話，goal 和 context 要寫清楚完整需求、路徑和限制。"
-        "派出後不會等你：主對話可以繼續跟使用者說話，它跑完會自己把報告送回來。"
-        "要知道它在幹嘛、催進度、追加要求：帶同一個 session_id 再呼叫一次——它還在跑就是插話，不會重開一輪；跑完過再接續就是接著同一份上下文繼續。不用等它，也不要一直問同一句。\n"
-        "要接續同一個子代理（同一個對話、同一份上下文）就填 session_id，不要重開一個。"
-        "它跑的時候會出現在側欄（子代理那條），使用者可以直接在那條對話裡追加要求，它下一步就看得到。",
+        "把能獨立做的子任務交給子代理（自己乾淨的上下文、全部工具，做完只回報告）：大量搜尋或讀檔、互不相關的平行工作、會塞爆上下文的調查；"
+        "也能生圖、生影片（見 model）。它看不到目前的對話，goal 和 context 要寫齊需求、路徑、限制。"
+        "派出後不用等，主對話照常跟使用者說話，它跑完會自己送回報告。"
+        "要問進度、追加要求或接著做，帶同一個 session_id 再呼叫：還在跑就是插話，跑完了就接同一份上下文繼續；不要重開，也不要反覆催。"
+        "它會出現在側欄，使用者可能直接在那條對話裡追加要求。",
         {"type": "object", "properties": {
             "goal": {"type": "string", "description": "單一子任務：要達成什麼、完成標準"},
-            "context": {"type": "string", "description": "子代理需要知道的背景：路徑、已知事實、限制"},
+            "context": {"type": "string", "description": "背景：路徑、已知事實、限制"},
             "mode": {"type": "string", "enum": ["read", "write"],
-                     "description": "read＝唯讀，可以多個並行；write＝會改檔案，同一時間只跑一個。預設 read"},
-            "scope": {"type": "string", "description": "write 模式才需要：允許修改的路徑（例如 data/report/）。範圍外不准動"},
-            "model": {"type": "string", "description": "選填。換別的模型做：只能用使用者在設定裡開放的模型（填錯會告訴你可用的）；"
-                                                          "簡單、量大的工作挑便宜的。不填＝預設子代理模型。"
-                                                          "image／video＝生圖／影片：goal 只寫畫面（可含比例、秒數），context 放參考圖路徑，scope 填另存資料夾"},
-            "session_id": {"type": "string",
-                           "description": "接續既有的子代理對話（之前 delegate_task 回傳的 id）：同一個對話、同一份上下文繼續講，不要重開"},
-            "tasks": {"type": "array", "description": "多個子任務，每個可以是 {goal, context, mode, scope}",
+                     "description": "read＝唯讀，可多個並行（預設）；write＝會改檔，同時只跑一個"},
+            "scope": {"type": "string", "description": "write 才需要：允許改的路徑，範圍外不准動"},
+            "model": {"type": "string", "description": "選填，不填＝預設子代理模型。只能用設定裡開放的（填錯會列出可用的），簡單量大的挑便宜的。"
+                                                          "image／video＝生圖／影片，直接回傳檔案：goal 只寫畫面（可含比例、秒數），context 放參考圖路徑，scope 填存檔資料夾"},
+            "session_id": {"type": "string", "description": "接續之前回傳的子代理 id"},
+            "tasks": {"type": "array", "description": "一次派多個子任務，欄位同上（goal、context、mode、scope、model）",
                       "items": {"type": "object", "properties": {
                           "goal": {"type": "string"}, "context": {"type": "string"},
                           "mode": {"type": "string", "enum": ["read", "write"]}, "scope": {"type": "string"},
