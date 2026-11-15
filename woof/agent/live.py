@@ -2,7 +2,7 @@
 
 程式重開、當掉、被強制關閉後，開程式時照這份紀錄自動接回：背景子代理接著做完再回報，
 方案流程從中斷的那一步接回，一般回合用接續訊息接著做。做完、你按停止、出錯時才從紀錄拿掉；
-程式關閉途中被收掉的不算做完，留著下次接。同一個工作連續接回 MAX_RECOVER 次都沒做完，就不再自動接，留「繼續」給你按。
+程式關閉途中被收掉的不算做完，留著下次接。同一個工作連續接回 MAX_RECOVER 次都沒有進度（做完一項 TODO 算進度），就不再自動接，留「繼續」給你按。
 """
 from __future__ import annotations
 
@@ -76,6 +76,16 @@ def unmark(session_id: str, key: str) -> None:
         if not any(k in rec for k in ("turn", "flow", "bg")):
             _live.pop(session_id, None)
         _save()
+
+
+def progress(session_id: str) -> None:
+    """有進度（做完一項 TODO、補完一輪）：接回次數歸零。長工作中間重開幾次都照樣接回，只有一直沒進度才停。"""
+    with _lock:
+        _load()
+        rec = _live.get(session_id)
+        if rec and rec.get("n"):
+            rec["n"] = 0
+            _save()
 
 
 def take() -> dict[str, dict]:

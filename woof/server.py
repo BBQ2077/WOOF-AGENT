@@ -2469,7 +2469,7 @@ REG.inject = inject_internal
 
 async def _recover_runs() -> None:
     """開程式時接回上次沒做完的：先接回背景子代理（主對話驗收前要等它們回報），再接回方案流程和回合。
-    同一個工作連續接回好幾次都沒做完（可能每次都讓程式當掉），就不再自動接，留「繼續」給你按。"""
+    同一個工作連續接回好幾次都沒有進度（可能每次都讓程式當掉），就不再自動接，留「繼續」給你按。"""
     from .agent import live
     from .agent import tasks as _tasks
     from .agent.loop import resume_bg
@@ -2504,10 +2504,13 @@ async def _recover_runs() -> None:
             if (sid in RUNS and not RUNS[sid].done()) or _tasks.is_running(sid):
                 continue
             n = int(rec.get("n") or 0)
-            if rec.get("flow") and _tasks.resume_goal(sid, broadcast, reason):
-                live.remark(sid, {"flow": True, "n": n})
-                await broadcast({"type": "notice", "session_id": sid, "text": "程式重開：自動接回方案"})
-                continue
+            if rec.get("flow"):
+                if _tasks.resume_goal(sid, broadcast, reason):
+                    live.remark(sid, {"flow": True, "n": n})
+                    await broadcast({"type": "notice", "session_id": sid, "text": "程式重開：自動接回方案"})
+                    continue
+                if not rec.get("turn"):
+                    continue   # 方案已經結束、或之後你下了新指令：沒有可接的，不另外開回合
             live.remark(sid, {"turn": True, "n": n})
             RUNS[sid] = asyncio.create_task(_continue_turn(sid, reason))
             await broadcast({"type": "notice", "session_id": sid, "text": "程式重開：自動接著做"})

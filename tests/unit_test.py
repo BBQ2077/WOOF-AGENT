@@ -3396,6 +3396,61 @@ class ResumeAfterSteer(unittest.TestCase):
 class SteerDuringPlanning(unittest.TestCase):
     """規劃／拓展／審核途中插話：馬上停下手上那個，插話寫進對話，依插話重新規劃，不算版數。"""
 
+    def test_resume_keeps_todo_and_progress(self):
+        """重開接回：列好的 TODO 照用（不重列）、兩項之間中斷直接做下一項、補做到一半接著補、輪數照算。"""
+        import asyncio
+        from woof.agent import tasks, loop
+
+        reg = sys.modules["woof.loader"].REG
+        orig = (loop.run_model_loop, tasks.review_plan, tasks.final_check, reg.model_cfg, reg.providers, tasks.expand_plan)
+        sent, checks = [], []
+
+        async def fake_loop(ctx):
+            sent.append((store.get_messages(ctx.session_id)[-1].get("meta") or {}).get("internal"))
+
+        async def fake_review(ctx, objective, steps, prev=""):
+            sent.append("review")
+            return True, ""
+
+        async def fake_check(ctx, sid, objective, steps, emit, prev=None):
+            checks.append(prev)
+            return True, []
+
+        async def emit(ev):
+            pass
+        loop.run_model_loop, tasks.review_plan, tasks.final_check = fake_loop, fake_review, fake_check
+        reg.providers = {**orig[4], "fake_prov": object()}
+        reg.model_cfg = lambda name: {"provider": "fake_prov", "id": "m", "name": "m"}
+        try:
+            # 列 TODO 時中斷，TODO 已經寫好：不重列，直接給審核看，再照 TODO 做
+            sid = store.create_session("m", None, "接回")["id"]
+            tasks.set_todos(sid, [{"text": "A"}, {"text": "B"}])
+            g = {"objective": "做", "status": "planning", "gate": "model", "since": 1, "phase": "todo"}
+            asyncio.run(tasks.run_gated(sid, "做", emit, "model", resume=g))
+            self.assertNotIn("plan_request", sent)
+            self.assertEqual(sent, ["review", "goal_step", "goal_step"])
+            store.delete_session(sid)
+
+            # 第 1 項做完、第 2 項還沒開始時中斷：直接做第 2 項，不送接續訊息
+            sent.clear(); checks.clear()
+            sid = store.create_session("m", None, "接回")["id"]
+            tasks.set_todos(sid, [{"text": "A", "status": "done"}, {"text": "B"}])
+            tasks._save(sid, goal={"objective": "做", "status": "running", "steps": ["A", "B"], "idx": 1, "since": 1})
+            asyncio.run(tasks.run_goal(sid, "做", emit, steps=["A", "B"], start=1, resume_reason="程式重開"))
+            self.assertEqual(sent, ["goal_step"])
+
+            # 補做到一半中斷：接著補（接續訊息），再驗時帶上次的缺口
+            sent.clear(); checks.clear()
+            tasks.set_todos(sid, [{"text": "A", "status": "done"}, {"text": "B", "status": "done"}])
+            tasks._save(sid, goal={"objective": "做", "status": "running", "steps": ["A", "B"], "idx": 2, "since": 1,
+                                   "phase": "fix", "gaps": ["缺 X"], "rnd": 1})
+            asyncio.run(tasks.run_goal(sid, "做", emit, steps=["A", "B"], start=2, resume_reason="程式重開"))
+            self.assertEqual(sent, ["resume"])
+            self.assertEqual(checks, [["缺 X"]])
+            store.delete_session(sid)
+        finally:
+            loop.run_model_loop, tasks.review_plan, tasks.final_check, reg.model_cfg, reg.providers, tasks.expand_plan = orig
+
     def test_model_writes_todo_flow(self):
         """方案模式：執行的模型自己列 TODO → 審核看一次（意見交回模型調一次）→ 照 TODO 做（中途加的項也做）；問答不審。"""
         import asyncio

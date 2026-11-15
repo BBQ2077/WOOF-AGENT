@@ -656,11 +656,24 @@ def _goal_save(session_id: str, objective: str, status: str, steps: list[str] | 
     """方案的步驟與做到第幾步存在 goal 裡（不放 todos：模型自己呼叫 todo 會蓋掉），程式重開後「繼續」才接得回來。
     since＝流程開始時最後一則訊息；之後你自己下了新指令，就不再接回這個方案。"""
     g = {"objective": objective, "status": status, "at": time.time()}
+    old = _state(session_id).get("goal") or {}
+    if status == "running" and not new:
+        g.update({k: old[k] for k in ("doing", "phase", "gaps", "rnd") if k in old})
     if steps:
-        old = _state(session_id).get("goal") or {}
         g.update(steps=steps, idx=idx, since=(None if new else old.get("since")) or _last_mid(session_id),
                  notes=notes if notes is not None else old.get("notes") or "",
                  **(ref if ref is not None else _ref_of(old)))
+    _save(session_id, goal=g)
+
+
+def _goal_set(session_id: str, **kw) -> None:
+    """在目前的 goal 上記段落資訊（doing／phase／gaps／rnd）；值是 None 就拿掉。"""
+    g = dict(_state(session_id).get("goal") or {})
+    for k, v in kw.items():
+        if v is None:
+            g.pop(k, None)
+        else:
+            g[k] = v
     _save(session_id, goal=g)
 
 
@@ -736,9 +749,10 @@ def resume_goal(session_id: str, emit, reason: str) -> bool:
     if s2:
         asyncio.get_running_loop().create_task(emit({"type": "session_updated", "session": s2}))
     if not g.get("steps"):
-        # 還沒排出方案就被打斷：照原本的模式從規劃重來（拓展、審核都會再跑一次）
+        # TODO 還沒開始做就被打斷：接回中斷的那一段（列 TODO／拓展審核／調 TODO／等你核可），已經做好的照用
         GOAL_TASKS[session_id] = _track(session_id, run_gated(session_id, g["objective"], emit, g["gate"],
-                                                              auto=bool(g.get("auto")), extra=g.get("extra") or ""), emit)
+                                                              auto=bool(g.get("auto")), extra=g.get("extra") or "",
+                                                              resume=g), emit)
         return True
     GOAL_TASKS[session_id] = _track(session_id, run_goal(session_id, g["objective"], emit, steps=list(g["steps"]),
                                                          start=int(g.get("idx") or 0), resume_reason=reason,
@@ -771,7 +785,8 @@ async def run_goal(session_id: str, objective: str, emit, steps: list[str] | Non
                    start: int = 0, resume_reason: str = "", notes: str = "", ref: dict | None = None,
                    keep_todos: bool = False) -> None:
     """目標：拆步驟（能一步就一步）→ 照做 → 全部做完只做一次對抗檢查 → 有缺口補一輪。
-    start／resume_reason：程式重開或停止後「繼續」，從第 start 步接回（那一步先用接續訊息做完）。"""
+    resume_reason：程式重開或停止後接回：做到一半的那一項用接續訊息做完，驗收、補做做到一半的接著那一段。"""
+    from woof.agent import live
     from woof.agent.loop import TurnContext
     from woof.loader import REG
 
@@ -797,8 +812,9 @@ async def run_goal(session_id: str, objective: str, emit, steps: list[str] | Non
             return
         start = max(0, min(start, len(steps)))
         cur = _state(session_id).get("todos") or []
-        if (keep_todos or resume_reason) and [t.get("text") for t in cur] == steps:
-            items = [dict(t) for t in cur]   # 模型自己列的 TODO（含狀態）照用；重開接回時進度也在裡面
+        if (keep_todos or resume_reason) and cur:
+            items = [dict(t) for t in cur]   # 模型自己列的 TODO（含狀態）照用；接回時進度也在裡面（模型中途改過也照最新的）
+            steps = [t["text"] for t in items]
         else:
             items = set_todos(session_id, [{"text": s, "status": "done" if i < start else "pending"} for i, s in enumerate(steps)])
         _goal_save(session_id, objective, "running", steps, start, new=not resume_reason, notes=notes, ref=_ref_of(ref or {}))
@@ -807,6 +823,9 @@ async def run_goal(session_id: str, objective: str, emit, steps: list[str] | Non
             left = sum(1 for t in items if t.get("status") in ("pending", "doing"))
             await emit({"type": "notice", "session_id": session_id,
                         "text": f"接回方案：還有 {left}/{len(items)} 項 TODO" if left else "接回方案：TODO 都做完了，接著驗收"})
+        prev_goal = _state(session_id).get("goal") or {}
+        was_doing = prev_goal.get("doing") if resume_reason else None
+        resume_check = dict(prev_goal) if resume_reason and prev_goal.get("phase") in ("check", "fix") else None
         # 照 TODO 一項一項做：每項開始前重讀 TODO——模型做的時候發現問題自己加項、改項、刪項，就照新的走
         failed, first, guard = 0, True, 0
         while guard < flow_settings()["max_steps"] * 3:
@@ -820,9 +839,10 @@ async def run_goal(session_id: str, objective: str, emit, steps: list[str] | Non
             items[i]["status"] = "doing"
             _save(session_id, todos=items)
             _goal_save(session_id, objective, "running", steps, i)
+            _goal_set(session_id, doing=step)
             await _push_todos(emit, session_id, items)
-            if first and resume_reason:
-                ok = await _resume_step(ctx, session_id, resume_reason, emit)
+            if first and resume_reason and was_doing == step:
+                ok = await _resume_step(ctx, session_id, resume_reason, emit)   # 中斷在這一項做到一半：接著做完
             else:
                 ok = await _run_step(ctx, session_id, objective, step, i, len(steps), emit, plan=steps, notes=notes, ref=ref)
             first = False
@@ -836,20 +856,37 @@ async def run_goal(session_id: str, objective: str, emit, steps: list[str] | Non
             steps = [t["text"] for t in items]
             _save(session_id, todos=items)
             _goal_save(session_id, objective, "running", steps, i + 1)
+            live.progress(session_id)   # 有進度：重開接回次數歸零，長工作重開幾次都照樣接回
             await _push_todos(emit, session_id, items)
 
         # 做完驗一次：真的做到了嗎；有缺口就補，最多補 fix_rounds 輪（設定 → 方案模式），不會無限打回。
         # 純問答在前面 steps 為空時就 return 了，不會走到這。
+        # 驗收、補做在哪一段也存著：程式重開接回時，補到一半的接著補完、再驗，輪數照算，不從頭驗
         fix_max = flow_settings()["fix_rounds"]
-        ok, gaps = await _check(ctx, session_id, objective, steps, emit)
-        for rnd in range(1, fix_max + 1):
+        _goal_set(session_id, doing=None)
+        rc = resume_check if first else None   # 接回時 TODO 還有沒做的就照常做完、重新驗收
+        if rc and rc.get("phase") == "fix" and rc.get("gaps"):
+            rnd0, gaps = int(rc.get("rnd") or 1), list(rc["gaps"])
+            await emit({"type": "notice", "session_id": session_id,
+                        "text": f"接回方案：接著補第 {rnd0}/{fix_max} 輪（上次驗收列的缺口）"})
+            _goal_set(session_id, phase="fix", gaps=gaps, rnd=rnd0)
+            await _resume_step(ctx, session_id, resume_reason, emit)
+            ok, gaps = await _check(ctx, session_id, objective, steps, emit, prev=gaps)
+        else:
+            rnd0 = 0
+            _goal_set(session_id, phase="check")
+            ok, gaps = await _check(ctx, session_id, objective, steps, emit)
+        for rnd in range(rnd0 + 1, fix_max + 1):
             if ok or not gaps:
                 break
             await emit({"type": "notice", "session_id": session_id,
                         "text": f"審核模型（子代理）看過，認為還缺（補第 {rnd}/{fix_max} 輪）：" + "；".join(gaps)})
+            _goal_set(session_id, phase="fix", gaps=gaps, rnd=rnd)
             fixed = await _run_fix(ctx, session_id, gaps, emit)
             if not fixed:
                 break
+            live.progress(session_id)
+            _goal_set(session_id, phase="check")
             ok, gaps = await _check(ctx, session_id, objective, steps, emit, prev=gaps)
 
         status = "done" if ok else ("partial" if failed < len(steps) else "error")
@@ -884,8 +921,10 @@ def steer_note(session_id: str) -> str:
     """方案流程在跑時插話：告訴使用者這則什麼時候會送到模型。"""
     g = _state(session_id).get("goal") or {}
     st = STAGE.get(session_id)
-    if g.get("status") == "planning" or st in ("plan", "expand", "plan_review"):
-        return "已插入：停下手上的規劃／審核，依你這句重新規劃"
+    if st == "plan_review":
+        return "已插入：不等拓展／審核的意見了，主模型照你這句調整 TODO"
+    if g.get("status") == "planning" or st in ("plan", "expand"):
+        return "已插入：主模型列 TODO 時馬上看到這句"
     if st == "check":
         return "已插入：先停下驗收，這句馬上交給模型處理，處理完再驗收"
     if st == "wait_bg":
@@ -1057,13 +1096,13 @@ async def _model_todo(ctx, session_id: str, said: str, emit, ref: dict | None = 
     return [t["text"] for t in items if t.get("status") in ("pending", "doing")][:flow_settings()["max_steps"]]
 
 
-async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool = False, extra: str = "") -> None:
-    """方案模式：拓展（只當參考）→ 執行的模型自己整理 TODO → 審核看一次 → 照 TODO 一項一項做 → 驗收。
+async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool = False, extra: str = "",
+                    resume: dict | None = None) -> None:
+    """方案模式：主模型先判斷要不要動手、自己列 TODO → 拓展／審核同時看一次、只給意見 → 主模型調一次 → 照 TODO 做 → 驗收。
 
-    gate：human（人工核准 TODO）、model（模型審核）、expand（先拓展思路再列 TODO，也審一次）。
-    TODO 由執行的模型列：它看得到對話與專案現況，列的是實際要做的工作，不是看不到現況的規劃員排的路線圖。
-    審核只看一次：有意見交回模型自己判斷、調一次 TODO 就開始做，不一版一版打回，也不問你。
-    人工審核由你核可，「換個做法」最多 plan_rounds 次。auto（/goal）：你沒回應時照這版做。
+    gate：human（人工核准 TODO）、model（審核給意見）、expand（拓展＋審核給意見）。問答、閒聊直接回答，不拓展、不審核。
+    每段開始前把目前在哪一段（phase）存進 goal：程式重開、停止後 resume 帶著這份紀錄接回那一段，
+    已經列好的 TODO、已經拿到的意見照用，不從頭重來。
     """
     from woof.agent.loop import TurnContext
     from woof.loader import REG
@@ -1075,31 +1114,46 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
         return
     ctx = TurnContext(session, model_cfg, (session or {}).get("effort") or model_cfg.get("default_effort"), emit)
     rounds = flow_settings()["plan_rounds"]
-    raw_objective = objective   # 存檔用原句：「繼續」從頭重來時會再附一次前文，不能疊兩層
+    raw_objective = objective   # 存檔用原句：接回時會再附一次前文，不能疊兩層
     objective = _with_context(session_id, objective) + extra
     notes, ref = "", None
-    old_todos = list(_state(session_id).get("todos") or [])
+    old_todos = [] if resume else list(_state(session_id).get("todos") or [])
+    phase = (resume or {}).get("phase") or "todo"
+    fb_text = (resume or {}).get("fb") or ""
+    since = int((resume or {}).get("since") or 0) or _last_mid(session_id)
 
-    def save_planning():
-        # gate／since 存著：整理 TODO、拓展、審核途中被打斷（程式重開、停止），「繼續」會從頭重來，不會變成沒有審核的一般接續
+    def save_planning(ph: str, **kw):
+        # 現在在哪一段存著：被打斷（程式重開、停止）時接回這一段，不會從頭重來，也不會變成沒有審核的一般接續
         _save(session_id, goal={"objective": raw_objective, "status": "planning", "at": time.time(),
-                                "gate": gate, "auto": auto, "since": since, "extra": extra})
+                                "gate": gate, "auto": auto, "since": since, "extra": extra, "phase": ph, **kw})
+
+    def pending() -> list[str]:
+        items = _state(session_id).get("todos") or []
+        return [t["text"] for t in items if t.get("status") in ("pending", "doing")][:flow_settings()["max_steps"]]
 
     try:
-        since = _last_mid(session_id)
-        save_planning()
         said = raw_objective + extra
-        # 先由主模型判斷要不要動手：問答、閒聊直接回答，不拓展、不審核；要動手才列 TODO
-        steps = await _model_todo(ctx, session_id, said, emit)
-        if not steps:
-            # 問答、閒聊：模型已經直接回了；原本的 TODO 放回去
-            if old_todos and not (_state(session_id).get("todos") or []):
-                set_todos(session_id, old_todos)
-                await _push_todos(emit, session_id, old_todos)
-            _save(session_id, goal={"objective": raw_objective, "status": "chat", "at": time.time()})
-            return
-        if gate in ("model", "expand"):
-            # 拓展、審核只給意見：兩個子代理同時看這份 TODO，意見交回主模型自己判斷、調一次 TODO 就開始做
+        steps = pending() if resume else []
+        if resume:
+            await emit({"type": "notice", "session_id": session_id,
+                        "text": {"todo": "接回方案：TODO 已經列好，接著給拓展／審核看" if steps else "接回方案：接著整理 TODO",
+                                 "opinions": "接回方案：拓展／審核接著看 TODO",
+                                 "fix_todo": "接回方案：主模型接著照意見調 TODO",
+                                 "approve": "接回方案：TODO 等你核可"}.get(phase, "接回方案")})
+        if phase == "todo":
+            if not steps:
+                save_planning("todo")
+                # 先由主模型判斷要不要動手：問答、閒聊直接回答，不拓展、不審核；要動手才列 TODO
+                steps = await _model_todo(ctx, session_id, said, emit)
+                if not steps:
+                    if old_todos and not (_state(session_id).get("todos") or []):
+                        set_todos(session_id, old_todos)   # 問答：原本的 TODO 放回去
+                        await _push_todos(emit, session_id, old_todos)
+                    _save(session_id, goal={"objective": raw_objective, "status": "chat", "at": time.time()})
+                    return
+            phase = "approve" if gate == "human" else "opinions"
+        if gate in ("model", "expand") and phase == "opinions":
+            save_planning("opinions")
             who = "拓展、審核模型（子代理）" if gate == "expand" else "審核模型（子代理）"
             await _stage(session_id, emit, "plan_review", f"{who}在看 TODO（{len(steps)} 項）（可以直接插話）")
 
@@ -1127,27 +1181,30 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
                     if isinstance(ex, BaseException):
                         log.warning("拓展失敗：%s", ex)
                     else:
-                        ref, notes = ex
-                        idea = _ref_text(ref) + (f"\n{notes}" if notes else "")
+                        r_ref, r_notes = ex
+                        idea = _ref_text(r_ref) + (f"\n{r_notes}" if r_notes else "")
                         if idea.strip():
                             fb.append("【拓展（沒查證，只當參考）】" + idea.strip())
-                        if ref.get("ideas") or ref.get("checks"):
+                        if r_ref.get("ideas") or r_ref.get("checks"):
                             await emit({"type": "notice", "session_id": session_id,
-                                        "text": f"拓展模型（子代理）想到 {len(ref['ideas'])} 個方向、{len(ref['checks'])} 個該先查的"
-                                                + (f"：{notes}" if notes else "") + "（只當參考，交給主模型自己判斷）"})
+                                        "text": f"拓展模型（子代理）想到 {len(r_ref['ideas'])} 個方向、{len(r_ref['checks'])} 個該先查的"
+                                                + (f"：{r_notes}" if r_notes else "") + "（只當參考，交給主模型自己判斷）"})
             except _Steered:
                 # 你插話了：不等意見，插話寫進對話，主模型照你說的調 TODO
                 if await _take_steer(session_id, emit):
                     fb.append("【使用者剛插話（在對話裡，以他說的為準）】")
                 await emit({"type": "notice", "session_id": session_id, "text": "收到插話：交給主模型照你說的調整 TODO"})
-            if fb:
-                steps = await _model_todo(ctx, session_id, said, emit, feedback="\n\n".join(fb)) or steps
-            ref, notes = None, ""   # 意見已經交給主模型併進 TODO，做的時候照 TODO 走，不再另外附
-        else:
+            fb_text = "\n\n".join(fb)
+            phase = "fix_todo" if fb_text else "go"
+        if phase == "fix_todo" and fb_text:
+            save_planning("fix_todo", fb=fb_text)
+            steps = await _model_todo(ctx, session_id, said, emit, feedback=fb_text) or steps
+        if gate == "human" and phase == "approve":
             rnd = 1
             while len(steps) > 1:
+                save_planning("approve")
                 plan_txt = "\n".join(f"{k + 1}. {s}" for k, s in enumerate(steps))
-                ans = await ask(ctx, f"執行的模型列的 TODO（{len(steps)} 項），你核可才動手：\n{plan_txt}", ["照做", "換個做法", "取消"])
+                ans = await ask(ctx, f"主模型列的 TODO（{len(steps)} 項），你核可才動手：\n{plan_txt}", ["照做", "換個做法", "取消"])
                 if "照做" in ans or "核准" in ans or "略過" in ans:
                     break
                 if timed_out(ans):
@@ -1164,14 +1221,18 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
                 if rnd > rounds:
                     notes = (notes + "\n" if notes else "") + fb
                     await emit({"type": "notice", "session_id": session_id,
-                                "text": f"已經換了 {rounds} 版，照這版做，你最後的意見交給執行的模型"})
+                                "text": f"已經換了 {rounds} 版，照這版做，你最後的意見交給主模型"})
                     break
                 steps = await _model_todo(ctx, session_id, said, emit, feedback=fb) or steps
+        if not steps:
+            steps = [t["text"] for t in _state(session_id).get("todos") or []]   # 都做完了：直接進驗收
         await run_goal(session_id, objective, emit, steps=steps, notes=notes, ref=ref, keep_todos=True)
     except asyncio.CancelledError:
-        g = dict(_state(session_id).get("goal") or {})   # run_goal 已存的步驟與進度留著，「繼續」才接得回來
-        g.update(objective=g.get("objective") if g.get("steps") else raw_objective,
-                 status="stopped" if g.get("steps") else "planning", at=time.time())
+        g = dict(_state(session_id).get("goal") or {})   # 已存的段落、步驟與進度留著，接回時從這裡接
+        if g.get("steps"):
+            g.update(status="stopped", at=time.time())
+        else:
+            g.update(objective=raw_objective, status="planning", at=time.time())
         _save(session_id, goal=g)
         raise
     except Exception as e:
