@@ -181,14 +181,6 @@ def register(woof):
     from woof.agent import loop as _loop
 
 
-    used: dict[str, set] = {}   # 每個回合新派出的子代理 id（擋住模型一回合派一大堆燒錢）
-    held: dict[str, int] = {}   # 正在派、還沒拿到 id 的數量（同一步同時呼叫好幾次時不會一起超過）
-
-    def _alive(key: str) -> int:
-        # 只算還在跑或排隊的：停掉、做完、派不出去的都空出名額
-        from woof.agent.loop import BG_BY_SID
-        return sum(1 for s in used.get(key, ()) if s in BG_BY_SID and not BG_BY_SID[s].done()) + held.get(key, 0)
-
     async def delegate_task(args: dict, tctx) -> dict:
         from woof.agent.loop import run_subagent_bg
 
@@ -205,7 +197,6 @@ def register(woof):
             t["mode"] = _mode(t)
         if not tasks:
             return {"output": "至少要給一個 goal", "is_error": True}
-        # 一次給幾個都收：同一個對話同時在跑的超過「同時最多幾個」就排隊，前面的跑完自動開始（loop._SubSlot）
         for t in tasks:
             g = _gen_target(woof, t)
             if g and g.get("missing"):
@@ -217,18 +208,27 @@ def register(woof):
             t["model"], err = _pick_model(woof, t)
             if err:
                 return {"output": err, "is_error": True}
-        # 上限只算這一回合新派、而且還在跑或排隊的；帶 session_id 對已派出的子代理插話、追加要求、叫它接著做都不算
-        new = len(tasks) - (1 if follow else 0)
-        cap = int(woof.settings.get("max_per_turn") or 0)
-        key = f"{getattr(parent, 'root_session_id', parent.session_id)}:{getattr(parent, 'turn_mid', 0)}"
-        if new and cap and _alive(key) + new > cap:
-            return {"output": f"這一回合新派的子代理還有 {_alive(key)} 個在跑或排隊，上限 {cap} 個（設定 → 插件 → subagent）。"
-                              "等其中一個做完、或用 stop_subagent 停掉不需要的，就能再派；對已派出的子代理追加要求（帶 session_id）不受這個限制",
+        # 名額只有一本帳：這個主對話底下還在跑或排隊的子代理（重開接回的、子代理再派的、等著接回的都算）。
+        # 檢查和佔名額一次做完；滿了就退回，不偷偷排隊，主模型才知道要等誰。
+        # 對還在跑的子代理追加要求是插話，不佔名額；生圖生影片不開子代理，也不佔
+        from woof.agent.loop import sub_alive, sub_give_back, sub_limit, sub_live, sub_take
+
+        root = getattr(parent, "root_session_id", parent.session_id)
+        new = sum(1 for i, t in enumerate(tasks)
+                  if not t.get("gen") and not (follow and i == 0 and sub_alive(follow)))
+        ok, inuse = sub_take(root, new)
+        if not ok:
+            from woof import store as _store
+
+            cap = sub_limit()
+            names = "、".join(f"{k}（{((_store.get_session(k) or {}).get('title') or '')[:24]}）" for k in sub_live(root)[:12])
+            free = max(0, cap - inuse)
+            return {"output": f"子代理名額不夠：現在有 {inuse} 個在跑或排隊，同時最多 {cap} 個，這次要再開 {new} 個"
+                              f"（只剩 {free} 個名額）。在跑的：{names or '（正在派出）'}。\n"
+                              + (f"可以只派 {free} 個，其餘等前面的做完再派；" if free else "")
+                              + "它們做完會自己回報，回報到了再派下一批；不需要的用 stop_subagent 停掉就空出名額。"
+                              "要改它們的方向，帶 session_id 追加要求（不佔名額）。同時最多幾個在「設定 → 模型用途 → 子代理」",
                     "is_error": True}
-        held[key] = held.get(key, 0) + new
-        if len(used) > 200:
-            for k in list(used)[:100]:
-                used.pop(k, None)
 
         async def progress(line: str) -> None:
             await tctx.output(line + "\n")
@@ -284,17 +284,13 @@ def register(woof):
                     return k
             return ""
 
-        from woof.agent.loop import _SUB_RUNNING, SUB_BATCH, sub_limit
+        from woof.agent.loop import SUB_BATCH
         import uuid as _uuid
-        slots = max(0, sub_limit() - _SUB_RUNNING.get(getattr(parent, "root_session_id", parent.session_id), 0))
         SUB_BATCH.set(_uuid.uuid4().hex[:8])   # 這一次派出的算同一批；gather 會把這個值帶進每個子任務
         try:
             results = await asyncio.gather(*[one(i, t) for i, t in enumerate(tasks)])
         finally:
-            held[key] = max(0, held.get(key, 0) - new)
-        for i, r in enumerate(results):
-            if isinstance(r, dict) and r.get("session_id") and not (follow and i == 0):
-                used.setdefault(key, set()).add(r["session_id"])
+            sub_give_back(root, new)   # 派出去的已經登記在帳上，正在派的這份還回去
         parts, bad = [], 0
         for i, r in enumerate(results):
             head = f"## 子任務 {i + 1}" if len(results) > 1 else "## 子代理"
@@ -311,7 +307,7 @@ def register(woof):
             elif r.get("background") or r.get("pending"):
                 sid = r.get("session_id") or ""
                 ro = r.get("mode") == "read"
-                parts.append(f"{head}已派出，不用等它" + ("（同時在跑的已到上限，這個先排隊，前面的跑完自動開始）" if i >= slots else "") + "。\n"
+                parts.append(f"{head}已派出，不用等它。\n"
                              + ("這是唯讀子代理：只能讀、查、搜尋，不會建檔改檔。如果這個任務其實要寫檔，現在就用 mode=write 加 scope 重派"
                                 "（它回報「需要寫入權限」時也一樣，帶同一個 session_id 就能接著做）。\n" if ro else "")
                              + f"對話 {sid}（{r.get('model') or '子代理模型'}）在背景跑，跑完會自己把報告送回來。"

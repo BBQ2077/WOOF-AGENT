@@ -8,7 +8,7 @@ enabled = true
 type = "number"
 label = "同時最多幾個"
 default = 3
-help = "同一個對話同時在跑的子代理上限（方案的拓展、審核不算）。一次派超過的不會報錯，先排隊，前面的跑完自動開始"
+help = "同一個對話底下同時在跑的子代理上限：重開後接回的、子代理再派出去的都算，方案的拓展、審核不算。滿了再派會退回，告訴主模型哪幾個在跑，等它們做完或停掉再派"
 
 [settings.models]
 in_settings = "aux"
@@ -25,9 +25,3 @@ options = ["follow", "default", "minimal", "low", "medium", "high", "xhigh", "ma
 label = "思考強度"
 default = "follow"
 help = "主代理派的子代理用的思考強度。follow＝跟這個對話一樣；default＝子代理模型的預設；其餘是固定一檔，模型沒有那一檔就往下用最近的一檔。「設定 → 模型用途 → 子代理」也能改"
-
-[settings.max_per_turn]
-type = "number"
-label = "每回合同時最多幾個"
-default = 6
-help = "一則訊息（方案模式是一項 TODO）新派出、還在跑或排隊的子代理上限；停掉、做完的空出名額，對已派出的子代理追加要求不算；0＝不限"

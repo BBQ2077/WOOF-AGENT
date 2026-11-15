@@ -1580,6 +1580,35 @@ class _SubSlot:
 BG_TASKS: set[asyncio.Task] = set()
 BG_BY_SID: dict[str, asyncio.Task] = {}   # 子代理對話 id → 背景任務（要能單獨停掉那一個）
 BG_PARENT: dict[str, str] = {}             # 子代理對話 id → 派它的對話 id
+BG_ROOT: dict[str, str] = {}               # 子代理對話 id → 最上層的主對話 id（名額照這個算）
+BG_RESERVED: dict[str, str] = {}           # 重開後還沒接回的子代理 → 主對話 id（接回前先佔著名額）
+SUB_HELD: dict[str, int] = {}              # 主對話 id → 正在派、還沒登記好的子代理數
+
+
+def sub_live(root: str) -> list[str]:
+    """這個主對話底下還在跑或排隊的子代理（含重開接回的、子代理再派出去的、重開後等著接回的）。
+    名額只看這一本帳。"""
+    alive = [c for c, r in list(BG_ROOT.items()) if r == root and c in BG_BY_SID and not BG_BY_SID[c].done()]
+    return alive + [c for c, r in list(BG_RESERVED.items()) if r == root and c not in alive]
+
+
+def sub_take(root: str, n: int) -> tuple[bool, int]:
+    """要 n 個名額：夠就當場佔下（檢查和佔名額之間沒有 await，同時派也不會一起擠過上限）。
+    回傳（有沒有拿到, 已經在用的數量）。用完呼叫 sub_give_back。"""
+    used = len(sub_live(root)) + SUB_HELD.get(root, 0)
+    if n and used + n > sub_limit():
+        return False, used
+    if n:
+        SUB_HELD[root] = SUB_HELD.get(root, 0) + n
+    return True, used
+
+
+def sub_give_back(root: str, n: int) -> None:
+    left = SUB_HELD.get(root, 0) - n
+    if left > 0:
+        SUB_HELD[root] = left
+    else:
+        SUB_HELD.pop(root, None)
 
 
 def bg_children(session_id: str) -> list[str]:
@@ -1683,12 +1712,15 @@ async def run_subagent_bg(parent: TurnContext, goal: str, context: str = "", mod
     child_id = child["id"]
     BG_BY_SID[child_id] = task
     BG_PARENT[child_id] = parent_sid
+    BG_ROOT[child_id] = getattr(parent, "root_session_id", parent_sid)
+    BG_RESERVED.pop(child_id, None)
 
     def _done(_t):
         BG_TASKS.discard(_t)
         if BG_BY_SID.get(child_id) is _t:
             BG_BY_SID.pop(child_id, None)
             BG_PARENT.pop(child_id, None)
+            BG_ROOT.pop(child_id, None)
 
     task.add_done_callback(_done)
     return {"session_id": child["id"], "title": child.get("title") or title_hint,

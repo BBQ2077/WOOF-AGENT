@@ -6284,8 +6284,7 @@ function subagentRowHtml(n, tag) {
     + `<div class="subeff"><button class="pill2" data-subeff><span class="pk">思考強度</span><b>${esc(subEffortNow().label)}</b><svg><use href="#i-down"/></svg></button>`
     + '<small>拓展、審核一律跟隨主對話</small></div>'
     + `<div class="subnum"><label>同時最多<input type="number" min="1" max="64" step="1" data-subn="max_parallel" value="${esc(String((pl.settings || {}).max_parallel ?? 3))}" class="num">個</label>`
-    + `<label>每回合同時最多<input type="number" min="0" step="1" data-subn="max_per_turn" value="${esc(String((pl.settings || {}).max_per_turn ?? 6))}" class="num">個</label>`
-    + '<small>同時最多：同一個對話同時在跑的子代理，超過的排隊、前面跑完自動開始（拓展、審核不算）。每回合最多：你送出一則訊息後這一輪最多派幾個，0＝不限。</small></div></div>'
+    + '<small>同時最多：同一個對話底下同時在跑的子代理，重開接回的、子代理再派的都算（拓展、審核不算）。滿了再派會退回給主模型，等前面的做完或停掉再派。</small></div></div>'
     + mchkHtml('aux:subagent', list, {
       filter: (x) => auxFits('subagent', x), def,
       set: (sel, d) => {

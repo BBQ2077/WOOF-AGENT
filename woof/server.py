@@ -2505,7 +2505,7 @@ async def _recover_runs() -> None:
     同一個工作連續接回好幾次都沒有進度（可能每次都讓程式當掉），就不再自動接，留「繼續」給你按。"""
     from .agent import live
     from .agent import tasks as _tasks
-    from .agent.loop import resume_bg, restore_steer
+    from .agent.loop import BG_RESERVED, resume_bg, restore_steer
 
     async def _stable(sid: str) -> None:
         # 接回後撐過 2 分鐘沒當掉：計數歸零。上限只擋「一接回就讓程式當掉」的循環，不擋正常的長工作
@@ -2516,6 +2516,10 @@ async def _recover_runs() -> None:
     queued = restore_steer()   # 上次重開前還在排隊的插話／子代理回報放回佇列（照原本順序）
     recs = live.take()
     _RECOVERING.update(sid for sid, r in recs.items() if r.get("flow") or r.get("turn"))
+    # 要接回的子代理先佔著名額：接回途中主對話或你新派的，不會因為還沒算到它們而超過上限
+    for sid, r in recs.items():
+        if r.get("bg") and int(r.get("n") or 0) < live.MAX_RECOVER:
+            BG_RESERVED[sid] = r["bg"].get("root") or r["bg"].get("parent") or ""
     await asyncio.sleep(1)   # 等其他開程式的工作（插件、模型清單）就位
     reason = "程式重開"
     try:
@@ -2540,6 +2544,7 @@ async def _recover_runs() -> None:
                 except Exception as e:
                     lg.exception("接回子代理 %s 失敗", sid)
                     why = f"接回時出錯（{type(e).__name__}: {str(e)[:120]}）"
+            BG_RESERVED.pop(sid, None)   # 接回了就改由它自己的任務佔名額；沒接回就空出來
             if why:
                 live.drop(sid, "bg")
                 await _tell_parent(sid, rec["bg"], why)
@@ -2573,6 +2578,8 @@ async def _recover_runs() -> None:
                 RUNS[sid] = asyncio.create_task(_continue_turn(sid, reason))
                 await broadcast({"type": "notice", "session_id": sid, "text": "程式重開：自動接著做"})
     finally:
+        for sid in recs:
+            BG_RESERVED.pop(sid, None)
         left = set(_RECOVERING)
         _RECOVERING.clear()
     try:

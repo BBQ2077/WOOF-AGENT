@@ -2526,6 +2526,52 @@ class ResumeDigest(unittest.TestCase):
         sv = open(str(ROOT / "woof/server.py"), encoding="utf-8").read()
         self.assertIn("_tasks.resume_digest(sid)", sv)
 
+class OneSubagentLedger(unittest.TestCase):
+    """名額只有一本帳：接回的、等著接回的、正在派的都算；滿了退回，不偷偷多開。"""
+
+    def test_ledger_counts_everything(self):
+        from woof.agent import loop as lp
+
+        async def go():
+            ev = asyncio.Event()
+            t1 = asyncio.create_task(ev.wait())
+            try:
+                lp.BG_BY_SID["k1"] = t1
+                lp.BG_ROOT["k1"] = "R"
+                lp.BG_RESERVED["k2"] = "R"          # 重開後還沒接回
+                with unittest.mock.patch.object(lp, "sub_limit", lambda: 3):
+                    self.assertEqual(sorted(lp.sub_live("R")), ["k1", "k2"])
+                    ok, used = lp.sub_take("R", 1)
+                    self.assertTrue(ok)
+                    self.assertEqual(used, 2)
+                    ok, used = lp.sub_take("R", 1)   # 正在派的那一個也算：3 個滿了
+                    self.assertFalse(ok)
+                    self.assertEqual(used, 3)
+                    self.assertTrue(lp.sub_take("OTHER", 3)[0])   # 別的對話各算各的
+                    lp.sub_give_back("OTHER", 3)
+                    lp.sub_give_back("R", 1)
+                    lp.BG_RESERVED.pop("k2")
+                    self.assertTrue(lp.sub_take("R", 2)[0])
+                    lp.sub_give_back("R", 2)
+                    self.assertNotIn("R", lp.SUB_HELD)
+            finally:
+                ev.set()
+                await t1
+                for d in (lp.BG_BY_SID, lp.BG_ROOT, lp.BG_RESERVED):
+                    d.pop("k1", None)
+                    d.pop("k2", None)
+
+        asyncio.run(go())
+
+    def test_delegate_refuses_when_full(self):
+        src = (ROOT / "plugins" / "subagent" / "__init__.py").read_text(encoding="utf-8")
+        self.assertIn("ok, inuse = sub_take(root, new)", src)
+        self.assertIn("sub_give_back(root, new)", src)
+        self.assertNotIn("max_per_turn", src)
+        sv = (ROOT / "woof" / "server.py").read_text(encoding="utf-8")
+        self.assertIn("BG_RESERVED[sid] =", sv)
+
+
 class StopOneSubagent(unittest.TestCase):
     """子代理要能單獨停掉，不用切到它的分頁，也不影響主對話。"""
 
@@ -2767,7 +2813,7 @@ class SubagentProgress(unittest.TestCase):
             spec.loader.exec_module(m)
 
             class W:
-                settings = {"models": "", "max_parallel": 3, "max_per_turn": 3}
+                settings = {"models": "", "max_parallel": 3}
                 config = {"models": []}
 
                 def add_tool(self, name, *a, **kw):
@@ -2793,7 +2839,7 @@ class SubagentProgress(unittest.TestCase):
             w = W()
             m.register(w)
             loop.AGENT_RUNS.add("childA")
-            for _ in range(5):   # 追加要求不算新派：超過每回合上限 3 也照樣送得到
+            for _ in range(5):   # 對還在跑的追加要求是插話、不佔名額：送 5 次也照樣送得到
                 r = asyncio.run(w.fn({"goal": "進度怎樣？", "session_id": "childA"}, Ctx()))
                 self.assertFalse(r.get("is_error"), r)
             # 上限只算還在跑的：3 個在跑時第 4 個擋下；停掉其中一個就能再派
@@ -2805,9 +2851,11 @@ class SubagentProgress(unittest.TestCase):
             async def fake_bg(parent, goal, *a, **kw):
                 sid = f"new{next(n)}"
                 loop.BG_BY_SID[sid] = T()
+                loop.BG_ROOT[sid] = "parentX"
                 return {"background": True, "session_id": sid}
-            real_bg = loop.run_subagent_bg
+            real_bg, real_lim = loop.run_subagent_bg, loop.sub_limit
             loop.run_subagent_bg = fake_bg
+            loop.sub_limit = lambda: 3
             m._pick_model = lambda woof, t: ("x", None)
             try:
                 for _ in range(3):
@@ -2816,9 +2864,10 @@ class SubagentProgress(unittest.TestCase):
                 loop.BG_BY_SID["new0"].d = True
                 self.assertFalse(asyncio.run(w.fn({"goal": "第四個"}, Ctx())).get("is_error"))
             finally:
-                loop.run_subagent_bg = real_bg
+                loop.run_subagent_bg, loop.sub_limit = real_bg, real_lim
                 for k in [k for k in loop.BG_BY_SID if k.startswith("new")]:
                     loop.BG_BY_SID.pop(k)
+                    loop.BG_ROOT.pop(k, None)
         finally:
             loop.AGENT_RUNS.discard("childA")
             loop.push_steer, tasks.last_text = real_steer, real_last
@@ -3195,7 +3244,7 @@ class SubSlots(unittest.TestCase):
         self.assertNotIn("一次最多 {limit} 個子任務", src)
         js = (ROOT / "web/dist/app.js").read_text(encoding="utf-8")
         self.assertIn('data-subn="max_parallel"', js)
-        self.assertIn('data-subn="max_per_turn"', js)
+        self.assertNotIn('max_per_turn', js)
 
 
 class AllowAllCoversDanger(unittest.TestCase):
