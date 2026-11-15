@@ -2190,7 +2190,7 @@ class MidTurnSteer(unittest.TestCase):
         from woof import server
 
         src = open(server.__file__, encoding="utf-8").read()
-        self.assertIn("agent_running = (not running) and sid in AGENT_RUNS", src)
+        self.assertIn("agent_running = (not running) and sub_alive(sid)", src)
         self.assertIn("已把追加要求送給子代理", src)
 
     def test_busy_default_is_steer(self):
@@ -2740,7 +2740,7 @@ class SubagentAlwaysReports(unittest.TestCase):
         self.assertIn("子代理被停下（主對話用 stop_subagent 或你按了停止）", lp)
         self.assertIn("asyncio.shield(inject(parent_sid, \"bg_done\", report_text(r)))", lp)
         sp = open(str(ROOT / "plugins/subagent/__init__.py"), encoding="utf-8").read()
-        self.assertIn("if sid in AGENT_RUNS:", sp)
+        self.assertIn("if sub_alive(sid):", sp)
         self.assertIn('"steered": True', sp)
         self.assertIn("它最後在做的", sp)
 
@@ -3075,7 +3075,7 @@ class SteerDuringFlow(unittest.TestCase):
         sv = (ROOT / "woof/server.py").read_text(encoding="utf-8")
         self.assertNotIn("這則沒有送出去", sv)
         self.assertIn("elif running or agent_running or flow_running:", sv)
-        self.assertIn("or _tasks.is_running(sid):   # 方案流程在跑也排隊", sv)
+        self.assertIn("or _tasks.is_running(sid) or sid in _RECOVERING:", sv)
         lp = (ROOT / "woof/agent/loop.py").read_text(encoding="utf-8")
         self.assertNotIn("子代理先停在這裡", lp)   # 插話不會讓子代理停下
 

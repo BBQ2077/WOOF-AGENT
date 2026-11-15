@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import cron, keypool, procs, remote, store
-from .agent.loop import (AGENT_RUNS, flush_steer, mark_interrupted, peek_steer, pending_approvals, pop_steer,
+from .agent.loop import (AGENT_RUNS, sub_alive, flush_steer, mark_interrupted, peek_steer, pending_approvals, pop_steer,
                          push_steer, requeue_steer, reset_allow_all,
                          resolve_approval, resume_session, run_turn)
 from . import config
@@ -93,12 +93,8 @@ def _busy(sid: str | None) -> bool:
 
     if sid in RUNS and not RUNS[sid].done():
         return True
-    if sid in AGENT_RUNS:
-        return True
-    from woof.agent.loop import BG_BY_SID
-
-    if sid in BG_BY_SID and not BG_BY_SID[sid].done():
-        return True   # 背景子代理在排隊等名額也算還在跑，側欄照樣亮
+    if sub_alive(sid):
+        return True   # 子代理在跑、排隊等名額、重開後剛接回都算，側欄照樣亮
     try:
         if _tasks.is_running(sid) or _tasks.has_ask(sid):
             return True
@@ -1549,12 +1545,7 @@ async def mcp_info():
 
 @app.on_event("startup")
 async def _auto_discover_on_start():
-    from .agent.loop import restore_steer
-
-    n = restore_steer()   # 上次重開前還在排隊的插話／子代理回報，寫回各自的對話
-    if n:
-        logging.getLogger("woof").info("寫回上次沒送出的排隊訊息 %d 則", n)
-    asyncio.create_task(_recover_runs())
+    asyncio.create_task(_recover_runs())   # 接回上次沒做完的（含排隊訊息、背景指令通知）
     asyncio.create_task(_discover_all(force=False))
     asyncio.create_task(_watch_bg_tasks())
     asyncio.create_task(cron.loop(_cron_run, broadcast))
@@ -2299,6 +2290,7 @@ async def _continue_session(sid: str, reason: str) -> None:
     from .agent import tasks as _tasks
     from .agent.internal import meta as _imeta
 
+    await flush_steer(sid, broadcast)   # 中斷前排隊的插話先寫進對話，接續訊息放在最後
     text = _prompt_get("resume", reason=reason)
     try:
         digest = _tasks.resume_digest(sid)
@@ -2397,8 +2389,9 @@ async def _resume_turn(sid: str) -> None:
 async def _after_flow(sid: str) -> None:
     """方案／目標流程做完時還有沒送進去的插話（驗收那段送的、或最後一步剛結束才送到）：接著開一回合處理，不能就這樣不見"""
     async with TURN_LOCK:
-        if not peek_steer(sid) or (sid in RUNS and not RUNS[sid].done()) or _flow_running(sid):
-            return
+        if (not peek_steer(sid) or (sid in RUNS and not RUNS[sid].done()) or _flow_running(sid)
+                or sub_alive(sid) or sid in _RECOVERING):
+            return   # 子代理自己那條在跑：它下一步就會看到，不另開一回合
         RUNS[sid] = asyncio.create_task(_steer_turn(sid))
 
 
@@ -2445,7 +2438,8 @@ async def inject_internal(sid: str, kind: str, text: str) -> None:
     from .agent import tasks as _tasks
 
     async with TURN_LOCK:
-        if (sid in RUNS and not RUNS[sid].done()) or _tasks.is_running(sid):   # 方案流程在跑也排隊，不另開一回合搶跑
+        if (sid in RUNS and not RUNS[sid].done()) or _tasks.is_running(sid) or sid in _RECOVERING:
+            # 方案流程在跑、或開程式正要接回這個對話：排隊，不另開一回合搶跑
             push_steer(sid, blocks, _imeta(kind))
             await broadcast({"type": "queue", "session_id": sid,
                              "items": [{"text": it["blocks"][0].get("text", "") if it["blocks"] else "",
@@ -2471,61 +2465,124 @@ async def _inject_turn(sid: str) -> None:
 REG.inject = inject_internal
 
 
+_RECOVERING: set[str] = set()   # 開程式時等著接回的對話：這段時間的子代理回報、背景通知先排隊，接回後一起處理
+
+
+async def _tell_parent(child_id: str, bg: dict, why: str) -> None:
+    """子代理沒接回：一定要告訴派它的對話，不然主模型會一直等一個不會來的回報。"""
+    parent = bg.get("parent") or ""
+    if not parent or not store.get_session(parent):
+        return
+    title = str(bg.get("title") or (store.get_session(child_id) or {}).get("title") or "")[:40]
+    await inject_internal(parent, "bg_done",
+                          f"子代理 {child_id}（{title}）程式重開後沒有接回：{why}。它的任務還沒做完，不會再回報。"
+                          "要它接著做，帶同一個 session_id 呼叫 delegate_task；不需要了就不用管。")
+
+
+async def _recover_procs() -> None:
+    """上次開著的背景指令（要通知對話的）在程式重開時跟著被結束了：照實告訴各自的對話。"""
+    from . import procs
+
+    for tid, r in procs.take_pending().items():
+        sid = r.get("session_id") or ""
+        if not sid or not store.get_session(sid):
+            continue
+        try:
+            out = Path(r.get("log") or "").read_text(encoding="utf-8", errors="replace")[-3000:].strip()
+        except Exception:
+            out = ""
+        secs = int(time.time() - float(r.get("started") or time.time()))
+        text = _prompt_get("bg_done", id=tid, state="程式重開時被一起結束，沒跑完",
+                           command=str(r.get("command") or "")[:300], output=out or "(無輸出)",
+                           elapsed=f"{secs // 60} 分 {secs % 60} 秒")
+        await inject_internal(sid, "bg_done", text)
+
+
 async def _recover_runs() -> None:
-    """開程式時接回上次沒做完的：先接回背景子代理（主對話驗收前要等它們回報），再接回方案流程和回合。
+    """開程式時接回上次沒做完的：先接回背景子代理（主對話接回時要知道它們還在跑，驗收前也要等它們回報），
+    再接回方案流程和回合。接回期間的子代理回報、背景通知先排隊，等對話接回後一起送進去，不另開一回合搶在前面。
+    沒接回的子代理一定告訴派它的對話；上次沒送出的排隊訊息，對話沒在跑就開一回合處理，不會被晾著。
     同一個工作連續接回好幾次都沒有進度（可能每次都讓程式當掉），就不再自動接，留「繼續」給你按。"""
     from .agent import live
     from .agent import tasks as _tasks
-    from .agent.loop import resume_bg
+    from .agent.loop import resume_bg, restore_steer
 
     async def _stable(sid: str) -> None:
         # 接回後撐過 2 分鐘沒當掉：計數歸零。上限只擋「一接回就讓程式當掉」的循環，不擋正常的長工作
         await asyncio.sleep(120)
         live.progress(sid)
 
-    await asyncio.sleep(1)
-    recs = live.take()
-    if not recs:
-        return
     lg = logging.getLogger("woof")
+    queued = restore_steer()   # 上次重開前還在排隊的插話／子代理回報放回佇列（照原本順序）
+    recs = live.take()
+    _RECOVERING.update(sid for sid, r in recs.items() if r.get("flow") or r.get("turn"))
+    await asyncio.sleep(1)   # 等其他開程式的工作（插件、模型清單）就位
     reason = "程式重開"
-    for sid, rec in recs.items():
-        if not store.get_session(sid):
-            continue
-        if int(rec.get("n") or 0) >= live.MAX_RECOVER:
-            lg.warning("對話 %s 重開後已自動接回 %s 次都沒做完，不再自動接", sid, rec.get("n"))
-            await _note_interrupted(sid, f"重開後自動接回 {rec.get('n')} 次都沒做完", "error")
-            continue
-        if rec.get("bg"):
-            live.remark(sid, {"bg": rec["bg"], "n": rec.get("n")})
-            asyncio.create_task(_stable(sid))
-            try:
-                if not await resume_bg(sid, rec["bg"], broadcast):
-                    live.unmark(sid, "bg")
-            except Exception:
-                lg.exception("接回子代理 %s 失敗", sid)
-                live.unmark(sid, "bg")
-    for sid, rec in recs.items():
-        if not (rec.get("flow") or rec.get("turn")) or not store.get_session(sid):
-            continue
-        if int(rec.get("n") or 0) >= live.MAX_RECOVER:
-            continue
-        async with TURN_LOCK:
-            if (sid in RUNS and not RUNS[sid].done()) or _tasks.is_running(sid):
+    try:
+        for sid, rec in recs.items():
+            if not rec.get("bg"):
                 continue
             n = int(rec.get("n") or 0)
-            if rec.get("flow"):
-                if _tasks.resume_goal(sid, broadcast, reason):
-                    live.remark(sid, {"flow": True, "n": n})
-                    asyncio.create_task(_stable(sid))
-                    await broadcast({"type": "notice", "session_id": sid, "text": "程式重開：自動接回方案"})
-                    continue
-                if not rec.get("turn"):
-                    continue   # 方案已經結束、或之後你下了新指令：沒有可接的，不另外開回合
-            live.remark(sid, {"turn": True, "n": n})
-            asyncio.create_task(_stable(sid))
-            RUNS[sid] = asyncio.create_task(_continue_turn(sid, reason))
-            await broadcast({"type": "notice", "session_id": sid, "text": "程式重開：自動接著做"})
+            if not store.get_session(sid):
+                live.drop(sid)
+                continue
+            why = ""
+            if n >= live.MAX_RECOVER:
+                why = f"已經連續自動接回 {n} 次都沒做完，不再自動接"
+                lg.warning("子代理 %s %s", sid, why)
+                await _note_interrupted(sid, why, "error")
+            else:
+                live.remark(sid, {"bg": rec["bg"], "n": n})
+                asyncio.create_task(_stable(sid))
+                try:
+                    if not await resume_bg(sid, rec["bg"], broadcast):
+                        why = "派它的對話或它用的模型已經不在了"
+                except Exception as e:
+                    lg.exception("接回子代理 %s 失敗", sid)
+                    why = f"接回時出錯（{type(e).__name__}: {str(e)[:120]}）"
+            if why:
+                live.drop(sid, "bg")
+                await _tell_parent(sid, rec["bg"], why)
+        for sid, rec in recs.items():
+            if not (rec.get("flow") or rec.get("turn")):
+                continue
+            if not store.get_session(sid):
+                live.drop(sid)
+                continue
+            n = int(rec.get("n") or 0)
+            if n >= live.MAX_RECOVER:
+                lg.warning("對話 %s 重開後已自動接回 %s 次都沒做完，不再自動接", sid, n)
+                live.drop(sid, "flow", "turn")
+                await _note_interrupted(sid, f"重開後自動接回 {n} 次都沒做完", "error")
+                continue
+            async with TURN_LOCK:
+                _RECOVERING.discard(sid)
+                if (sid in RUNS and not RUNS[sid].done()) or _tasks.is_running(sid):
+                    continue   # 你在開程式後已經送了新的要求：那一輪自己管紀錄
+                if rec.get("flow"):
+                    if _tasks.resume_goal(sid, broadcast, reason):
+                        live.remark(sid, {"flow": True, "n": n})
+                        asyncio.create_task(_stable(sid))
+                        await broadcast({"type": "notice", "session_id": sid, "text": "程式重開：自動接回方案"})
+                        continue
+                    if not rec.get("turn"):
+                        live.drop(sid, "flow")
+                        continue   # 方案已經結束、或之後你下了新指令：沒有可接的，不另外開回合
+                live.remark(sid, {"turn": True, "n": n})
+                asyncio.create_task(_stable(sid))
+                RUNS[sid] = asyncio.create_task(_continue_turn(sid, reason))
+                await broadcast({"type": "notice", "session_id": sid, "text": "程式重開：自動接著做"})
+    finally:
+        left = set(_RECOVERING)
+        _RECOVERING.clear()
+    try:
+        await _recover_procs()
+    except Exception:
+        lg.exception("通知重開前的背景指令失敗")
+    # 排隊的訊息（上次沒送出的、接回期間到的回報）：對話沒在跑就開一回合處理
+    for sid in set(queued) | left:
+        if peek_steer(sid):
+            await _after_flow(sid)
 
 
 def _hook_after_flow() -> None:
@@ -2820,7 +2877,7 @@ async def ws_endpoint(ws: WebSocket):
                     from woof.agent import tasks as _tasks
 
                     running = sid in RUNS and not RUNS[sid].done()
-                    agent_running = (not running) and sid in AGENT_RUNS
+                    agent_running = (not running) and sub_alive(sid)
                     # 方案／目標流程在跑（規劃、審核、照步驟做、驗收）：插話跟一般回合一樣排進去，不能丟掉或另開一回合搶跑
                     flow_running = (not running) and (not agent_running) and _tasks.is_running(sid)
                     gate = ((store.get_session(sid) or {}).get("engine_state") or {}).get("gate") or "off"
@@ -2876,7 +2933,7 @@ async def ws_endpoint(ws: WebSocket):
             elif t == "continue" and sid:
                 # 「繼續」：上一回合沒做完（出錯、停止、步數上限、程式關閉），請模型從中斷處接著做
                 async with TURN_LOCK:
-                    if sid in RUNS and not RUNS[sid].done():
+                    if (sid in RUNS and not RUNS[sid].done()) or sub_alive(sid):
                         await ws.send_json({"type": "error", "session_id": sid, "text": "還在執行中"})
                         continue
                     es = ((store.get_session(sid) or {}).get("engine_state") or {})

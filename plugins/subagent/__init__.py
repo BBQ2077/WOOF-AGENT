@@ -243,8 +243,8 @@ def register(woof):
                 sid = follow if (follow and i == 0) else ""
                 if sid:
                     # 它還在跑：這句話是插話（催進度／追加要求），不要再開一輪
-                    from woof.agent.loop import AGENT_RUNS, push_steer
-                    if sid in AGENT_RUNS:
+                    from woof.agent.loop import push_steer, sub_alive
+                    if sub_alive(sid):
                         from woof.agent import internal as _internal
                         push_steer(sid, [{"type": "text", "text": str(t["goal"])}],
                                    _internal.meta("subagent_followup"))
@@ -363,7 +363,7 @@ def register(woof):
             "context": {"type": "string", "description": "背景：路徑、已知事實、限制"},
             "mode": {"type": "string", "enum": ["read", "write"],
                      "description": "read＝唯讀，只能讀、查、搜尋（預設）；write＝要建檔或改檔就用這個，搭配 scope。"
-                                    "scope 不重疊的寫入子代理可以同時跑，重疊才排隊"},
+                                    "寫入子代理範圍重疊也同時跑，同一個檔一次寫一個"},
             "scope": {"type": "string", "description": "write 用：允許改的資料夾或檔案（多個用 ; 分隔），範圍外不准動。"
                                                        "平行派多個寫入時各給各的資料夾"},
             "model": {"type": "string", "description": "選填，不填＝預設子代理模型。只能用設定裡開放的（填錯會列出可用的），簡單量大的挑便宜的。"

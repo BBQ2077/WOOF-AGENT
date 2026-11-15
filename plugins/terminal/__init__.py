@@ -72,8 +72,14 @@ def _arm_notify(task, args: dict, loop) -> None:
     if task.notify or not task.session_id or not _notify_on(args):
         return
     task.notify = True
+    procs.remember(task)   # 程式重開時它會跟著被結束：開程式後照這筆告訴對話，不讓它空等通知
 
     async def later():
+        from woof.agent import live
+
+        if live.SHUTTING:
+            return   # 程式關閉時被一起結束的：紀錄留著，下次開程式再告訴對話
+        procs.forget(task.id)
         await asyncio.sleep(2)  # 模型正在 process wait 的話，它自己會看到結果，就不另外通知
         if task.seen_end:
             return

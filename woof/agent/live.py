@@ -89,17 +89,29 @@ def progress(session_id: str) -> None:
 
 
 def take() -> dict[str, dict]:
-    """開程式時拿出上次沒做完的（拿出來就清掉；接回時會重新記上，接回次數加一）。"""
+    """開程式時拿出上次沒做完的。紀錄留在磁碟上：接回時次數加一（remark），不接的才拿掉（drop）；
+    接回途中又被關掉，下次照樣接得到。"""
     with _lock:
         _load()
-        out = {k: dict(v) for k, v in _live.items()}
-        _live.clear()
+        return {k: dict(v) for k, v in _live.items()}
+
+
+def drop(session_id: str, *keys: str) -> None:
+    """不接回的從紀錄拿掉（沒給 key 就整筆拿掉）。"""
+    with _lock:
+        _load()
+        rec = _live.get(session_id)
+        if rec is None:
+            return
+        for k in keys or ("turn", "flow", "bg"):
+            rec.pop(k, None)
+        if not any(k in rec for k in ("turn", "flow", "bg")):
+            _live.pop(session_id, None)
         _save()
-        return out
 
 
 def remark(session_id: str, rec: dict) -> None:
-    """接回時把紀錄放回去（次數加一），接回途中又被關掉，下次還接得到。"""
+    """接回時換成這次要接的內容（次數加一），接回途中又被關掉，下次還接得到。"""
     with _lock:
         _load()
         r = dict(rec)

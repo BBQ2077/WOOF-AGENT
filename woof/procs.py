@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+import json
 import os
 import subprocess
 import sys
@@ -239,6 +240,52 @@ def stop_session_tasks(session_id: str, include_background: bool = False) -> Non
     for t in list(TASKS.values()):
         if t.session_id == session_id and t.ended is None and (include_background or not t.background):
             stop_task(t.id)
+
+
+def _pending_file() -> Path:
+    return DATA / "bg_procs.json"
+
+
+_pending_lock = threading.Lock()
+
+
+def _pending_edit(fn) -> dict:
+    with _pending_lock:
+        f = _pending_file()
+        try:
+            d = json.loads(f.read_text(encoding="utf-8")) or {}
+        except FileNotFoundError:
+            d = {}
+        except Exception:
+            d = {}
+        fn(d)
+        try:
+            if d:
+                tmp = f.with_suffix(".tmp")
+                tmp.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+                os.replace(tmp, f)
+            else:
+                f.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return d
+
+
+def remember(task: Task) -> None:
+    """要在結束時通知對話的背景指令記到磁碟：程式重開時它會跟著被結束，開程式後要告訴那個對話，不能讓它空等通知。"""
+    _pending_edit(lambda d: d.__setitem__(task.id, {"session_id": task.session_id, "command": task.command,
+                                                    "started": task.started, "log": str(task.log_path)}))
+
+
+def forget(tid: str) -> None:
+    _pending_edit(lambda d: d.pop(tid, None))
+
+
+def take_pending() -> dict:
+    """開程式時拿出上次還沒通知的背景指令（拿了就清掉）。"""
+    out: dict = {}
+    _pending_edit(lambda d: (out.update(d), d.clear()))
+    return out
 
 
 def read_log(task: Task) -> str:

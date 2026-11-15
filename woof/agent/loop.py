@@ -729,25 +729,23 @@ def _save_steer() -> None:
         log.exception("寫入排隊訊息失敗")
 
 
-def restore_steer() -> int:
-    """開程式時把上次沒送出的排隊訊息寫進各自的對話（照原本順序），回寫了幾則。"""
+def restore_steer() -> list[str]:
+    """開程式時把上次沒送出的排隊訊息放回佇列（照原本順序、保留插話／回報的標記），回傳有排隊的對話。
+    接回的回合、方案、子代理照常在下一步送進去；沒有要接回的對話，開程式後另開一回合處理，不會被晾著。"""
     f = _steer_file()
     try:
         saved = json.loads(f.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return 0
+        return []
     except Exception:
         log.exception("讀取排隊訊息失敗")
-        return 0
-    n = 0
-    for sid, items in (saved or {}).items():
-        if not store.get_session(sid):
-            continue
-        for it in items:
-            store.add_message(sid, "user", it.get("blocks") or [], it.get("meta"))
-            n += 1
-    f.unlink(missing_ok=True)
-    return n
+        return []
+    with _steer_lock:
+        for sid, items in (saved or {}).items():
+            if items and store.get_session(sid):
+                _steer.setdefault(sid, []).extend(items)
+        _save_steer()
+        return [k for k, v in _steer.items() if v]
 
 
 def push_steer(session_id: str, blocks: list[dict], meta: dict | None = None) -> None:
@@ -816,12 +814,27 @@ def history(session_id: str) -> list[dict]:
             miss = [c for c in content if c.get("type") == "tool_call" and c["id"] not in got]
             if ids and miss:
                 fill = [{"type": "tool_result", "id": c["id"], "name": c.get("name", ""), "is_error": True,
-                         "output": "沒有結果：工具執行到一半，程式被關閉或中斷。需要的話重新執行。"} for c in miss]
+                         "output": _missing_result(session_id, c, m, nxt)} for c in miss]
                 if got:
                     nxt["content"] = list(nxt["content"]) + fill  # 只缺一部分：併進原本的工具訊息（rows 是新讀的，不影響資料庫）
                 else:
                     out.append({"id": m["id"], "role": "tool", "content": fill, "meta": {"synthetic": True}})
     return out
+
+
+def _missing_result(session_id: str, call: dict, msg: dict, nxt: dict | None) -> str:
+    """工具執行到一半程式被關掉時補的結果。派子代理那種要照實說派出了哪些（它們重開後自動接回），不能叫模型重派。"""
+    if call.get("name") == "delegate_task":
+        t0 = float(msg.get("created") or 0) - 1
+        t1 = float((nxt or {}).get("created") or 9e18)
+        kids = [k for k in store.child_sessions(session_id) if t0 <= float(k.get("created") or 0) <= t1]
+        if kids:
+            names = "；".join(f"{k['id']}（{str(k.get('title') or '')[:30]}）"
+                             + ("，還在跑" if k["id"] in BG_BY_SID and not BG_BY_SID[k["id"]].done() else "")
+                             for k in reversed(kids))
+            return (f"這次派工途中程式被關閉，但已經派出這些子代理：{names}。程式重開後它們自動接回，做完會照樣回報；"
+                    "不要重派。要改方向帶 session_id 追加要求，不需要了用 stop_subagent 停")
+    return "沒有結果：工具執行到一半，程式被關閉或中斷。需要的話重新執行。"
 
 
 # 模型說「上下文太長」的錯誤字樣（各家說法不同）
@@ -1575,6 +1588,13 @@ def bg_children(session_id: str) -> list[str]:
             if p == session_id and c in BG_BY_SID and not BG_BY_SID[c].done()]
 
 
+def sub_alive(session_id: str) -> bool:
+    """這個子代理對話還有人在跑它：正在跑一步、或背景任務還沒結束（排隊等名額、重開後剛接回）。
+    這時對它說話一律當插話排進去，不能另開一輪（同一個對話兩邊同時跑會互相打架）。"""
+    t = BG_BY_SID.get(session_id)
+    return session_id in AGENT_RUNS or bool(t and not t.done())
+
+
 def stop_agent(session_id: str) -> bool:
     """停掉某個子代理對話的背景任務（不影響主對話）。回傳有沒有真的停到。"""
     t = BG_BY_SID.get(session_id)
@@ -1636,9 +1656,9 @@ async def run_subagent_bg(parent: TurnContext, goal: str, context: str = "", mod
                 await asyncio.shield(parent.emit({"type": "run_end", "session_id": ctx.session_id, "status": status}))
             except Exception:
                 pass
+            # 不管成功、出錯、被停掉，都要讓主對話聽到結果（不然它會一直等一個不會來的回報）。
+            # 回報送出後才清掉磁碟紀錄：中間被關掉的話，下次開程式接回、照樣回報，不會兩頭落空。
             # 程式關閉途中被收掉：不算結束，不送「被停止」的回報，紀錄留著，下次開程式接著做完再回報
-            live.unmark(child["id"], "bg")
-            # 不管成功、出錯、被停掉，都要讓主對話聽到結果（不然它會一直等一個不會來的回報）
             try:
                 if live.SHUTTING:
                     raise _Shutting
@@ -1654,6 +1674,7 @@ async def run_subagent_bg(parent: TurnContext, goal: str, context: str = "", mod
                 pass
             except Exception:
                 log.exception("子代理回報送出失敗")
+            live.unmark(child["id"], "bg")
 
     task = asyncio.create_task(_bg())
     BG_TASKS.add(task)
