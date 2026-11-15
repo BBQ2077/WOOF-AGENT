@@ -1482,6 +1482,13 @@ class _SubSlot:
 # 背景子代理：放著讓它跑，跑完自己把結果送回來（不要擋住主對話）
 BG_TASKS: set[asyncio.Task] = set()
 BG_BY_SID: dict[str, asyncio.Task] = {}   # 子代理對話 id → 背景任務（要能單獨停掉那一個）
+BG_PARENT: dict[str, str] = {}             # 子代理對話 id → 派它的對話 id
+
+
+def bg_children(session_id: str) -> list[str]:
+    """這個對話派出去、還沒回報的背景子代理（排隊等名額的也算）。方案流程驗收前要等它們回來。"""
+    return [c for c, p in list(BG_PARENT.items())
+            if p == session_id and c in BG_BY_SID and not BG_BY_SID[c].done()]
 
 
 def stop_agent(session_id: str) -> bool:
@@ -1553,11 +1560,13 @@ async def run_subagent_bg(parent: TurnContext, goal: str, context: str = "", mod
     BG_TASKS.add(task)
     child_id = child["id"]
     BG_BY_SID[child_id] = task
+    BG_PARENT[child_id] = parent_sid
 
     def _done(_t):
         BG_TASKS.discard(_t)
         if BG_BY_SID.get(child_id) is _t:
             BG_BY_SID.pop(child_id, None)
+            BG_PARENT.pop(child_id, None)
 
     task.add_done_callback(_done)
     return {"session_id": child["id"], "title": child.get("title") or title_hint,

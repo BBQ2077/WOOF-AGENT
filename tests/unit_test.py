@@ -2530,7 +2530,7 @@ class ReviewAlwaysRuns(unittest.TestCase):
 
     def test_no_changed_paths_guard(self):
         src = open(str(ROOT / "woof/agent/tasks.py"), encoding="utf-8").read()
-        self.assertIn("ok, gaps = await final_check(ctx, session_id, objective, steps, emit)", src)
+        self.assertIn("ok, gaps = await _check(ctx, session_id, objective, steps, emit)", src)
         self.assertNotIn("if changed_paths(session_id):\n            ok, gaps", src)
 
 class ToolErrPreview(unittest.TestCase):
@@ -3029,8 +3029,11 @@ class SteerDuringFlow(unittest.TestCase):
         self.assertIn("規劃／審核", t.steer_note(self.sid))
         t._save(self.sid, goal={"objective": "x", "status": "running", "steps": ["a"]})
         self.assertIn("工具跑完", t.steer_note(self.sid))
-        t._save(self.sid, goal={"objective": "x", "status": "running", "steps": ["a"], "idx": 1})
-        self.assertIn("正在驗收", t.steer_note(self.sid))
+        t.STAGE[self.sid] = "wait_bg"
+        self.assertIn("馬上交給模型", t.steer_note(self.sid))
+        t.STAGE[self.sid] = "check"
+        self.assertIn("先停下驗收", t.steer_note(self.sid))
+        t.STAGE.pop(self.sid, None)
 
     def test_flush_before_step(self):
         import asyncio
@@ -3562,6 +3565,173 @@ class SteerDuringPlanning(unittest.TestCase):
             reg.model_cfg, reg.providers = orig_cfg, orig_prov
             loop.pop_steer(sid)
             store.delete_session(sid)
+
+    def test_max_steps_setting(self):
+        """步驟上限照設定（可到 100），不再寫死 5～8 步。"""
+        import asyncio
+        from woof.agent import tasks
+
+        sid = store.create_session("m", None, "步驟上限測試")["id"]
+        got = {}
+        orig = (tasks.plan_steps, tasks.review_plan, tasks.run_goal, tasks.flow_settings)
+        reg = sys.modules["woof.loader"].REG
+        orig_cfg, orig_prov = reg.model_cfg, reg.providers
+
+        async def fake_plan(cfg, objective, feedback=""):
+            return [f"步驟{i}" for i in range(60)]
+
+        async def fake_review(ctx, objective, steps, prev=""):
+            return True, ""
+
+        async def fake_goal(session_id, objective, emit, steps=None, **kw):
+            got["steps"] = steps
+
+        async def emit(ev):
+            pass
+
+        fs = dict(orig[3]())
+        fs["max_steps"] = 40
+        tasks.plan_steps, tasks.review_plan, tasks.run_goal = fake_plan, fake_review, fake_goal
+        tasks.flow_settings = lambda: fs
+        reg.providers = {**orig_prov, "fake_prov": object()}
+        reg.model_cfg = lambda name: {"provider": "fake_prov", "id": "m", "name": "m"}
+        try:
+            store.add_message(sid, "user", [{"type": "text", "text": "做一個遊戲"}])
+            asyncio.run(tasks.run_gated(sid, "做一個遊戲", emit, "model"))
+            self.assertEqual(len(got["steps"]), 40)
+            self.assertEqual(tasks.FLOW_LIMITS["max_steps"], (1, 100))
+            from woof.prompts import get
+            self.assertIn("最多 40 步", get("plan_goal", max_steps=40))
+        finally:
+            tasks.plan_steps, tasks.review_plan, tasks.run_goal, tasks.flow_settings = orig
+            reg.model_cfg, reg.providers = orig_cfg, orig_prov
+            store.delete_session(sid)
+
+    def _goal_env(self, check):
+        """run_goal 的測試環境：一步、假的模型回合、假的驗收。回（session id, 紀錄, 還原函式）。"""
+        from woof.agent import tasks, loop
+
+        sid = store.create_session("m", None, "收尾測試")["id"]
+        log = []
+        orig = (tasks.final_check, loop.run_model_loop, tasks.flow_settings)
+        reg = sys.modules["woof.loader"].REG
+        orig_cfg, orig_prov = reg.model_cfg, reg.providers
+
+        async def fake_loop(ctx):
+            msgs = store.get_messages(sid)
+            log.append(("model", msgs[-1]["content"][0]["text"][:30] if msgs else ""))
+
+        fs = dict(orig[2]())
+        fs["fix_rounds"] = 0
+        tasks.final_check = lambda *a, **k: check(sid, log)
+        loop.run_model_loop = fake_loop
+        tasks.flow_settings = lambda: fs
+        reg.providers = {**orig_prov, "fake_prov": object()}
+        reg.model_cfg = lambda name: {"provider": "fake_prov", "id": "m", "name": "m"}
+
+        def restore():
+            tasks.final_check, loop.run_model_loop, tasks.flow_settings = orig
+            reg.model_cfg, reg.providers = orig_cfg, orig_prov
+            loop.pop_steer(sid)
+            store.delete_session(sid)
+        return sid, log, restore
+
+    def test_wait_subagents_before_check(self):
+        """步驟做完、還有背景子代理沒回報：先等，回報交給模型處理完才驗收。"""
+        import asyncio
+        from woof.agent import tasks, loop, internal
+
+        async def check(sid, log):
+            log.append(("check", ""))
+            return True, []
+
+        sid, log, restore = self._goal_env(check)
+        events = []
+
+        async def emit(ev):
+            events.append(ev)
+
+        async def main():
+            async def child():
+                await asyncio.sleep(1.0)
+                loop.push_steer(sid, [{"type": "text", "text": "子代理回報：做完 40 張"}], internal.meta("bg_done"))
+            t = asyncio.ensure_future(child())
+            loop.BG_BY_SID["kid_x"] = t
+            loop.BG_PARENT["kid_x"] = sid
+            try:
+                await tasks.run_goal(sid, "做卡片", emit, steps=["寫卡"])
+            finally:
+                loop.BG_BY_SID.pop("kid_x", None)
+                loop.BG_PARENT.pop("kid_x", None)
+        try:
+            asyncio.run(main())
+            kinds = [k for k, _ in log]
+            self.assertEqual(kinds, ["model", "model", "check"])     # 步驟 → 處理子代理回報 → 驗收
+            self.assertIn("子代理回報", log[1][1])
+            self.assertTrue(any(e.get("type") == "flow_stage" and e.get("stage") == "wait_bg" for e in events))
+        finally:
+            restore()
+
+    def test_steer_during_check(self):
+        """驗收途中插話：馬上停下驗收，插話交給模型處理，處理完再驗收。"""
+        import asyncio, time as _time
+        from woof.agent import tasks, loop
+
+        calls = []
+
+        async def check(sid, log):
+            log.append(("check", ""))
+            calls.append(1)
+            if len(calls) == 1:
+                loop.push_steer(sid, [{"type": "text", "text": "計畫？"}], {"steer": True})
+                await asyncio.sleep(30)
+            return True, []
+
+        sid, log, restore = self._goal_env(check)
+
+        async def emit(ev):
+            pass
+        try:
+            t0 = _time.monotonic()
+            asyncio.run(tasks.run_goal(sid, "做卡片", emit, steps=["寫卡"]))
+            self.assertLess(_time.monotonic() - t0, 6)
+            self.assertEqual([k for k, _ in log], ["model", "check", "model", "check"])
+            self.assertIn("計畫", log[2][1])
+            self.assertTrue(any((m.get("meta") or {}).get("steer") for m in store.get_messages(sid)))
+        finally:
+            restore()
+
+    def test_review_subagents_share_flow_batch(self):
+        """拓展／審核／驗收子代理帶這一輪流程的批次（側欄分批），不沿用 delegate_task 留下的批次。"""
+        import asyncio
+        from woof.agent import tasks, loop
+
+        seen = []
+        orig = loop.run_subagent
+
+        async def fake_run(*a, **k):
+            seen.append(loop.SUB_BATCH.get())
+            return {"answer": "{}"}
+
+        class Ctx:
+            session_id = "flowbatch_x"
+
+            async def emit(self, ev):
+                pass
+
+        loop.run_subagent = fake_run
+        tasks.FLOW_BATCH["flowbatch_x"] = "fb123"
+        try:
+            async def main():
+                loop.SUB_BATCH.set("deleg99")      # 模擬步驟裡 delegate_task 留下的批次
+                await tasks._sub(Ctx(), "審", "審：", "審核模型：x", "review_request")
+                return loop.SUB_BATCH.get()
+            after = asyncio.run(main())
+            self.assertEqual(seen, ["fb123"])
+            self.assertEqual(after, "deleg99")      # 用完還原
+        finally:
+            loop.run_subagent = orig
+            tasks.FLOW_BATCH.pop("flowbatch_x", None)
 
     def test_rounds_used_up_no_ask(self):
         """模型審核撞到版數上限：不跳提問卡問使用者，照最後一版做，審核意見交給執行的模型。"""

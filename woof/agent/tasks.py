@@ -23,16 +23,18 @@ TODO_STATUS = ("pending", "doing", "done", "skipped", "failed")
 PLAN_TOOLS = {"write_file", "patch", "terminal", "process"}
 ASKS: dict[str, dict] = {}
 GOAL_TASKS: dict[str, asyncio.Task] = {}
+FLOW_BATCH: dict[str, str] = {}   # 這一輪方案流程的批次 id：拓展、方案審核、驗收子代理在側欄收成同一批
 PLAN_ROUNDS = 3  # 方案最多提幾版（模型審核打回、或使用者要求重提）；設定 [flow] plan_rounds 可改
 FLOW_DEFAULTS = {"plan_rounds": PLAN_ROUNDS, "fix_rounds": 1, "review_timeout": 300, "context_chars": 1500, "goal_gate": True,
-                 "expand_model": "", "review_model": ""}
-FLOW_LIMITS = {"plan_rounds": (1, 10), "fix_rounds": (0, 5), "review_timeout": (0, 3600), "context_chars": (0, 20000)}
+                 "expand_model": "", "review_model": "", "max_steps": 30}
+FLOW_LIMITS = {"plan_rounds": (1, 10), "fix_rounds": (0, 5), "review_timeout": (0, 3600), "context_chars": (0, 20000),
+               "max_steps": (1, 100)}
 
 
 def flow_settings() -> dict:
     """方案模式的上限（設定 → 方案模式，存在 config.toml [flow]）：
     plan_rounds 方案最多提幾版；fix_rounds 做完驗收後最多補幾輪；review_timeout 每次審核／拓展最多等幾秒（0＝不限）；
-    context_chars 規劃／拓展／審核附上的前文最多幾字（0＝不附）；
+    context_chars 規劃／拓展／審核附上的前文最多幾字（0＝不附）；max_steps 方案最多排幾步；
     goal_gate /goal 是否照對話選的方案模式走；expand_model／review_model 拓展、審核用的模型（空＝跟這個對話）。"""
     from woof.config import load_config
 
@@ -80,8 +82,15 @@ async def _sub(ctx, goal: str, label: str, title: str, kind: str) -> dict | None
         elif t == "tool_end":
             st["tools"] = max(0, st["tools"] - 1)
 
-    task = asyncio.ensure_future(run_subagent(ctx, goal, "", _sub_model(ctx, kind), None, label,
-                                              title_hint=title, kind=kind, activity=activity))
+    from woof.agent.loop import SUB_BATCH
+
+    # 明確帶這一輪流程的批次（不沿用 delegate_task 留在 context 裡的那一批）；建立任務時 context 就複製進去了，馬上還原
+    tok = SUB_BATCH.set(FLOW_BATCH.get(getattr(ctx, "session_id", "") or "", ""))
+    try:
+        task = asyncio.ensure_future(run_subagent(ctx, goal, "", _sub_model(ctx, kind), None, label,
+                                                  title_hint=title, kind=kind, activity=activity))
+    finally:
+        SUB_BATCH.reset(tok)
     if not lim:
         return await task
     try:
@@ -347,12 +356,13 @@ async def plan_steps(model_cfg: dict, objective: str, feedback: str = "") -> lis
 
     use = aux_model("subagent", model_cfg) or model_cfg
     text = objective + (_prompt("plan_redo", feedback=feedback) if feedback else "")
-    txt = await complete(use, _prompt("plan_goal"), [{"role": "user", "content": [{"type": "text", "text": text}]}])
+    most = flow_settings()["max_steps"]
+    txt = await complete(use, _prompt("plan_goal", max_steps=most), [{"role": "user", "content": [{"type": "text", "text": text}]}])
     m = re.search(r"\[.*\]", txt or "", re.S)
     if not m:
         raise RuntimeError("規劃員沒有回傳步驟清單：" + (txt or "")[:120])
     steps = [s for s in (_step_text(x) for x in json.loads(m.group(0))) if s]
-    return steps[:5]   # 空陣列＝這則訊息不用動手（閒聊／問答），交給一般回合回覆
+    return steps[:most]   # 空陣列＝這則訊息不用動手（閒聊／問答），交給一般回合回覆
 
 
 STEP_CHARS = 400
@@ -509,6 +519,8 @@ async def final_check(ctx, session_id: str, objective: str, steps: list[str], em
     prev＝上一次驗收列的缺口（補完再驗）：先核對那些補好了沒，不要每次換一個審核就換一批新要求，補不完。"""
     plan = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(steps))
     goal = _prompt("review") + _prompt("review_body", objective=objective, plan=plan, report=_recent_report(session_id))
+    goal += ("\n\n【驗收範圍】只驗上面這些步驟排到的部分有沒有做到、做好。目標比這輪步驟大時（例如整個遊戲這輪只排到前幾個階段），"
+             "步驟沒排到的部分不算缺口，不要因為整個專案還沒做完就判不過。")
     if prev:
         goal += ("\n\n【上一次驗收列的缺口，已經補過一輪】\n" + "\n".join(f"- {g}" for g in prev)
                  + "\n先逐條核對這些補好了沒（要自己看證據，不能只看報告）。"
@@ -520,6 +532,56 @@ async def final_check(ctx, session_id: str, objective: str, steps: list[str], em
     if not ok and not gaps and why:
         gaps = [why[:120]]
     return ok, gaps
+
+
+STAGE: dict[str, str] = {}   # 方案流程現在在哪一段：plan／expand／plan_review／step／wait_bg／check（插話提示、畫面狀態用）
+
+
+async def _stage(session_id: str, emit, key: str, text: str = "") -> None:
+    """記下流程走到哪一段，也告訴畫面：模型沒在回應的空檔（審核、等子代理）要顯示在等什麼，不能沿用上一個請求的計時。"""
+    STAGE[session_id] = key
+    await emit({"type": "flow_stage", "session_id": session_id, "stage": key, "text": text})
+
+
+async def _settle(ctx, session_id: str, emit) -> None:
+    """步驟做完、驗收之前收尾：這個對話派出去的背景子代理還沒回報就等，回報（還有等的時候你插的話）一到就馬上交給模型處理；
+    模型處理時再派的也一起等。全部回來、模型也處理完了才驗收——不然驗的是還在做的半成品，子代理的結果也要等驗收完才送得進去。"""
+    from woof.agent.loop import bg_children, flush_steer, peek_steer, run_model_loop
+
+    shown = -1
+    while True:
+        if peek_steer(session_id):
+            await asyncio.sleep(0.5)   # 同時回來的一起送
+            await _stage(session_id, emit, "step")
+            shown = -1
+            await flush_steer(session_id, emit)
+            try:
+                await run_model_loop(ctx)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                await emit({"type": "notice", "session_id": session_id, "text": f"處理子代理回報時出錯：{e}"})
+            continue
+        n = len(bg_children(session_id))
+        if not n:
+            return
+        if n != shown:
+            shown = n
+            await _stage(session_id, emit, "wait_bg", f"等 {n} 個子代理回報（回報一到就交給模型；可以直接插話）")
+        await asyncio.sleep(0.5)
+
+
+async def _check(ctx, session_id: str, objective: str, steps: list[str], emit,
+                 prev: list[str] | None = None) -> tuple[bool, list[str]]:
+    """收尾後驗收。驗收途中你插話：停下驗收（審核子代理一起收掉），這句馬上交給模型處理，處理完再從頭驗收。"""
+    while True:
+        await _settle(ctx, session_id, emit)
+        await _stage(session_id, emit, "check", "驗收中：審核模型（子代理）在看成品（可以直接插話，會先停下驗收）")
+        try:
+            return await _or_steer(session_id, final_check(ctx, session_id, objective, steps, emit, prev))
+        except _Steered:
+            await emit({"type": "notice", "session_id": session_id,
+                        "text": "收到插話：先停下驗收，交給模型處理，處理完再驗收"})
 
 
 async def _flush_user_steer(session_id: str, emit) -> str:
@@ -547,6 +609,7 @@ async def _run_step(ctx, session_id: str, objective: str, step: str, idx: int, t
         plan_txt += (_ref_text(ref) + "\n（這些是拓展模型沒查證就想到的，只供參考：真的去查網路上同類做得好的做法，"
                      "實作中想到更好的就用更好的；做哪些、怎麼做由你判斷，以查到的和實際做出來的為準，不要照著猜的內容硬做。"
                      "目標是把成品做好，不是做到能交差。）")
+    await _stage(session_id, emit, "step")
     text = _prompt("goal_step", objective=objective, n=idx + 1, total=total, step=step, plan=plan_txt)
     text += await _flush_user_steer(session_id, emit)
     m = store.add_message(session_id, "user", [{"type": "text", "text": text}], meta=internal.meta("goal_step"))
@@ -565,6 +628,7 @@ async def _run_fix(ctx, session_id: str, gaps: list[str], emit) -> bool:
     """驗收後補缺口：用「補做沒做到的部分」提示詞（設定 → 方案模式可改），不是再塞一個「步驟 9/8」。"""
     from woof.agent.loop import run_model_loop
 
+    await _stage(session_id, emit, "step")
     text = _prompt("review_fail", reason="；".join(gaps)) + await _flush_user_steer(session_id, emit)
     m = store.add_message(session_id, "user", [{"type": "text", "text": text}], meta=internal.meta("review_feedback"))
     await emit({"type": "message", "session_id": session_id, "message": m})
@@ -578,7 +642,6 @@ async def _run_fix(ctx, session_id: str, gaps: list[str], emit) -> bool:
         return False
 
 
-STEPS_MAX = 8   # 拓展補成的一整套最多幾步（規劃本身只拆 1～5 步）
 IDEAS_MAX = 10  # 拓展想到的方向最多幾條
 CHECKS_MAX = 6  # 拓展點名要先查的最多幾條
 RESEARCH_STEP = ("先查證：上網查同類做得好的成品與做法（拓展列的「動手前該查的」也一起查），"
@@ -717,7 +780,7 @@ async def run_goal(session_id: str, objective: str, emit, steps: list[str] | Non
     try:
         if steps is None:
             steps = await plan_steps(model_cfg, objective)
-        steps = [s for s in (_step_text(x) for x in steps) if s][:STEPS_MAX]
+        steps = [s for s in (_step_text(x) for x in steps) if s][:flow_settings()["max_steps"] + 1]   # +1：拓展加的「先查證」
         if not steps:
             from woof.agent.loop import run_model_loop
 
@@ -754,7 +817,7 @@ async def run_goal(session_id: str, objective: str, emit, steps: list[str] | Non
         # 做完驗一次：真的做到了嗎；有缺口就補，最多補 fix_rounds 輪（設定 → 方案模式），不會無限打回。
         # 純問答在前面 steps 為空時就 return 了，不會走到這。
         fix_max = flow_settings()["fix_rounds"]
-        ok, gaps = await final_check(ctx, session_id, objective, steps, emit)
+        ok, gaps = await _check(ctx, session_id, objective, steps, emit)
         for rnd in range(1, fix_max + 1):
             if ok or not gaps:
                 break
@@ -763,7 +826,7 @@ async def run_goal(session_id: str, objective: str, emit, steps: list[str] | Non
             fixed = await _run_fix(ctx, session_id, gaps, emit)
             if not fixed:
                 break
-            ok, gaps = await final_check(ctx, session_id, objective, steps, emit, prev=gaps)
+            ok, gaps = await _check(ctx, session_id, objective, steps, emit, prev=gaps)
 
         status = "done" if ok else ("partial" if failed < len(steps) else "error")
         _save(session_id, goal={"objective": objective, "status": status, "at": time.time()})
@@ -796,10 +859,13 @@ AFTER_FLOW = None   # server 掛上：流程正常結束還有沒送進去的插
 def steer_note(session_id: str) -> str:
     """方案流程在跑時插話：告訴使用者這則什麼時候會送到模型。"""
     g = _state(session_id).get("goal") or {}
-    if g.get("status") == "planning":
+    st = STAGE.get(session_id)
+    if g.get("status") == "planning" or st in ("plan", "expand", "plan_review"):
         return "已插入：停下手上的規劃／審核，依你這句重新規劃"
-    if g.get("steps") and int(g.get("idx") or 0) >= len(g["steps"]):
-        return "已插入：步驟都做完了、正在驗收，驗收完接著處理這則"
+    if st == "check":
+        return "已插入：先停下驗收，這句馬上交給模型處理，處理完再驗收"
+    if st == "wait_bg":
+        return "已插入，馬上交給模型處理（子代理照樣在背景跑）"
     return "已插入，這一步的工具跑完就送給模型"
 
 
@@ -807,12 +873,14 @@ def _track(session_id: str, coro, emit) -> asyncio.Task:
     """跑目標／方案流程。結束（做完、出錯、被停）時補送一個事件：
     流程裡最後一個事件（回覆的 run_end）送出時流程還沒結束，帶的 busy 是 True；
     不補這一下，前端會一直顯示「還在跑」。"""
+    FLOW_BATCH[session_id] = uuid.uuid4().hex[:8]   # 一輪流程（一次要求、或按一次「繼續」）一批
     task = asyncio.create_task(coro)
     # 開頭就送一下：拓展、審核在子對話跑的那段，主對話自己沒有事件，前端拿不到「流程進行中」會以為卡住
     # （這時任務已登記在 GOAL_TASKS，送出時 broadcast 算出的 flow 是 True）
     asyncio.get_running_loop().create_task(emit({"type": "flow_start", "session_id": session_id}))
 
     def _done(_t):
+        STAGE.pop(session_id, None)
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(emit({"type": "flow_end", "session_id": session_id}))
@@ -965,8 +1033,9 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
                 # gate／since 存著：規劃、拓展、審核途中被打斷（程式重開、停止），「繼續」會從規劃重來，不會變成沒有審核的一般接續
                 _save(session_id, goal={"objective": raw_objective, "status": "planning", "at": time.time(),
                                         "gate": gate, "auto": auto, "since": since, "extra": extra})
+                await _stage(session_id, emit, "plan", "規劃方案中")
                 base = await _or_steer(session_id, plan_steps(model_cfg, objective, feedback))
-                steps = [s for s in (_step_text(x) for x in base) if s][:5]
+                steps = [s for s in (_step_text(x) for x in base) if s][:flow_settings()["max_steps"]]
                 if not steps:
                     # 打招呼、閒聊、單純問答：不拆步驟、不出方案卡、不做對抗檢查，直接當一般對話回
                     from woof.agent.loop import run_model_loop
@@ -978,6 +1047,7 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
                     # 思維拓展：這個模型容易「你說 A 就只做 A」。拓展模型只負責拓展思路（還可能包括哪些、該先查什麼），
                     # 它沒查證，不讓它改寫成總規劃：步驟照規劃員的，前面加一步先查證，拓展的想法每步附上當參考
                     if ref is None:
+                        await _stage(session_id, emit, "expand", "思維拓展中：拓展模型（子代理）在想（可以直接插話）")
                         ref, notes = await _or_steer(session_id, expand_plan(ctx, objective, steps))
                         if ref["ideas"] or ref["checks"]:
                             await emit({"type": "notice", "session_id": session_id,
@@ -989,6 +1059,7 @@ async def run_gated(session_id: str, objective: str, emit, gate: str, auto: bool
                 plan_txt = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(steps))
                 if gate in ("model", "expand"):
                     # 對抗、拓展都要審：一步的方案也審（做法不夠好、漏步驟、憑空假設的前提，一步一樣會出事）
+                    await _stage(session_id, emit, "plan_review", f"審核第 {rnd} 版方案：審核模型（子代理）在看（可以直接插話）")
                     ok, reason = await _or_steer(session_id, review_plan(ctx, objective, steps, feedback))
                     if ok:
                         await emit({"type": "notice", "session_id": session_id,

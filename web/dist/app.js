@@ -27,7 +27,7 @@ localStorage.removeItem('woof.perm'); localStorage.removeItem('woof.effortWant')
 const S = {
   draft: {}, follow: true, chatShow: {},
   models: [], vendors: [], backends: [], plugins: [], keys: {}, sessions: [], sid: null, msgs: [],
-  running: new Set(), live: {}, wait: {}, tools: {}, errors: {}, usage: {}, attach: [], plugFilter: '全部', ws: null, approvals: {}, asks: {}, askDone: {}, todos: {}, planOn: {}, gate: {}, subOpen: new Set(), subShut: new Set(), act: {}, groups: [], drag: null,
+  running: new Set(), live: {}, wait: {}, stage: {}, tools: {}, errors: {}, usage: {}, attach: [], plugFilter: '全部', ws: null, approvals: {}, asks: {}, askDone: {}, todos: {}, planOn: {}, gate: {}, subOpen: new Set(), subShut: new Set(), act: {}, groups: [], drag: null,
   modelId: null, workdir: '', tasks: [], queue: {}, srvQ: {}, resumeHide: {}, interrupting: {}, askDraft: {}, askSel: {},
   pins: new Set(JSON.parse(localStorage.getItem('woof.pins') || '[]')),
   profile: null,
@@ -866,6 +866,18 @@ function onEvent(ev) {
         base: ev.first_base || 0, tok: ev.ctx_tok || 0, got: false };
       if (sid === S.sid) scheduleLive();
       break;
+    case 'flow_stage':  // 方案流程換段：模型沒在回應的空檔（審核、等子代理）顯示在等什麼，不沿用上一個請求的計時
+      delete S.wait[sid];
+      if (ev.text) S.stage[sid] = { text: ev.text, t0: Date.now() }; else delete S.stage[sid];
+      if (ev.text && !S.running.has(sid)) {
+        S.running.add(sid); renderSessions();
+        if (sid === S.sid) { renderChat(); renderComposer(); }
+      }
+      if (sid === S.sid) scheduleLive();
+      break;
+    case 'flow_end':
+      delete S.stage[sid];
+      break;
     case 'step_data':   // 模型有送資料（例如在寫工具參數，畫面上沒有字）：等待計時歸零，上限改用「多久沒資料」
       if (S.wait[sid]) Object.assign(S.wait[sid], { t0: Date.now(), got: true, retry: null });
       break;
@@ -892,6 +904,7 @@ function onEvent(ev) {
       break;
     }
     case 'message':
+      if (ev.message.role === 'assistant') delete S.wait[sid];   // 這個請求回完了：計時停掉，下一個請求會再送 step_wait
       // 思考過程中是展開的，commit 成訊息後沿用：不然模型一動，剛才看到一半的思考就自己收起來
       if (sid === S.sid && ev.message.role === 'assistant' && typeof ev.message.id === 'number'
         && S.liveThink && S.liveThink.open !== false) S.thinkCarry = ev.message.id;
@@ -1161,14 +1174,14 @@ function subKind(s) {
   if (k) return k;
   return /^(審核模型|拓展模型|對抗檢查|方案審核)/.test(s.title || '') ? 'review' : 'task';
 }
-// 同一次 delegate_task 派出的算一批；舊資料沒有批次 id，就把 20 秒內接連建立的算同一批
-function subBatches(list) {
+// 同一次 delegate_task 派出的算一批（審核疊：同一輪方案流程算一批）；舊資料沒有批次 id，就把 gap 秒內接連建立的算同一批
+function subBatches(list, gap = 20) {
   const arr = list.slice().sort((a, b) => (a.created || 0) - (b.created || 0));
   const out = [];
   for (const s of arr) {
     const b = ((s.engine_state || {}).sub || {}).batch || '';
     const last = out[out.length - 1];
-    if (last && (b ? last.key === b : (!last.tagged && (s.created || 0) - last.end < 20))) {
+    if (last && (b ? last.key === b : (!last.tagged && (s.created || 0) - last.end < gap))) {
       last.items.push(s); last.end = s.created || last.end;
     } else out.push({ key: b || 't' + Math.round(s.created || 0), tagged: !!b, items: [s], at: s.created || 0, end: s.created || 0 });
   }
@@ -1197,27 +1210,30 @@ function renderSessions() {
     const viewing = cur && cur.parent === s.id ? cur : null;
     const tasks = all.filter((k) => subKind(k) !== 'review');
     const revs = all.filter((k) => subKind(k) === 'review');
+    // 分批列出：只有一批就直接列；多批時最新那批預設展開
+    const pushBatches = (list, gap, what) => {
+      const batches = subBatches(list, gap);
+      if (batches.length === 1) { for (const k of batches[0].items.filter(match)) out.push(k); return; }
+      batches.forEach((b, i) => {
+        const bk = `${s.id}|${b.key}`;
+        const bopen = !!q || S.subOpen.has(bk) || (!S.subShut.has(bk) && i === batches.length - 1)
+          || (viewing && b.items.includes(viewing));
+        out.push({ _batch: true, key: bk, no: i + 1, n: b.items.length, at: b.at, open: bopen, what, ids: b.items.map((k) => k.id) });
+        if (bopen) for (const k of b.items.filter(match)) out.push(Object.assign(k, { _deep: true }));
+      });
+    };
     if (tasks.length) {
       const key = s.id;
       const open = !!q || S.subOpen.has(key) || (viewing && subKind(viewing) !== 'review');
       out.push({ _tog: true, key, parent: s.id, kind: 'task', label: '子代理', n: tasks.length, open, ids: tasks.map((k) => k.id) });
-      if (open) {
-        const batches = subBatches(tasks);
-        if (batches.length === 1) for (const k of batches[0].items.filter(match)) out.push(k);
-        else batches.forEach((b, i) => {
-          const bk = `${s.id}|${b.key}`;
-          const bopen = !!q || S.subOpen.has(bk) || (!S.subShut.has(bk) && i === batches.length - 1)
-            || (viewing && b.items.includes(viewing));
-          out.push({ _batch: true, key: bk, no: i + 1, n: b.items.length, at: b.at, open: bopen, ids: b.items.map((k) => k.id) });
-          if (bopen) for (const k of b.items.filter(match)) out.push(Object.assign(k, { _deep: true }));
-        });
-      }
+      if (open) pushBatches(tasks, 20, '子代理');
     }
     if (revs.length) {
       const key = 'rev:' + s.id;
       const open = !!q || S.subOpen.has(key) || (viewing && subKind(viewing) === 'review');
       out.push({ _tog: true, key, parent: s.id, kind: 'review', label: '審核', n: revs.length, open, ids: revs.map((k) => k.id) });
-      if (open) for (const k of revs.filter(match).sort((a, b) => (a.created || 0) - (b.created || 0))) out.push(k);
+      // 一輪方案流程（拓展、方案審核、驗收）一批；舊資料沒有批次 id 的收成一批
+      if (open) pushBatches(revs, Infinity, '審核');
     }
     return out;
   };
@@ -1243,7 +1259,7 @@ function renderSessions() {
       const run = live(s.ids);
       return `<div class="subbatch" data-subbatch="${esc(s.key)}"><span class="car">${s.open ? '▾' : '▸'}</span>`
         + `<span class="lab">第 ${s.no} 批 · ${s.n} 個</span><span class="when">${esc(fmtTime(s.at))}</span>${run ? '<i class="run"></i>' : ''}`
-        + `<span class="sdel" data-delsubs="${esc(s.ids.join(','))}" data-dlab="第 ${s.no} 批子代理" title="刪除這一批">${ico('x')}</span></div>`;
+        + `<span class="sdel" data-delsubs="${esc(s.ids.join(','))}" data-dlab="第 ${s.no} 批${esc(s.what || '子代理')}" title="刪除這一批">${ico('x')}</span></div>`;
     }
     return row(s);
   }).join('');
@@ -2901,8 +2917,12 @@ $('#toBottom').onclick = () => { S.follow = true; const c = $('#chat'); c.scroll
 // 思考框：使用者自己往上捲就不再強制捲到底，捲回底部才恢復；使用者自己展開／收合過就照他的
 // 等待中的三個點旁的字：重試倒數，或已等幾秒／上限（超過 5 秒或重試中才顯示）
 function waitText(sid) {
-  const w = S.wait[sid]; if (!w) return ['', false];
+  const w = S.wait[sid];
   const now = Date.now();
+  if (!w) {
+    const st = S.stage[sid];
+    return st ? [`${st.text} · ${Math.floor((now - st.t0) / 1000)} 秒`, false] : ['', false];
+  }
   if (w.retry && now < w.retry.until) {
     return [`暫時失敗：${w.retry.reason} · ${Math.ceil((w.retry.until - now) / 1000)} 秒後重試（${w.retry.n}/${w.retry.max}）`, true];
   }
@@ -5852,7 +5872,7 @@ function renderPromptsSec(box) {
 const FLOW_PROMPTS = ['plan_review', 'review', 'expand', 'plan_goal', 'plan_redo', 'review_fail'];
 function renderFlowSec(box) {
   IP.only = FLOW_PROMPTS;
-  const f = S.cfg.flow = Object.assign({ plan_rounds: 3, fix_rounds: 1, review_timeout: 300, context_chars: 1500, goal_gate: true, expand_model: '', review_model: '' }, S.cfg.flow || {});
+  const f = S.cfg.flow = Object.assign({ plan_rounds: 3, fix_rounds: 1, review_timeout: 300, context_chars: 1500, goal_gate: true, expand_model: '', review_model: '', max_steps: 30 }, S.cfg.flow || {});
   const mrow = (k, n, tag, d) => {
     const m = (S.models || []).find((x) => x.id === f[k]);
     return `<div class="auxrow" data-f="fl:${k}"><div><b>${n}<i>${tag}</i></b><small>${d}</small><div class="now">${esc(m ? `目前：${m.label || m.id}` : '目前：跟這個對話的模型')}</div></div>`
@@ -5866,7 +5886,8 @@ function renderFlowSec(box) {
   const row = (id, title, hint, ctl) => `<div class="frow" data-f="${id}"><div><b>${title}</b><small>${hint}</small></div><div class="fctl">${ctl}</div></div>`;
   const worst = f.plan_rounds + 1 + f.fix_rounds;
   box.innerHTML = `<div class="card">
-    ${row('flRounds', '方案最多提幾版', '對抗審核打回、或你按「換個做法」時重提。到上限還沒過：問你要照最後一版做、交給模型自己判斷、還是取消；沒回就當作自己判斷，照最後一版繼續（收不回來的事留到最後）。/goal 不問，直接自己判斷。', num('plan_rounds', 1, 10, 1, '版'))}
+    ${row('flSteps', '方案最多幾步', '規劃員照實際工作量拆步驟：小事 1 步，做一整個遊戲、一套系統這種大型工作可以拆很多步，不會硬壓成幾步就當成品驗收。', num('max_steps', 1, 100, 1, '步'))}
+    ${row('flRounds', '方案最多提幾版', '對抗審核打回、或你按「換個做法」時重提。到上限還沒過不會問你，照最後一版做，最後的審核意見交給執行的模型自己判斷要不要補。人工審核模式例外：最後一版是你退的，照舊問你。', num('plan_rounds', 1, 10, 1, '版'))}
     ${row('flFix', '做完驗收後最多補幾輪', '審核模型驗收發現缺口時補做幾輪，每補一輪再驗一次；再驗時先核對上次列的缺口補好了沒，不會每次換一批新要求。0＝不補，只把缺口告訴你。', num('fix_rounds', 0, 5, 1, '輪'))}
     ${row('flWait', '審核／拓展卡住多久就不等', '子代理在思考、輸出或跑工具都算有動靜，會一直等它想完；連續這麼久完全沒動靜才當作卡住，照目前這版繼續。0＝一直等。', num('review_timeout', 0, 3600, 30, '秒'))}
     ${row('flCtx', '附前文最多幾字', '你在對話中接著說（例如「0分」「不夠好 多想」）時，規劃、拓展、審核會一起看到之前在做什麼：你最近說的話，加上一輪回覆的結尾。中文一個字大約一個 token。0＝不附，只看這一句。', num('context_chars', 0, 20000, 500, '字'))}
