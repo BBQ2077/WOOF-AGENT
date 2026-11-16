@@ -908,6 +908,8 @@ function onEvent(ev) {
       // 思考過程中是展開的，commit 成訊息後沿用：不然模型一動，剛才看到一半的思考就自己收起來
       if (sid === S.sid && ev.message.role === 'assistant' && typeof ev.message.id === 'number'
         && S.liveThink && S.liveThink.open !== false) S.thinkCarry = ev.message.id;
+      // 「思考中…」定稿成這則訊息的思考框：選到一半的字跟著搬過去
+      if (sid === S.sid && ev.message.role === 'assistant' && typeof ev.message.id === 'number') S.selCarry = ev.message.id;
       if (S.live[sid]) S.live[sid] = { thinking: '', text: '' };
       if (sid === S.sid) S.liveThink = null;
       if (sid === S.sid) {
@@ -2506,7 +2508,58 @@ function chatMore() {
   renderChat();
   setTimeout(() => { S.chatMoreBusy = false; }, 150);
 }
+// 對話在跑時每一步都會整段重畫：拖曳選字的途中先不畫（放開再補），選好的字記下位置、重畫完選回去
+let CHAT_DRAG = false, CHAT_LATE = null;
+document.addEventListener('mousedown', (e) => { if (e.button === 0 && e.target.closest && e.target.closest('#chat')) CHAT_DRAG = true; }, true);
+function chatDragEnd() {
+  if (!CHAT_DRAG) return;
+  CHAT_DRAG = false;
+  if (!CHAT_LATE) return;
+  const b = CHAT_LATE.bottom; CHAT_LATE = null;
+  setTimeout(() => renderChat(b), 0);   // 等這次點擊送完再畫，不然按到的按鈕已經被換掉
+}
+window.addEventListener('mouseup', chatDragEnd, true);
+window.addEventListener('blur', chatDragEnd);
+document.addEventListener('mousemove', (e) => { if (CHAT_DRAG && !(e.buttons & 1)) chatDragEnd(); }, true);
+const SEL_OWN = '[data-tk], [data-sk], .tool[data-id], [data-mid]';
+function selKey(el) {
+  return el.dataset.tk ? `[data-tk="${CSS.escape(el.dataset.tk)}"]` : el.dataset.sk ? `[data-sk="${CSS.escape(el.dataset.sk)}"]`
+    : el.matches('.tool[data-id]') ? `.tool[data-id="${CSS.escape(el.dataset.id)}"]` : `[data-mid="${CSS.escape(el.dataset.mid)}"]`;
+}
+function saveChatSel(chat) {
+  const s = window.getSelection();
+  if (!s || !s.rangeCount || s.isCollapsed) return null;
+  const pt = (node, off) => {
+    const el = node && (node.nodeType === 1 ? node : node.parentElement);
+    const own = el && chat.contains(el) && el.closest(SEL_OWN);
+    if (!own) return null;
+    // 思考框從「思考中…」變成「思考過程」時標題字數不同：位置從內文算起
+    const tx = el.closest('.tx'), base = tx && own.contains(tx) ? tx : own;
+    const r = document.createRange(); r.selectNodeContents(base); r.setEnd(node, off);
+    return { sel: selKey(own), tx: base !== own, off: r.toString().length };
+  };
+  const a = pt(s.anchorNode, s.anchorOffset), f = pt(s.focusNode, s.focusOffset);
+  return a && f ? { a, f } : null;
+}
+function restoreChatSel(chat, x, carry) {
+  if (!x) return;
+  const pt = (p) => {
+    let own = chat.querySelector(p.sel);
+    if (!own && p.sel === '[data-sk="live-think"]' && carry != null) own = chat.querySelector(`details.think[data-tk^="m${carry}:"]`);
+    if (!own) return null;
+    const base = p.tx ? $('.tx', own) : own;
+    if (!base) return null;
+    if (p.tx && !base.firstChild && own._th != null) { own.open = true; base.textContent = own._th; }
+    const w = document.createTreeWalker(base, NodeFilter.SHOW_TEXT);
+    let left = p.off, n, last = null;
+    while ((n = w.nextNode())) { if (left <= n.length) return [n, left]; left -= n.length; last = n; }
+    return last ? [last, last.length] : null;
+  };
+  const a = pt(x.a), f = pt(x.f);
+  if (a && f) try { window.getSelection().setBaseAndExtent(a[0], a[1], f[0], f[1]); } catch { /* 選回不去就算了 */ }
+}
 function renderChat(scrollBottom) {
+  if (CHAT_DRAG) { CHAT_LATE = { bottom: !!(scrollBottom || (CHAT_LATE && CHAT_LATE.bottom)) }; return; }
   renderTaskBar();
   const chat = $('#chat');
   if (scrollBottom) S.follow = true;
@@ -2518,6 +2571,8 @@ function renderChat(scrollBottom) {
   const keep = chat.scrollTop;
   const anchor = S.follow === false ? chatAnchor(chat) : null;
   const inner = innerScrolls(chat);
+  const selAt = saveChatSel(chat), selCarry = S.selCarry;
+  S.selCarry = null;
   chat.innerHTML = '';
   const results = {};
   for (const m of S.msgs) if (m.role === 'tool') for (const b of m.content) if (b.type === 'tool_result') results[b.id] = b;
@@ -2639,7 +2694,7 @@ function renderChat(scrollBottom) {
           d._th = b.text;
           if (d.open) $('.tx', d).textContent = b.text;
           group.appendChild(d);
-        } else if (b.type === 'text' && b.text) group.appendChild(md(b.text));
+        } else if (b.type === 'text' && b.text) { const x = md(b.text); x.dataset.sk = 'm' + m.id + ':' + bi; group.appendChild(x); }
         else if (b.type === 'tool_call') group.appendChild(toolCard(b, results[b.id]));
         else if (b.type === 'image') { const p = document.createElement('div'); p.className = 'thumbs'; p.style.justifyContent = 'flex-start'; p.innerHTML = `<img data-img="${esc(b.path)}" src="${fileUrl(b.path)}">`; group.appendChild(p); }
       }
@@ -2739,6 +2794,7 @@ function renderChat(scrollBottom) {
   });
   for (const g of chat.querySelectorAll('.msg.bot')) foldTools(g);
   restoreInnerScrolls(chat, inner);
+  restoreChatSel(chat, selAt, selCarry);
   if (S.follow !== false) stickBottom(); else chatRestore(chat, anchor, keep);
   updateToBottom();
   renderTerm();
@@ -2960,7 +3016,7 @@ function fillLive(lv) {
   let d = $(':scope > details.think', lv);
   if (l.thinking) {
     if (!d) {
-      d = document.createElement('details'); d.className = 'think';
+      d = document.createElement('details'); d.className = 'think'; d.dataset.sk = 'live-think';
       d.innerHTML = '<summary>思考中… <small></small></summary><div class="tx"></div>';
       d.open = LT.open ?? true;   // 預設展開：下面開始輸出文字時不要把思考收起來，會看不到
       $('summary', d).addEventListener('click', () => { LT.open = !d.open; });
@@ -2980,7 +3036,12 @@ function fillLive(lv) {
     if (tx._len !== l.thinking.length) {
       const now = performance.now();
       if (!tx._len || now - (tx._at || 0) > 100 || l.thinking.length - tx._len > 600) {
-        tx.textContent = l.thinking; tx._len = l.thinking.length; tx._at = now;
+        // 只把新字接在後面：整段換掉會把正在選的字弄掉
+        const t0 = tx.firstChild;
+        if (t0 && t0.nodeType === 3 && !t0.nextSibling && tx._len && t0.length === tx._len && l.thinking.length > tx._len
+          && l.thinking.startsWith(t0.data)) t0.appendData(l.thinking.slice(tx._len));
+        else tx.textContent = l.thinking;
+        tx._len = l.thinking.length; tx._at = now;
       }
     }
     if (d.open) {
@@ -2993,7 +3054,9 @@ function fillLive(lv) {
     const now = performance.now();
     // 串流時每一格都整段重新 parse markdown，字一多就會把主執行緒吃滿（打字、按送出都會卡）。
     // 有變才重畫，而且最多每 120ms 一次；定稿那次由 renderChat 重畫，不會漏字。
-    if (!old || (old._len !== l.text.length
+    const sel = window.getSelection();
+    const picking = old && sel && !sel.isCollapsed && sel.anchorNode && old.contains(sel.anchorNode);   // 正在選這段字：先不換，取消選取後接著更新
+    if (!old || (!picking && old._len !== l.text.length
       && (now - (old._at || 0) > 120 || l.text.length - old._len > 500))) {
       const box = md(l.text, true); box.classList.add('live-md');
       box._len = l.text.length; box._at = now;
@@ -4839,6 +4902,11 @@ function chatCtxItems(e) {
       } });
       items.push({ label: '複製圖片路徑', run: () => copyText(p) });
     }
+  }
+  const th = e.target.closest('#chat details.think');
+  if (th && !th.classList.contains('hidden')) {
+    const t = th._th != null ? th._th : (th.dataset.sk === 'live-think' ? ((S.live[S.sid] || {}).thinking || '') : (($('.tx', th) || {}).textContent || ''));
+    if (t.trim()) { if (items.length) items.push('-'); items.push({ icon: 'copy', label: `複製思考過程（${t.length} 字）`, run: () => copyText(t) }); }
   }
   const msg = inBox && e.target.closest('#chat .msg');
   if (msg && !im) {

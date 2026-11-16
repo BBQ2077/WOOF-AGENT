@@ -86,6 +86,7 @@ window.WOOF_EN = {
 "複製圖片路徑": "Copy image path",
 "複製這則訊息": "Copy this message",
 "複製程式碼": "Copy code",
+"複製思考過程（{0} 字）": "Copy thinking ({0} chars)",
 "引用到輸入框": "Quote into input",
 "已複製圖片": "Image copied",
 "點一下預覽；右鍵有更多": "Click to preview; right-click for more",
