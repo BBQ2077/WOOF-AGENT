@@ -2678,6 +2678,17 @@ function renderChat(scrollBottom) {
       if (m.meta && m.meta.model) gi.model = m.meta.model;
       if (m.meta && m.meta.out_tok && m.meta.gen_s != null) (gi.steps = gi.steps || []).push(m.meta);
       for (const b of m.content) if (b.type === 'text' && b.text) gi.texts.push(b.text);
+      // 整則（思考、回覆、工具呼叫和結果）照畫面順序留一份文字：只有思考和工具的訊息也複製得到東西
+      gi.parts = gi.parts || [];
+      for (const b of m.content) {
+        if (b.type === 'thinking' && b.text) gi.parts.push(`【思考過程】${NL}${b.text}`);
+        else if (b.type === 'text' && b.text) gi.parts.push(b.text);
+        else if (b.type === 'tool_call') {
+          const a = b.args || {}, r = results[b.id];
+          const arg = typeof a.command === 'string' ? a.command : JSON.stringify(a, null, 2);
+          gi.parts.push(`【${b.name}】${NL}${arg}` + (r ? `${NL}→ ${String(r.output ?? '')}` : ''));
+        }
+      }
       if (m.meta && m.meta.hidden_reasoning) group.insertAdjacentHTML('beforeend', `<div class="think hidden" title="服務商有算思考 token，但沒有把思考內容傳回來，所以看不到過程">思考了 ${m.meta.hidden_reasoning.toLocaleString()} tokens <small>服務商沒回傳內容</small></div>`);
       for (let bi = 0; bi < m.content.length; bi++) {
         const b = m.content[bi];
@@ -2780,6 +2791,8 @@ function renderChat(scrollBottom) {
   for (const id of Object.keys(S.askSel)) if (!S.asks[id]) delete S.askSel[id];
   groups.forEach((g, i) => {
     const gi = g._info;
+    g._text = gi.texts.join(NL + NL);
+    g._all = (gi.parts || []).join(NL + NL);
     if (!gi.lastId || (running && i === groups.length - 1)) return;
     g.dataset.uid = gi.userId || '';
     g.dataset.last = gi.lastId;
@@ -2843,10 +2856,16 @@ function fmtTime(ts) {
   const hm = d.toLocaleTimeString('zh-TW', { hour12: false, hour: '2-digit', minute: '2-digit' });
   return d.toDateString() === now.toDateString() ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
 }
+// 複製一則訊息：有文字回覆就複製回覆；只有思考和工具的就複製整則
+function msgCopyText(el) {
+  if (el.classList.contains('user')) return ($('.bubble', el) || {}).textContent || '';
+  return el._text || el._all || '';
+}
 async function msgAction(act, el) {
   if (act === 'copy') {
-    const text = el.classList.contains('user') ? ($('.bubble', el) || {}).textContent || '' : el._text || '';
-    await navigator.clipboard.writeText(text); notify('ok', '已複製'); return;
+    const text = msgCopyText(el);
+    if (!text.trim()) { notify('error', '這則沒有可複製的內容'); return; }
+    copyText(text); return;
   }
   if (S.running.has(S.sid) && act !== 'fork') { notify('warn', '還在執行中', '先按停止，再重送或重新生成。'); return; }
   if (act === 'retry') { wsSend({ type: 'rerun', session_id: S.sid, from_id: +el.dataset.uid }); return; }
@@ -4910,8 +4929,9 @@ function chatCtxItems(e) {
   }
   const msg = inBox && e.target.closest('#chat .msg');
   if (msg && !im) {
-    const text = msg.classList.contains('user') ? (($('.bubble', msg) || {}).innerText || '') : (msg._text || ($('.md', msg) || msg).innerText || '');
+    const text = msg.classList.contains('user') ? (($('.bubble', msg) || {}).innerText || '') : msg.classList.contains('bot') ? msgCopyText(msg) : (msg.innerText || '');
     if (text.trim()) { if (items.length) items.push('-'); items.push({ icon: 'copy', label: '複製這則訊息', run: () => copyText(text) }); }
+    if (msg._text && msg._all && msg._all !== msg._text) items.push({ icon: 'copy', label: '複製整則（含思考和工具）', run: () => copyText(msg._all) });
   }
   const pr = e.target.closest('pre');
   if (pr && !sel.trim()) items.push({ icon: 'copy', label: '複製程式碼', run: () => copyText((pr.querySelector('code') || pr).innerText) });
