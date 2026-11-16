@@ -1922,10 +1922,36 @@ def retire_images_on_compact(session_id: str, es: dict) -> int:
     return sum(n for mid, n in carriers if mid <= cut[0])
 
 
+def _drop_missing_images(messages: list[dict]) -> list[dict]:
+    """圖檔已經不在（對話或子代理刪掉時跟著清掉、被搬走）：這次請求拿掉那幾張，換成一句說明，其餘照送。
+    資料庫裡的原訊息不動；檔案放回原處就又會送。"""
+    def gone(i: dict) -> bool:
+        return bool(i.get("path")) and not Path(i["path"]).is_file()
+
+    out = []
+    for m in messages:
+        blocks, changed = [], False
+        for b in m.get("content") or []:
+            if b.get("type") == "image" and gone(b):
+                b, changed = {"type": "text", "text": f"[這裡原本附的圖已經不存在，沒有送給你：{b['path']}]"}, True
+            elif b.get("type") == "tool_result" and b.get("images") and any(gone(i) for i in b["images"]):
+                lost = [i for i in b["images"] if gone(i)]
+                keep = [i for i in b["images"] if not gone(i)]
+                b = {**{k: v for k, v in b.items() if k != "images"},
+                     "output": (b.get("output") or "") + f"\n[這裡附的 {len(lost)} 張圖已經不存在，沒有送給你："
+                               + "、".join(str(i["path"]) for i in lost) + "]",
+                     **({"images": keep} if keep else {})}
+                changed = True
+            blocks.append(b)
+        out.append({**m, "content": blocks} if changed else m)
+    return out
+
+
 def trim_images(session_id: str, messages: list[dict], force: bool = False) -> tuple[list[dict], int]:
     """依「收起線」拿掉舊工具圖。收起線存在 engine_state.img_before（訊息 id），只往後移，同一段前綴每次送出都一樣。
     超過張數或大小上限時，從最舊的開始一次收 IMG_BATCH 則，直到放得下；
     force（服務商回 413）時只留最新一則。回傳 (訊息, 這次新收起幾張)。"""
+    messages = _drop_missing_images(messages)
     st = store.get_session(session_id) or {}
     es = st.get("engine_state") or {}
     before = int(es.get("img_before") or 0)
