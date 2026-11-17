@@ -1976,11 +1976,21 @@ def _drop_missing_images(messages: list[dict]) -> list[dict]:
     return out
 
 
+def _drop_hollow_replies(messages: list[dict]) -> list[dict]:
+    """沒有正文也沒有工具呼叫的助手訊息（例如思考到一半被停止，只存下思考）：這次請求不送。
+    這種訊息轉成 API 格式會變成空的 assistant，多數端點會整個請求退件。資料庫裡的原訊息不動。"""
+    def hollow(m: dict) -> bool:
+        return m.get("role") == "assistant" and not any(
+            b.get("type") == "tool_call" or (b.get("type") == "text" and str(b.get("text") or "").strip())
+            for b in m.get("content") or [])
+    return [m for m in messages if not hollow(m)]
+
+
 def trim_images(session_id: str, messages: list[dict], force: bool = False) -> tuple[list[dict], int]:
     """依「收起線」拿掉舊工具圖。收起線存在 engine_state.img_before（訊息 id），只往後移，同一段前綴每次送出都一樣。
     超過張數或大小上限時，從最舊的開始一次收 IMG_BATCH 則，直到放得下；
     force（服務商回 413）時只留最新一則。回傳 (訊息, 這次新收起幾張)。"""
-    messages = _drop_missing_images(messages)
+    messages = _drop_hollow_replies(_drop_missing_images(messages))
     st = store.get_session(session_id) or {}
     es = st.get("engine_state") or {}
     before = int(es.get("img_before") or 0)

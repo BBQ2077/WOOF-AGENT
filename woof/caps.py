@@ -35,7 +35,7 @@ DEFAULT_WAIT = 30
 UNSUPPORTED_PARAM = ("unknown parameter", "unsupported parameter", "unrecognized request argument",
                      "unrecognized parameter", "extra inputs are not permitted", "not supported",
                      "does not support", "doesn't support", "unsupported_parameter", "unknown_parameter",
-                     "invalid parameter", "unexpected keyword", "additional properties", "not allowed")
+                     "invalid parameter", "unexpected keyword", "additional properties", "not allowed", "invalid option")
 EFFORT_WORDS = ("reasoning", "thinking", "chat_template_kwargs", "enable_thinking", "effort")
 IMAGE_REJECT = ("only 'text' content type is supported", "only text content type is supported",
                 "image_url is not supported", "image content is not supported", "multimodal is not supported",
@@ -126,7 +126,8 @@ def apply(m: dict) -> dict:
 
 
 # 某個強度值被拒（例如 muse-ember 不收 reasoning_effort="none"）：換成相近的值，不是整個關掉思考
-EFFORT_FALLBACK = {"none": "minimal", "minimal": "low", "xhigh": "high", "max": "high"}
+# 「關掉思考」各家寫法不同：OpenAI 收 minimal，CommandCode 只收 off；被拒就照這條鏈換下一個值
+EFFORT_FALLBACK = {"none": "minimal", "minimal": "off", "off": "low", "xhigh": "high", "max": "high"}
 
 
 def effort_value(model_id: str, v: str | None) -> str | None:
