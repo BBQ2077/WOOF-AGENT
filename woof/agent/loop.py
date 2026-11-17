@@ -122,6 +122,15 @@ class TurnContext:
         self.write_scope: list | None = None
         # 這一回合的使用者訊息 id：工作區快照（woof/snapshot.py）用它當檢查點
         self.turn_mid: int = 0
+        # 子代理：派出時記在對話裡的唯讀／寫入範圍／工作目錄。不管從哪條路接回（程式重開、在子代理對話裡打字）都照原本的派工
+        sub = (session.get("engine_state") or {}).get("sub") or {}
+        if session.get("parent") and "read_only" in sub:
+            ro = bool(sub["read_only"])
+            self.root_session_id = sub.get("root") or session["parent"]
+            self.tool_exclude |= {"delegate_task", "stop_subagent"} | mutating_tools(ro)
+            self.write_scope = None if ro else [Path(p) for p in sub.get("scope") or []]
+            if sub.get("cwd"):
+                self.cwd = sub["cwd"]
 
 
 async def build_parts(ctx: TurnContext) -> list[dict]:
@@ -1455,8 +1464,11 @@ async def _prepare_subagent(parent: TurnContext, goal: str, context: str = "", m
         rp = root.get("perm") or "auto"
         # 主對話是唯讀時派不出子代理，所以這個子代理一定是切成唯讀之前派的，改用預設權限
         sub_es["perm"] = perms.settings()["default_mode"] if rp == "readonly" else rp
-        es["sub"] = sub_es
-        child = store.update_session(child["id"], engine_state=es) or store.get_session(child["id"])
+    # 派工內容也記在子代理對話裡：程式重開後不管走哪條路接回，範圍都還在
+    sub_es.update(read_only=bool(read_only), scope=[str(p) for p in (write_scope or [])] if not read_only else [],
+                  cwd=str(parent.cwd), root=getattr(parent, "root_session_id", parent.session_id))
+    es["sub"] = sub_es
+    child = store.update_session(child["id"], engine_state=es) or store.get_session(child["id"])
 
     async def emit(ev: dict) -> None:
         await parent.emit(ev)

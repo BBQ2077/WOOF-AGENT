@@ -2515,6 +2515,11 @@ async def _recover_runs() -> None:
     lg = logging.getLogger("woof")
     queued = restore_steer()   # 上次重開前還在排隊的插話／子代理回報放回佇列（照原本順序）
     recs = live.take()
+    # 子代理同時記著 bg 跟 turn 時只走子代理那條（帶著寫入範圍接回），不再當一般回合重複接一次
+    for r in recs.values():
+        if r.get("bg"):
+            r.pop("turn", None)
+            r.pop("flow", None)
     _RECOVERING.update(sid for sid, r in recs.items() if r.get("flow") or r.get("turn"))
     # 要接回的子代理先佔著名額：接回途中主對話或你新派的，不會因為還沒算到它們而超過上限
     for sid, r in recs.items():
