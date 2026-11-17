@@ -1208,6 +1208,8 @@ async def run_model_loop(ctx: TurnContext) -> None:
             raise RuntimeError("模型沒有回傳完整訊息")
         content = final["content"]
         fmeta = final.get("meta") or {}
+        if hasattr(ctx, "think_back"):  # 上一步為了直接寫正文關掉思考，這一步拿到回覆就恢復
+            ctx.effort = ctx.__dict__.pop("think_back")
         _unique_call_ids(ctx, content)
         calls = [b for b in content if b.get("type") == "tool_call"]
         has_text = any(b.get("type") == "text" and str(b.get("text", "")).strip() for b in content)
@@ -1216,10 +1218,18 @@ async def run_model_loop(ctx: TurnContext) -> None:
             if await flush_steer(ctx.session_id, ctx.emit):
                 continue
             if fmeta.get("stop_reason") in ("max_tokens", "length"):
-                # 輸出額度全被思考用掉、正文還沒開始就被截斷：請它精簡思考重來一次；還是一樣就明說原因
+                # 輸出額度全被思考用掉、正文還沒開始就被截斷：思考內容不丟，交回給模型，
+                # 下一步關掉思考、整個輸出額度拿來直接寫正文或呼叫工具；還是一樣就明說原因
                 if not ctx.cont_counts.get("think_out"):
                     ctx.cont_counts["think_out"] = 1
-                    await _add_internal(ctx, "truncated", _P("think_out"))
+                    thought = "\n".join(b.get("text") or "" for b in content if b.get("type") == "thinking").strip() \
+                        or text_buf.get("thinking", "").strip()
+                    if len(thought) > 24000:
+                        thought = "…" + thought[-24000:]
+                    await _add_internal(ctx, "truncated", _P("think_out", thinking=thought or "（沒有收到思考內容）"))
+                    if ctx.effort and ctx.effort != "off":
+                        ctx.think_back = ctx.effort
+                        ctx.effort = "off"
                     continue
                 content = [{"type": "text", "text": "（模型的思考用完了輸出上限，正文還沒開始就被截斷。可以調高這個供應商的輸出上限 max_tokens，"
                                                     "或把思考強度調低後再試。）"}]
