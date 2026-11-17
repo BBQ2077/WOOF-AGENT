@@ -804,7 +804,7 @@ def history(session_id: str) -> list[dict]:
             content = internal.for_model(meta["internal"], content)
         elif meta.get("note") and m["role"] == "user":
             content = [*content, {"type": "text", "text": meta["note"]}]  # 設定變更附在最後
-        out.append({"id": m["id"], "role": m["role"], "content": content, "meta": meta})
+        out.append({"id": m["id"], "role": m["role"], "content": content, "meta": meta, "created": m.get("created")})
         # 工具呼叫沒有對應結果（工具執行中程式被關掉）：補上「沒有結果」，否則 API 會拒絕整段對話
         if m["role"] == "assistant":
             ids = [b["id"] for b in content if b.get("type") == "tool_call"]

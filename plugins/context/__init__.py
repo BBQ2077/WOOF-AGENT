@@ -81,7 +81,8 @@ def _users_section(messages: list[dict], through: int) -> str:
         if room < 200:
             break
         text = _elide(text, min(USER_MAX, room))
-        picked.append("> " + text.replace("\n", "\n> "))
+        when = time.strftime("%m-%d %H:%M", time.localtime(m["created"])) if m.get("created") else ""
+        picked.append((f"> （{when}）" if when else "> ") + text.replace("\n", "\n> "))
         used += len(text)
     return "\n\n".join(picked)
 
