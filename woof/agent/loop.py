@@ -1279,8 +1279,6 @@ async def run_model_loop(ctx: TurnContext) -> None:
             raise RuntimeError("模型沒有回傳完整訊息")
         content = final["content"]
         fmeta = final.get("meta") or {}
-        if hasattr(ctx, "think_back"):  # 上一步為了直接寫正文關掉思考，這一步拿到回覆就恢復
-            ctx.effort = ctx.__dict__.pop("think_back")
         _unique_call_ids(ctx, content)
         calls = [b for b in content if b.get("type") == "tool_call"]
         has_text = any(b.get("type") == "text" and str(b.get("text", "")).strip() for b in content)
@@ -1298,9 +1296,6 @@ async def run_model_loop(ctx: TurnContext) -> None:
                     if len(thought) > 24000:
                         thought = "…" + thought[-24000:]
                     await _add_internal(ctx, "truncated", _P("think_out", thinking=thought or "（沒有收到思考內容）"))
-                    if ctx.effort and ctx.effort != "off":
-                        ctx.think_back = ctx.effort
-                        ctx.effort = "off"
                     continue
                 content = [{"type": "text", "text": "（模型的思考用完了輸出上限，正文還沒開始就被截斷。可以調高這個供應商的輸出上限 max_tokens，"
                                                     "或把思考強度調低後再試。）"}]
