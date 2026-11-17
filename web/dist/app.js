@@ -61,6 +61,10 @@ function draftFlush() {
 const tabNew = (sid, page) => ({ sid: sid || null, page: page || '', msgs: [], follow: true, attach: [], files: [], draft: {}, liveThink: null, top: 0, loaded: false, text: page ? '' : draftGet(sid) });
 const tab = () => S.tabs[S.tab] || (S.tabs[S.tab] = tabNew(null));
 const tabOf = (sid) => (sid ? S.tabs.find((t) => t.sid === sid) : null);
+// 對話還沒開始就先調設定（工具、上下文、插件、工作目錄…）時預先建好的對話。
+// 真的改了設定（或送出訊息）就留著；什麼都沒改就切走或關分頁，把這個空對話刪掉，側欄不會多出空對話
+const PRE = new Set((() => { try { return JSON.parse(localStorage.getItem('woof.premade') || '[]'); } catch { return []; } })());
+const savePre = () => { try { localStorage.setItem('woof.premade', JSON.stringify([...PRE])); } catch {} };
 for (const k of ['sid', 'msgs', 'follow', 'attach', 'files', 'draft', 'liveThink']) {
   Object.defineProperty(S, k, { configurable: true, get: () => tab()[k], set: (v) => { tab()[k] = v; } });
 }
@@ -230,6 +234,40 @@ async function loadTab(t) {
 function renderAll() {
   renderSessions(); renderTitle(); renderModelSelect(); renderChat(); renderComposer(); renderMeter(); renderFiles(); saveTabs();
   applyPage();
+  if (PRE.size) dropPremade();
+}
+// 預先建好、沒改過設定、也沒有任何分頁開著的空對話：刪掉
+async function dropPremade() {
+  for (const sid of [...PRE]) {
+    if (S.tabs.some((t) => t.sid === sid)) continue;
+    PRE.delete(sid); savePre();
+    const s = S.sessions.find((x) => x.id === sid);
+    if (s && (s.busy || S.running.has(sid))) continue;
+    try { await api('DELETE', `/api/sessions/${sid}`); } catch { continue; }
+    S.sessions = S.sessions.filter((x) => x.id !== sid);
+    renderSessions();
+  }
+}
+// 新對話：送出第一則訊息時建立；對話開始前就要調設定時也先建好（記在 PRE）
+async function createSession(m) {
+  const s = await api('POST', '/api/sessions', { model: m.id, effort: effortWant(), perm: currentPerm() });
+  if (!S.sessions.some((x) => x.id === s.id)) S.sessions.unshift(s);
+  S.draft = {};
+  const gateDefault = localStorage.getItem('woof.gate') || 'off';
+  if (gateDefault !== 'off') { await api('POST', `/api/sessions/${s.id}/gate`, { mode: gateDefault }); S.gate[s.id] = gateDefault; }
+  S.sessions = [s, ...S.sessions.filter((x) => x.id !== s.id)]; S.sid = s.id; S.msgs = []; localStorage.setItem('woof.sid', s.id);
+  renderSessions(); renderTitle();
+  return s;
+}
+async function ensureSession() {
+  if (S.sid) return true;
+  const m = selectedModel();
+  if (!m) { notify('warn', '還沒有模型', '先到「設定 → 模型商」新增一個。'); return false; }
+  const text = input.value;
+  try { await createSession(m); } catch (e) { notify('error', '開對話失敗', e.message); return false; }
+  PRE.add(S.sid); savePre();
+  input.value = text; tab().text = text;
+  return true;
 }
 
 // ------------------------------------------------------------------ 插件頁面
@@ -362,6 +400,10 @@ $('#tabbar').addEventListener('click', (e) => {
 
 // ------------------------------------------------------------------ 共用
 async function api(method, path, body, retry = true) {
+  if (PRE.size && method !== 'GET' && method !== 'DELETE') {
+    const pm = /^\/api\/sessions\/([^/?]+)\//.exec(path);
+    if (pm && PRE.delete(pm[1])) savePre();   // 預先建好的對話改了設定：留著
+  }
   const r = await fetch(BASE + path, {
     method, headers: { 'x-woof-token': TOKEN, ...(body ? { 'content-type': 'application/json' } : {}) },
     body: body ? JSON.stringify(body) : undefined,
@@ -2496,7 +2538,7 @@ const MODE_ITEMS = [
 ];
 $('#modePill').onclick = () => openSpick($('#modePill'), MODE_ITEMS, gateNow(), (v) => setGate(v));
 async function togglePlan() {
-  if (!S.sid) { notify('warn', '先開一個對話'); return; }
+  if (!await ensureSession()) return;
   const on = !S.planOn[S.sid];
   await api('POST', `/api/sessions/${S.sid}/plan`, { on });
   S.planOn[S.sid] = on;
@@ -3254,21 +3296,14 @@ async function send() {
     notify('warn', '還沒有模型', '先到「設定 → 模型商」新增一個。'); return;
   }
   if (!m.available) { notify('error', `「${m.label}」不能用`, '它需要的插件沒有載入，到插件頁看看是不是停用或載入失敗。'); return; }
-  const wasNew = !S.sid;
+  const wasNew = !S.sid || PRE.has(S.sid);
   if (S.attach.length && !m.vision) notify('warn', `${m.label} 不能直接看圖`, '圖片會先交給「輔助模型 → 看圖」轉成文字再送。判斷錯了可以到「設定 → 模型商」把這個模型的看圖改成「能看」。');
-  if (!S.sid) {
-    const s = await api('POST', '/api/sessions', { model: m.id, effort: effortWant(), perm: currentPerm() });
-    if (!S.sessions.some((x) => x.id === s.id)) S.sessions.unshift(s);
-    S.draft = {};
-    const gateDefault = localStorage.getItem('woof.gate') || 'off';
-    if (gateDefault !== 'off') { await api('POST', `/api/sessions/${s.id}/gate`, { mode: gateDefault }); S.gate[s.id] = gateDefault; }
-    S.sessions = [s, ...S.sessions.filter((x) => x.id !== s.id)]; S.sid = s.id; S.msgs = []; localStorage.setItem('woof.sid', s.id);
-    renderSessions(); renderTitle();
-  }
+  if (!S.sid) await createSession(m);
   S.follow = true;
   const body = withFileRefs(text);
   const upFiles = (S.files || []).filter((f) => f.data).map((f) => ({ name: f.name, data: f.data, media_type: f.media_type }));
   if (!wsSend({ type: 'send', session_id: S.sid, text: body, images: S.attach, files: upFiles })) return;
+  if (PRE.delete(S.sid)) savePre();
   input.value = ''; S.attach = []; S.files = []; renderAttach(); autosize();
   draftFlush(); if (wasNew) draftPut(null, '');
 }
@@ -3845,7 +3880,7 @@ async function loadCtxData() {
   CP.d = d; CP.stats = st; CP.sid = S.sid;
 }
 async function openCtxPanel(focus) {
-  if (!S.sid) { notify('warn', '先開一個對話'); return; }
+  if (!await ensureSession()) return;
   const p = $('#ctxPanel');
   if (!focus && p.classList.contains('on')) { closeCtxPanel(); return; }
   CP.draft = null;
@@ -4039,7 +4074,7 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('#ctxP
 $('#meter').onclick = () => openCtxPanel();
 
 async function openScopeModal() {
-  if (!S.sid) { notify('warn', '先開一個對話'); return; }
+  if (!await ensureSession()) return;
   let tv, tools, ps;
   try { [tv, tools, ps] = await Promise.all([api('GET', '/api/templates'), api('GET', '/api/tools'), api('GET', '/api/presets')]); }
   catch (e) { notify('error', '讀不到插件資料', e.message); return; }
@@ -4261,7 +4296,7 @@ function dirMenu(x, y, above) {
   if (above) { const m = $('.pop.ctx'); if (m) m.style.top = Math.max(8, y - m.getBoundingClientRect().height) + 'px'; }
 }
 async function pickWorkdir() {
-  if (!S.sid) { notify('warn', '先開一個對話'); return; }
+  if (!await ensureSession()) return;
   let p = '';
   if (D && D.pickFolder) p = await D.pickFolder(S.workdir);
   else p = await promptBox('換工作目錄', '資料夾路徑', S.workdir, { mono: true });
@@ -4477,7 +4512,8 @@ function mountTerm(id) {
   return v;
 }
 async function newTerm(cwd, shell) {
-  if (!S.sid) { notify('warn', '先開一個對話'); return; }
+  if (!await ensureSession()) return;
+  if (PRE.delete(S.sid)) savePre();   // 開了終端機：這個對話留著
   setRight(true);
   if (TM.mode !== 'mine') { TM.mode = 'mine'; localStorage.setItem('woof.tmMode', 'mine'); }
   openTab('paneTerm');
@@ -7368,7 +7404,7 @@ $('#setList').addEventListener('click', async (e) => {
   }
 });
 async function applyPresetNow(p) {
-  if (!S.sid) { notify('warn', '先開一個對話'); return; }
+  if (!await ensureSession()) return;
   try {
     const r = await api('POST', `/api/sessions/${S.sid}/preset`, { id: p.id });
     const s = cur();
