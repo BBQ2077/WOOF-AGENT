@@ -35,7 +35,8 @@ DEFAULT_WAIT = 30
 UNSUPPORTED_PARAM = ("unknown parameter", "unsupported parameter", "unrecognized request argument",
                      "unrecognized parameter", "extra inputs are not permitted", "not supported",
                      "does not support", "doesn't support", "unsupported_parameter", "unknown_parameter",
-                     "invalid parameter", "unexpected keyword", "additional properties", "not allowed", "invalid option")
+                     "invalid parameter", "unexpected keyword", "additional properties", "not allowed", "invalid option",
+                     "is mandatory", "cannot be disabled")
 EFFORT_WORDS = ("reasoning", "thinking", "chat_template_kwargs", "enable_thinking", "effort")
 IMAGE_REJECT = ("only 'text' content type is supported", "only text content type is supported",
                 "image_url is not supported", "image content is not supported", "multimodal is not supported",

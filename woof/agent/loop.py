@@ -124,6 +124,8 @@ class TurnContext:
         self.turn_mid: int = 0
         # 子代理：派出時記在對話裡的唯讀／寫入範圍／工作目錄。不管從哪條路接回（程式重開、在子代理對話裡打字）都照原本的派工
         sub = (session.get("engine_state") or {}).get("sub") or {}
+        if session.get("parent") and "read_only" not in sub:
+            sub = _recover_dispatch(session) or sub
         if session.get("parent") and "read_only" in sub:
             ro = bool(sub["read_only"])
             self.root_session_id = sub.get("root") or session["parent"]
@@ -131,6 +133,62 @@ class TurnContext:
             self.write_scope = None if ro else [Path(p) for p in sub.get("scope") or []]
             if sub.get("cwd"):
                 self.cwd = sub["cwd"]
+
+
+def _recover_dispatch(session: dict) -> dict | None:
+    """舊版派的子代理沒把派工記在自己對話裡：從接回紀錄或主對話當初的 delegate_task 找回唯讀／寫入範圍，記下來。"""
+    import re
+    from woof.agent import live
+    from woof.workspace import of_session as _wd_of
+    sid, pid = session["id"], session.get("parent") or ""
+    found = None
+    try:
+        live._load()
+        bg = (live._live.get(sid) or {}).get("bg") or {}
+    except Exception:
+        bg = {}
+    if "read_only" in bg:
+        found = {"read_only": bool(bg["read_only"]), "scope": [str(p) for p in bg.get("scope") or []],
+                 "cwd": bg.get("cwd") or "", "root": bg.get("root") or pid}
+    else:
+        parent = store.get_session(pid) or {}
+        msgs = store.get_messages(pid) if parent else []
+        calls = {b.get("id"): b for m in msgs if m["role"] == "assistant" for b in m["content"]
+                 if b.get("type") == "tool_call" and b.get("name") == "delegate_task"}
+        for m in msgs:
+            if m["role"] != "tool":
+                continue
+            for b in m["content"]:
+                out = str(b.get("output") or "")
+                if b.get("type") != "tool_result" or sid not in out or b.get("id") not in calls:
+                    continue
+                args = calls[b["id"]].get("args") or {}
+                tasks = args.get("tasks") if isinstance(args.get("tasks"), list) else [args]
+                tasks = [{"mode": args.get("mode"), "scope": args.get("scope"), **t} for t in tasks if isinstance(t, dict)]
+                if not tasks:
+                    continue
+                ids = list(dict.fromkeys(re.findall(r"\b[0-9a-f]{12}\b", out)))
+                t = tasks[ids.index(sid)] if sid in ids and ids.index(sid) < len(tasks) else tasks[0]
+                if len({(str(x.get("mode") or ""), str(x.get("scope") or "")) for x in tasks}) > 1 and sid not in ids:
+                    continue
+                cwd = Path(_wd_of(parent))
+                scope = []
+                for raw in str(t.get("scope") or "").replace(",", ";").split(";"):
+                    raw = raw.strip()
+                    if raw:
+                        p = Path(os.path.expanduser(raw))
+                        scope.append(str((p if p.is_absolute() else cwd / p).resolve()))
+                write = str(t.get("mode") or "").strip().lower() == "write" or (not t.get("mode") and bool(scope))
+                found = {"read_only": not write, "scope": scope if write else [], "cwd": str(cwd),
+                         "root": pid}
+    if not found:
+        return None
+    fresh = store.get_session(sid) or session
+    es = dict(fresh.get("engine_state") or {})
+    sub = {**(es.get("sub") or {}), **found}
+    es["sub"] = sub
+    store.update_session(sid, engine_state=es)
+    return sub
 
 
 async def build_parts(ctx: TurnContext) -> list[dict]:

@@ -382,6 +382,8 @@ class OpenAICompat:
         wait_budget = int(model.get("rate_limit_wait") or 0)
         if not model.get("vision") and _has_image(messages):
             messages = await _describe_images(self.woof, messages)
+        if effort == "off" and "off" in (caps.learned(model["id"]).get("bad_effort") or []):
+            effort = "low"   # 這個模型的思考關不掉（例如推理是強制的）：改用最低強度
         while True:
             entry = pool.get()
             base = str(model.get("base_url") or "")
@@ -421,6 +423,13 @@ class OpenAICompat:
                         # 只是這個強度值不收：換相近的值重送
                         caps.learn_bad_effort(model["id"], wire)
                         yield {"type": "notice", "text": f"{name} 不收思考強度「{wire}」，改用「{caps.effort_value(model['id'], wire) or '不送'}」並記住"}
+                        tried = 0
+                        continue
+                    if effort == "off" and not wire and caps.is_effort_reject(body):
+                        # 思考關不掉（端點說推理是強制的）：記住，改用最低強度重送，不是整個不送強度
+                        caps.learn_bad_effort(model["id"], "off")
+                        yield {"type": "notice", "text": f"{name} 的思考不能關，改用最低強度「low」並記住"}
+                        effort = "low"
                         tried = 0
                         continue
                     if effort and model.get("effort_style", "none") != "none" and caps.is_effort_reject(body):
