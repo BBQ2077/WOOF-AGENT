@@ -604,7 +604,11 @@ async def _approved(call: dict, ctx: TurnContext) -> tuple[bool, str]:
     if name in ("tool_search", "tool_describe", "tool_call"):  # 延遲載入的橋接；拆開後每一筆照常檢查
         return True, ""
     headless = bool((st.get("engine_state") or {}).get("headless"))
-    r = perms.decide(st.get("perm") or "auto", name, call.get("args") or {}, headless)
+    perm = st.get("perm") or "auto"
+    if ctx.session_id != sid:   # 子代理：用它自己派出時記下的權限，不看主對話現在切成什麼
+        own = (((store.get_session(ctx.session_id) or {}).get("engine_state") or {}).get("sub") or {}).get("perm")
+        perm = own if own in perms.MODES else perm
+    r = perms.decide(perm, name, call.get("args") or {}, headless)
     if r["decision"] == "deny":
         return False, _P("perm_denied", reason=r["reason"])
     # 「這個對話都允許」＝使用者對這個對話整個放行，危險指令也算（絕對禁止、黑名單在上面已經擋掉，不受影響）
@@ -1442,6 +1446,17 @@ async def _prepare_subagent(parent: TurnContext, goal: str, context: str = "", m
         store.update_session(child["id"], parent=parent.session_id, engine_state={"sub": sub})
         child = store.get_session(child["id"])
         await parent.emit({"type": "session_updated", "session": child})
+    # 權限：子代理用派出那一刻主對話的權限，之後主對話再切換，已經在跑的子代理不跟著變
+    from woof import perms
+    es = dict(child.get("engine_state") or {})
+    sub_es = dict(es.get("sub") or {})
+    if sub_es.get("perm") not in perms.MODES:
+        root = store.get_session(getattr(parent, "root_session_id", parent.session_id)) or {}
+        rp = root.get("perm") or "auto"
+        # 主對話是唯讀時派不出子代理，所以這個子代理一定是切成唯讀之前派的，改用預設權限
+        sub_es["perm"] = perms.settings()["default_mode"] if rp == "readonly" else rp
+        es["sub"] = sub_es
+        child = store.update_session(child["id"], engine_state=es) or store.get_session(child["id"])
 
     async def emit(ev: dict) -> None:
         await parent.emit(ev)
