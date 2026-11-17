@@ -6730,6 +6730,8 @@ function renderVendors(box) {
         <input data-mf="label" value="${esc(m.label || '')}" placeholder="顯示名稱">
         <input data-mf="model" value="${esc(m.model || '')}" placeholder="API 模型名稱" class="mono">
         <input data-mf="context_window" value="${esc(m.context_window || '')}" placeholder="200000" class="mono">
+        <input data-mf="think_cap" value="${esc(m.think_cap || '')}" placeholder="不限" class="mono" title="思考最多用幾個 token（邊收邊估，到了就停，已想好的內容照樣交給下一步去做）。留空＝不限">
+        <input data-mf="max_tokens" value="${esc(m.max_tokens || '')}" placeholder="預設" class="mono" title="這個模型單次回覆最多輸出幾個 token（思考也算在內）。留空＝用模型商插件設定的預設值；填超過模型上限會被拒收">
         ${S.cfg.cost_on ? `<input data-mf="price" value="${esc((m.price || []).join(' / '))}" placeholder="—" class="mono" title="美元／每百萬 token：輸入 / 輸出 / 快取讀取，例如 3 / 15 / 0.3。快取沒填就照輸入價；留空＝不算錢">` : ''}
         <input data-mf="efforts" value="${esc(effs.join(', '))}" placeholder="${autoEff.length ? '自動 ' + autoEff.map((e) => EFFORT_LABEL[e] || e).join('/') : '沒有思考'}" title="${autoEff.length ? '留空＝自動偵測，目前偵測到：' + esc(autoEff.join(', ')) + '。要固定就填，例如 low, medium, high' : '沒偵測到思考強度；這個模型支援的話照 API 填，例如 low, medium, high'}" class="mono">
         <select data-mf="default_effort"><option value="">${effs.length ? '—' : '自動'}</option>${opt(effs, m.default_effort, EFFORT_LABEL)}</select>
@@ -6750,7 +6752,7 @@ function renderVendors(box) {
             <label>思考回傳</label><select data-vf="echo_reasoning" title="模型上一步的思考要不要跟著送回去">${opt(['', 'all', 'off'], v.echo_reasoning === true ? 'all' : v.echo_reasoning === false ? 'off' : (v.echo_reasoning || ''), { '': '自動：工具呼叫鏈內保留，新回合捨棄', all: '每回合都保留（DeepSeek 必須）', off: '都不回傳' })}</select>
             <label>API 介面</label><select data-vf="api_style" title="這個模型商走哪種 OpenAI API。沒設定＝自動：官方 OpenAI 的推理模型走 Responses，其他相容端點維持 Chat Completions。模型自己在設定檔寫了就以模型的為準">${opt(['', 'chat', 'responses'], v.api_style || '', { '': '自動（推理模型走 Responses）', chat: 'Chat Completions', responses: 'Responses API' })}</select>` : ''}
         </div>
-        <div class="mtable${S.cfg.cost_on ? ' priced' : ''}"><div class="mth"><span>顯示名稱</span><span>API 模型名稱</span><span>上下文</span>${S.cfg.cost_on ? '<span title="美元／每百萬 token：輸入 / 輸出 / 快取讀取">單價 $/M</span>' : ''}<span>思考強度</span><span>預設</span><span>看圖</span><span></span></div>
+        <div class="mtable${S.cfg.cost_on ? ' priced' : ''}"><div class="mth"><span>顯示名稱</span><span>API 模型名稱</span><span>上下文</span><span title="思考最多用幾個 token（邊收邊估，到了就停，已想好的內容照樣交給下一步去做）。留空＝不限">思考上限</span><span title="這個模型單次回覆最多輸出幾個 token（思考也算在內）。留空＝用模型商插件設定的預設值；填超過模型上限會被拒收">輸出上限</span>${S.cfg.cost_on ? '<span title="美元／每百萬 token：輸入 / 輸出 / 快取讀取">單價 $/M</span>' : ''}<span>思考強度</span><span>預設</span><span>看圖</span><span></span></div>
           ${mrows || '<div class="mtempty">還沒有模型</div>'}</div>
         ${learnedNote(models.map(([m]) => m))}
         <div class="vfoot"><span class="btn" data-addmodel>${ico('plus')}手動加模型</span>${v.provider !== 'claude_cli' ? `<span class="btn" data-fetchmodels>${ico('download')}從 API 取得模型</span>` : ''}${(discOf(v) || {}).has_key ? `<span class="btn" data-refreshmodels>${ico('download')}重新檢索</span>` : ''}<span class="btn" data-probe>${ico('play')}測試連線</span><span class="grow"></span>${FIXED_VENDORS.has(v.id) ? (v.key_pool && S.cfg.keys.some((k) => k.pool === v.key_pool) ? `<span class="btn danger" data-delkey>${ico('trash')}刪除 API key</span>` : '') : `<span class="btn danger" data-delvendor>${ico('trash')}刪除模型商</span>`}</div>
@@ -7046,7 +7048,7 @@ $('#setList').addEventListener('input', (e) => {
     const m = S.cfg.models[+tr.dataset.mi];
     const f = el.dataset.mf;
     if (f === 'efforts') m.efforts = el.value.split(/[,，\s]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
-    else if (f === 'context_window') m.context_window = el.value.trim() ? Number(el.value.replace(/[^0-9]/g, '')) : undefined;
+    else if (f === 'context_window' || f === 'max_tokens' || f === 'think_cap') m[f] = el.value.trim() ? Number(el.value.replace(/[^0-9]/g, '')) || undefined : undefined;
     else if (f === 'price') {
       const nums = el.value.split(/[\/,，\s]+/).map((s) => s.trim()).filter(Boolean).map(Number).filter((n) => Number.isFinite(n) && n >= 0).slice(0, 3);
       m.price = nums.length ? nums : undefined;

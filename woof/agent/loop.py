@@ -1077,6 +1077,9 @@ async def run_model_loop(ctx: TurnContext) -> None:
         got = False   # 收到過模型的資料了沒（服務商自己的提示不算）
         sdk_tok = SDK_RETRIES.set(0)
         cut = False
+        think_cut = False           # 思考到了模型設定的思考上限，自己停下來
+        think_chars = 0
+        think_cap = int(ctx.model_cfg.get("think_cap") or 0)
         try:
             # 卡住偵測：開始回應前等 first_s 秒，之後每收到一筆資料就重新算 idle_s 秒；逾時丟 StallTimeout 走下面的重試
             async with asyncio.timeout(first_s or None) as tmo:
@@ -1101,6 +1104,14 @@ async def run_model_loop(ctx: TurnContext) -> None:
                         kind = "text" if t == "text_delta" else "thinking"
                         text_buf[kind] += ev["text"]
                         await ctx.emit({"type": "delta", "session_id": ctx.session_id, "kind": kind, "text": ev["text"]})
+                        # 思考上限：邊收邊估（每 600 字估一次），到了就停，不要等它把輸出額度燒光
+                        if think_cap and kind == "thinking" and not text_buf["text"]:
+                            think_chars += len(ev["text"])
+                            if think_chars >= 600:
+                                think_chars = 0
+                                if estimate_text(text_buf["thinking"]) >= think_cap:
+                                    think_cut = cut = True
+                                    break
                     elif t == "usage":
                         usage = {k: ev.get(k) for k in ("input_tokens", "output_tokens", "cache_read", "cache_write")}
                         out_tok = ev.get("output_tokens") or out_tok
@@ -1193,7 +1204,15 @@ async def run_model_loop(ctx: TurnContext) -> None:
         store.log_op(ctx.session_id, "model", ctx.model_cfg.get("id"), (time.time() - t_req) * 1000,
                      (t_first - t_req) * 1000 if t_first else None)
         api_retry = big_retry = 0
-        if cut:
+        if think_cut:
+            # 跟「思考用完輸出額度」走同一條路：內容只有思考，下一步關掉思考照著已想好的做
+            body = text_buf["text"]
+            final = {"content": [{"type": "thinking", "text": text_buf["thinking"]}]
+                     + ([{"type": "text", "text": body}] if body.strip() else []),
+                     "meta": {"stop_reason": "max_tokens"}}
+            await ctx.emit({"type": "notice", "session_id": ctx.session_id,
+                            "text": f"思考到了上限（{think_cap:,} token），先停下來照已想好的做"})
+        elif cut:
             part = []
             if text_buf["text"].strip():
                 if text_buf["thinking"]:
