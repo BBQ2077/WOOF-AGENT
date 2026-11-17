@@ -4509,25 +4509,40 @@ function keyRows(list) {
       + `<span class="qh">${esc(k.hint)}${until ? ' · ' + esc(until) : ''}${k.note ? ' · ' + esc(k.note) : ''}</span></div>`;
   }).join('');
 }
+// 額度分頁哪些卡片要隱藏（存本機，勾掉就不顯示也不查詢）
+let QHIDE = new Set();
+try { QHIDE = new Set(JSON.parse(localStorage.getItem('woof.quotaHide') || '[]')); } catch { QHIDE = new Set(); }
+const qShown = (id) => !QHIDE.has(id);
+function quotaCfgHtml() {
+  const list = [['usage', '用量（本機紀錄）'], ...(S.quotaExtra || []),
+    ...(S.quotaList || []).map((v) => [v.pool, v.label]), ['keys_llm', '模型商金鑰'], ['keys_tool', '搜尋與工具 API']];
+  return '<div class="qcard qcfg"><div class="qbody">' + list.map(([id, label]) =>
+    `<label class="qrow"><span class="ql">${esc(label)}</span><input type="checkbox" data-qshow="${esc(id)}"${qShown(id) ? ' checked' : ''}></label>`).join('') + '</div></div>';
+}
 function renderKeys(fetchUsage) {
   const pane = $('#paneKeys');
   const llm = llmPools();
   const all = S.keys || {};
   let html = '<div class="sec">模型商</div>';
+  if (!qShown('keys_llm')) html = '';
   let shown = 0;
   for (const [pool, names] of llm) {
+    if (!qShown('keys_llm')) break;
     if (!(all[pool] || []).length) continue;
     shown += 1;
     html += `<div class="qcard"><div class="qtop">${avatar(names[0])}<div class="qhd"><b>${esc(names.join('、'))}</b><small>金鑰池 ${esc(pool)} · ${(all[pool] || []).length} 把</small></div></div>`
       + `<div class="qbody">${keyRows(all[pool])}</div></div>`;
   }
-  if (!shown) html += '<div class="qempty">目前沒有已設好 key 的 API 模型商；設定好 key 後才會出現額度。</div>';
+  if (!shown && qShown('keys_llm')) html += '<div class="qempty">目前沒有已設好 key 的 API 模型商；設定好 key 後才會出現額度。</div>';
   const tools = Object.keys(all).filter((p) => !llm.has(p));
-  html += '<div class="sec">搜尋與工具 API</div>';
-  html += tools.length ? tools.map((pool) => `<div class="qcard"><div class="qtop">${avatar(TOOL_POOL_LABEL[pool] || pool)}<div class="qhd"><b>${esc(TOOL_POOL_LABEL[pool] || pool)}</b><small>${esc(TOOL_POOL_DESC[pool] || '金鑰池 ' + pool)} · ${all[pool].length} 把</small></div></div>`
+  if (qShown('keys_tool')) html += '<div class="sec">搜尋與工具 API</div>';
+  if (qShown('keys_tool')) html += tools.length ? tools.map((pool) => `<div class="qcard"><div class="qtop">${avatar(TOOL_POOL_LABEL[pool] || pool)}<div class="qhd"><b>${esc(TOOL_POOL_LABEL[pool] || pool)}</b><small>${esc(TOOL_POOL_DESC[pool] || '金鑰池 ' + pool)} · ${all[pool].length} 把</small></div></div>`
     + `<div class="qbody">${keyRows(all[pool])}</div></div>`).join('') : '<div class="qempty">沒有工具類的 key</div>';
   html += '<p class="foot">同一池的 key 用完一把才換下一把。重置日：商家有提供的以商家為準，其餘依 config 的 billing_day（沒設就不顯示）。</p>';
-  pane.innerHTML = usageCardHtml() + '<div class="sec">剩餘額度 <span class="ib" data-quota-refresh title="重新查詢">' + ico('refresh') + '</span></div><div id="quotaBox">讀取中…</div>' + html;
+  pane.innerHTML = (qShown('usage') ? usageCardHtml() : '<div id="budgetBox"></div>')
+    + '<div class="sec">剩餘額度 <span class="ib" data-quota-refresh title="重新查詢">' + ico('refresh') + '</span>'
+    + '<span class="ib" data-quota-cfg title="選擇要顯示哪些卡片">' + ico('more') + '</span></div>'
+    + (S.quotaCfgOpen ? quotaCfgHtml() : '') + '<div id="quotaBox">讀取中…</div>' + html;
   loadUsage();
   loadQuota();
 }
@@ -4535,7 +4550,10 @@ function renderKeys(fetchUsage) {
 async function loadQuota(force) {
   try {
     const r = await api('GET', `/api/quota${force ? '?force=1' : ''}`);
-    const rows = (r.vendors || []).map((v) => {
+    const first = !S.quotaList;
+    S.quotaList = (r.vendors || []).map((v) => ({ pool: v.pool, label: v.label }));
+    if (first && S.quotaCfgOpen) { const c = $('#paneKeys .qcfg'); if (c) c.outerHTML = quotaCfgHtml(); }
+    const rows = (r.vendors || []).filter((v) => qShown(v.pool)).map((v) => {
       const head = `<div class="qcard"><div class="qtop">${avatar(v.label)}<div class="qhd"><b>${esc(v.label)}</b><small>金鑰池 ${esc(v.pool)}</small></div></div>`;
       if (!v.supported) return head + '<div class="qbody"><small class="qmuted">這家沒有提供餘額查詢端點</small></div></div>';
       if (!v.ok) return head + `<div class="qbody"><small class="qerr">查詢失敗：${esc(v.error || '未知')}</small></div></div>`;
@@ -4554,12 +4572,22 @@ async function loadQuota(force) {
       else if (v.next_billing) reset = `<small class="qmuted">帳單日每月 ${v.billing_day} 日 · 下次 ${esc(v.next_billing)}</small>`;
       const warn = v.available === false ? '<small class="qerr">商家回報目前不可用（餘額不足？）</small>' : '';
       const plan = v.plan ? `<small class="qmuted">方案 ${esc(v.plan)}</small>` : '';
-      return head + `<div class="qbody">${items}${reset}${plan}${warn}</div></div>`;
+      const note = v.note ? `<small class="qmuted">${esc(v.note)}</small>` : '';
+      return head + `<div class="qbody">${items}${reset}${plan}${note}${warn}</div></div>`;
     }).join('');
-    const bx = $('#quotaBox'); if (bx) bx.innerHTML = rows || '<div class="qempty">沒有可查詢的 key</div>';
+    const bx = $('#quotaBox'); if (bx) bx.innerHTML = rows || ((r.vendors || []).length ? '' : '<div class="qempty">沒有可查詢的 key</div>');
   } catch (e) { const bx = $('#quotaBox'); if (bx) bx.innerHTML = `<div class="qempty">讀取失敗：${esc(e.message)}</div>`; }
 }
-$('#paneKeys').addEventListener('click', (e) => { if (e.target.closest('[data-quota-refresh]')) loadQuota(true); });
+$('#paneKeys').addEventListener('click', (e) => {
+  if (e.target.closest('[data-quota-refresh]')) loadQuota(true);
+  if (e.target.closest('[data-quota-cfg]')) { S.quotaCfgOpen = !S.quotaCfgOpen; renderKeys(); }
+});
+$('#paneKeys').addEventListener('change', (e) => {
+  const cb = e.target.closest('[data-qshow]'); if (!cb) return;
+  if (cb.checked) QHIDE.delete(cb.dataset.qshow); else QHIDE.add(cb.dataset.qshow);
+  try { localStorage.setItem('woof.quotaHide', JSON.stringify([...QHIDE])); } catch {}
+  renderKeys(true);
+});
 $('#paneKeys').addEventListener('click', (e) => {
   const ur = e.target.closest('[data-urange]');
   if (ur) { S.usageRange = ur.dataset.urange; $$('[data-urange]').forEach((x) => x.classList.toggle('on', x === ur)); loadUsage(); return; }
@@ -6698,6 +6726,8 @@ const VENDOR_TEMPLATES = {
   'Alibaba Coding Plan': { label: 'Alibaba Coding Plan', provider: 'openai_compat', base_url: 'https://coding-intl.dashscope.aliyuncs.com/v1', key_pool: 'alibaba-coding-plan' },
   'Arcee AI': { label: 'Arcee AI', provider: 'openai_compat', base_url: 'https://api.arcee.ai/api/v1', key_pool: 'arcee' },
   'CommandCode': { label: 'CommandCode', provider: 'openai_compat', base_url: 'https://api.commandcode.ai/provider/v1', key_pool: 'commandcode' },
+  'OpenCode Zen': { label: 'OpenCode Zen', provider: 'openai_compat', base_url: 'https://opencode.ai/zen/v1', key_pool: 'opencode-zen' },
+  'OpenCode Go': { label: 'OpenCode Go', provider: 'openai_compat', base_url: 'https://opencode.ai/zen/go/v1', key_pool: 'opencode-zen' },
   'DeepInfra': { label: 'DeepInfra', provider: 'openai_compat', base_url: 'https://api.deepinfra.com/v1/openai', key_pool: 'deepinfra' },
   'Fireworks AI': { label: 'Fireworks AI', provider: 'openai_compat', base_url: 'https://api.fireworks.ai/inference/v1', key_pool: 'fireworks' },
   'GMI Cloud': { label: 'GMI Cloud', provider: 'openai_compat', base_url: 'https://api.gmi-serving.com/v1', key_pool: 'gmi' },

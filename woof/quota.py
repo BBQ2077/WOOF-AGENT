@@ -1,6 +1,7 @@
 """各家剩餘額度查詢（只讀端點，不呼叫模型、不花錢）。
 
-支援：DeepSeek（餘額）、OpenRouter（金鑰額度）、CommandCode（訂閱的 5 小時／每週／每月用量）、Tavily（用量）、Firecrawl（點數）。
+支援：DeepSeek（餘額）、OpenRouter（金鑰額度）、CommandCode（訂閱的 5 小時／每週／每月用量）、
+OpenCode Go（訂閱的 5 小時／每週／每月用量；和 Zen 共用同一把 key，Zen 餘額沒有查詢端點）、Tavily（用量）、Firecrawl（點數）。
 沒有餘額端點的商（NVIDIA NIM、Ollama 等）回傳 supported=False。
 結果快取 120 秒，避免每次開面板都打一次。
 """
@@ -19,7 +20,13 @@ CACHE_TTL = 120
 _cache: dict[str, tuple[float, dict]] = {}
 
 # 依 key_pool 名稱對應查詢函式
-SUPPORTED = {"deepseek", "openrouter", "commandcode", "tavily", "firecrawl"}
+SUPPORTED = {"deepseek", "openrouter", "commandcode", "opencode-zen", "opencode-go", "tavily", "firecrawl"}
+
+
+class HTTPFail(RuntimeError):
+    def __init__(self, code: int, body: str) -> None:
+        super().__init__(f"HTTP {code}")
+        self.code, self.body = code, body
 
 
 def _get(url: str, key: str, timeout: float = 15) -> dict:
@@ -29,7 +36,11 @@ def _get(url: str, key: str, timeout: float = 15) -> dict:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8", "replace") or "{}")
     except urllib.error.HTTPError as e:
-        raise RuntimeError(f"HTTP {e.code}") from None
+        try:
+            body = e.read().decode("utf-8", "replace")[:1000]
+        except OSError:
+            body = ""
+        raise HTTPFail(e.code, body) from None
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         raise RuntimeError(f"連線失敗：{getattr(e, 'reason', e)}") from None
 
@@ -135,6 +146,31 @@ def _fetch_commandcode(key: str) -> dict:
     return out
 
 
+def _fetch_opencode(key: str) -> dict:
+    """OpenCode Go 訂閱用量：官方 GET /zen/go/v1/usage（API key 就能查，只讀）。沒訂閱時官方回 403。"""
+    try:
+        d = _get("https://opencode.ai/zen/go/v1/usage", key)
+    except HTTPFail as e:
+        if e.code == 403 and "subscription required" in e.body.lower():
+            return {"items": [{"label": "Go 訂閱", "value": "未訂閱", "unit": ""}],
+                    "note": "訂閱 OpenCode Go 後，這裡會顯示 5 小時、每週、每月用量；Zen 餘額沒有查詢端點"}
+        raise
+    now_ms = time.time() * 1000
+    items = []
+    for k, label in (("rollingUsage", "5 小時"), ("weeklyUsage", "每週"), ("monthlyUsage", "每月")):
+        w = d.get(k) or {}
+        if w.get("usagePercent") is None:
+            continue
+        pct = max(0.0, min(100.0, float(w["usagePercent"])))
+        if str(w.get("status") or "ok").lower() != "ok":
+            pct = 100.0
+        reset = now_ms + float(w["resetInSec"]) * 1000 if w.get("resetInSec") is not None else None
+        items.append({"label": label, "value": f"已用 {pct:.0f}%", "unit": "", "pct": pct, "reset_ms": reset})
+    if "useBalance" in d:
+        items.append({"label": "用完改扣餘額", "value": "開" if d.get("useBalance") else "關", "unit": ""})
+    return {"items": items, "plan": "OpenCode Go"}
+
+
 def _fetch_tavily(key: str) -> dict:
     d = _get("https://api.tavily.com/usage", key)
     k = d.get("key") or {}
@@ -159,6 +195,7 @@ def _fetch_firecrawl(key: str) -> dict:
 
 
 FETCH = {"deepseek": _fetch_deepseek, "openrouter": _fetch_openrouter, "commandcode": _fetch_commandcode,
+         "opencode-zen": _fetch_opencode, "opencode-go": _fetch_opencode,
          "tavily": _fetch_tavily, "firecrawl": _fetch_firecrawl}
 
 
