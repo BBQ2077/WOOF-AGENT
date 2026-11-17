@@ -4542,13 +4542,19 @@ async function loadQuota(force) {
       const items = (v.items || []).map((it) => {
         const bar = it.pct == null ? '' : `<div class="ubar"><i style="width:${it.pct.toFixed(1)}%" class="${it.pct >= 90 ? 'bad' : it.pct >= 70 ? 'warn' : ''}"></i></div>`;
         const neg = /^欠費/.test(String(it.value));
-        return `<div class="qrow"><span class="ql">${esc(it.label)}</span><span class="qh${neg ? ' qerr' : ''}">${esc(it.value)}${it.unit ? ' ' + esc(it.unit) : ''}</span></div>${bar}`;
+        let rs = '';
+        if (it.reset_ms != null) {
+          const t = typeof it.reset_ms === 'number' ? (it.reset_ms < 1e12 ? it.reset_ms * 1000 : it.reset_ms) : Date.parse(it.reset_ms);
+          if (Number.isFinite(t)) rs = `<small class="qmuted">${esc(new Date(t).toLocaleString('zh-TW', { hour12: false, month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }))} 重置</small>`;
+        }
+        return `<div class="qrow"><span class="ql">${esc(it.label)}</span><span class="qh${neg ? ' qerr' : ''}">${esc(it.value)}${it.unit ? ' ' + esc(it.unit) : ''}</span></div>${bar}${rs}`;
       }).join('');
       let reset = '';
       if (v.reset_at) reset = `<small class="qmuted">重置：${esc(new Date(v.reset_at).toLocaleDateString('zh-TW'))}</small>`;
       else if (v.next_billing) reset = `<small class="qmuted">帳單日每月 ${v.billing_day} 日 · 下次 ${esc(v.next_billing)}</small>`;
       const warn = v.available === false ? '<small class="qerr">商家回報目前不可用（餘額不足？）</small>' : '';
-      return head + `<div class="qbody">${items}${reset}${warn}</div></div>`;
+      const plan = v.plan ? `<small class="qmuted">方案 ${esc(v.plan)}</small>` : '';
+      return head + `<div class="qbody">${items}${reset}${plan}${warn}</div></div>`;
     }).join('');
     const bx = $('#quotaBox'); if (bx) bx.innerHTML = rows || '<div class="qempty">沒有可查詢的 key</div>';
   } catch (e) { const bx = $('#quotaBox'); if (bx) bx.innerHTML = `<div class="qempty">讀取失敗：${esc(e.message)}</div>`; }

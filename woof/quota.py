@@ -1,6 +1,6 @@
 """各家剩餘額度查詢（只讀端點，不呼叫模型、不花錢）。
 
-支援：DeepSeek（餘額）、OpenRouter（金鑰額度）、Tavily（用量）、Firecrawl（點數）。
+支援：DeepSeek（餘額）、OpenRouter（金鑰額度）、CommandCode（訂閱的 5 小時／每週／每月用量）、Tavily（用量）、Firecrawl（點數）。
 沒有餘額端點的商（NVIDIA NIM、Ollama 等）回傳 supported=False。
 結果快取 120 秒，避免每次開面板都打一次。
 """
@@ -19,11 +19,12 @@ CACHE_TTL = 120
 _cache: dict[str, tuple[float, dict]] = {}
 
 # 依 key_pool 名稱對應查詢函式
-SUPPORTED = {"deepseek", "openrouter", "tavily", "firecrawl"}
+SUPPORTED = {"deepseek", "openrouter", "commandcode", "tavily", "firecrawl"}
 
 
 def _get(url: str, key: str, timeout: float = 15) -> dict:
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {key}", "Accept": "application/json"})
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {key}", "Accept": "application/json",
+                                               "User-Agent": "WOOF"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8", "replace") or "{}")
@@ -85,6 +86,55 @@ def _fetch_openrouter(key: str) -> dict:
     return {"items": items}
 
 
+def _pct(used, cap) -> float | None:
+    try:
+        return max(0.0, min(100.0, float(used) / float(cap) * 100)) if float(cap) > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _fetch_commandcode(key: str) -> dict:
+    """CommandCode 訂閱用量：它自己的 CLI 指令 /usage 用的 /alpha 端點（API key 就能查，只讀）。"""
+    base = "https://api.commandcode.ai/alpha"
+    d = _get(f"{base}/billing/credits", key)
+    items = []
+    wl = d.get("windowLimits") or {}
+    for k, label in (("fiveHour", "5 小時"), ("weekly", "每週")):
+        w = wl.get(k) or {}
+        if w.get("cap") is None:
+            continue
+        items.append({"label": label, "value": f"{_money(w.get('used'))} / {_money(w.get('cap'))}", "unit": "USD",
+                      "pct": 100.0 if w.get("exceeded") else _pct(w.get("used"), w.get("cap")), "reset_ms": w.get("resetAt")})
+    c = d.get("credits") or {}
+    period_end, plan, ending = None, "", False
+    try:
+        s = (_get(f"{base}/billing/subscriptions", key).get("data") or {})
+        period_end, plan = s.get("currentPeriodEnd"), s.get("planId") or ""
+        ending = bool(s.get("cancelAtPeriodEnd") or s.get("cancelAt"))
+    except RuntimeError:
+        pass
+    left = c.get("monthlyCredits")
+    used = None
+    try:
+        used = _get(f"{base}/usage/summary", key).get("totalMonthlyCredits")
+    except RuntimeError:
+        pass
+    if left is not None:
+        if used is not None:
+            total = float(left) + float(used)
+            items.append({"label": "本月額度", "value": f"剩 {_money(left)} / {_money(total)}", "unit": "USD",
+                          "pct": _pct(used, total), "reset_ms": period_end})
+        else:
+            items.append({"label": "本月剩餘", "value": _money(left), "unit": "USD", "reset_ms": period_end})
+    for k, label in (("purchasedCredits", "加購額度"), ("freeCredits", "贈送額度")):
+        if float(c.get(k) or 0):
+            items.append({"label": label, "value": _money(c.get(k)), "unit": "USD"})
+    out = {"items": items}
+    if plan:
+        out["plan"] = plan + ("（不續訂）" if ending else "")
+    return out
+
+
 def _fetch_tavily(key: str) -> dict:
     d = _get("https://api.tavily.com/usage", key)
     k = d.get("key") or {}
@@ -108,7 +158,7 @@ def _fetch_firecrawl(key: str) -> dict:
     return {"items": items, "reset_at": reset}
 
 
-FETCH = {"deepseek": _fetch_deepseek, "openrouter": _fetch_openrouter,
+FETCH = {"deepseek": _fetch_deepseek, "openrouter": _fetch_openrouter, "commandcode": _fetch_commandcode,
          "tavily": _fetch_tavily, "firecrawl": _fetch_firecrawl}
 
 
