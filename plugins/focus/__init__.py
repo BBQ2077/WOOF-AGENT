@@ -58,7 +58,7 @@ def build(session: dict, msgs: list[dict], step: int, max_steps: int, budget: in
     lines: list[str] = []  # 依重要性排，超過上限從後面砍
     todos = es.get("todos") or []
     if todos:
-        done = sum(1 for t in todos if t.get("status") in ("done", "skipped"))
+        done = sum(1 for t in todos if t.get("status") in ("done", "skipped", "cancelled"))
         doing = next((t["text"] for t in todos if t.get("status") == "doing"), "")
         nxt = next((t["text"] for t in todos if t.get("status") == "pending"), "")
         bits = [f"待辦 {done}/{len(todos)} 完成"]

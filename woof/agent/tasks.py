@@ -22,7 +22,8 @@ from woof import store
 
 log = logging.getLogger("woof.tasks")
 
-TODO_STATUS = ("pending", "doing", "done", "skipped", "failed")
+TODO_STATUS = ("pending", "doing", "done", "skipped", "failed", "cancelled")
+TODO_CLOSED = ("done", "skipped", "failed", "cancelled")
 PLAN_TOOLS = {"write_file", "patch", "terminal", "process"}
 ASKS: dict[str, dict] = {}
 GOAL_TASKS: dict[str, asyncio.Task] = {}
@@ -340,14 +341,36 @@ def resolve_ask(aid: str, answer) -> bool:
 
 
 def set_todos(session_id: str, items: list[dict]) -> list[dict]:
+    """模型寫 TODO：使用者取消的項目（同樣文字）保持取消，模型不能改回；cancelled 只有使用者能設。"""
+    gone = {t.get("text") for t in (_state(session_id).get("todos") or []) if t.get("status") == "cancelled"}
     clean = []
     for it in items:
         if not isinstance(it, dict) or not str(it.get("text") or "").strip():
             continue
+        text = str(it["text"]).strip()
         st = str(it.get("status") or "pending")
-        clean.append({"text": str(it["text"]).strip(), "status": st if st in TODO_STATUS else "pending"})
+        st = "cancelled" if text in gone else ("skipped" if st == "cancelled" else st if st in TODO_STATUS else "pending")
+        clean.append({"text": text, "status": st})
     _save(session_id, todos=clean)
     return clean
+
+
+def cancel_todo(session_id: str, index: int, text: str, cancel: bool) -> tuple[list[dict], str]:
+    """使用者在畫面上取消（或恢復）一項 TODO。回傳 (新清單, 原本狀態)；找不到回 ([], "")。"""
+    items = [dict(t) for t in (_state(session_id).get("todos") or [])]
+    i = index if 0 <= index < len(items) and items[index].get("text") == text else \
+        next((k for k, t in enumerate(items) if t.get("text") == text), None)
+    if i is None:
+        return [], ""
+    old = str(items[i].get("status") or "pending")
+    if cancel and old in ("pending", "doing", "failed"):
+        items[i]["status"] = "cancelled"
+    elif not cancel and old == "cancelled":
+        items[i]["status"] = "pending"
+    else:
+        return items, old
+    _save(session_id, todos=items)
+    return items, old
 
 
 async def _push_todos(turn_emit, session_id: str, items: list[dict]) -> None:
@@ -408,10 +431,10 @@ def resume_digest(session_id: str, tools: int = 8, ask: bool = True) -> str:
     """「繼續」時把已經做過的事交給模型，省掉它從頭逛一遍專案（list_tree、重讀每個檔）。"""
     s = store.get_session(session_id) or {}
     out: list[str] = []
-    todos = s.get("todos") or []
+    todos = (s.get("engine_state") or {}).get("todos") or []
     if todos:
         done = sum(1 for t in todos if t.get("status") == "done")
-        left = [str(t.get("text") or "") for t in todos if t.get("status") != "done"]
+        left = [str(t.get("text") or "") for t in todos if t.get("status") not in TODO_CLOSED]
         out.append(f"待辦 {done}/{len(todos)}" + ("；還沒完成：" + "；".join(left[:5]) if left else "（都做完了）"))
     from woof.agent.loop import bg_children
 
@@ -850,10 +873,12 @@ async def run_goal(session_id: str, objective: str, emit, steps: list[str] | Non
             _goal_save(session_id, objective, "running", steps, i)
             _goal_set(session_id, doing=step)
             await _push_todos(emit, session_id, items)
+            live_steps = [t["text"] for t in items if t.get("status") != "cancelled"]
             if first and resume_reason and was_doing == step:
                 ok = await _resume_step(ctx, session_id, resume_reason, emit)   # 中斷在這一項做到一半：接著做完
             else:
-                ok = await _run_step(ctx, session_id, objective, step, i, len(steps), emit, plan=steps, notes=notes, ref=ref)
+                ok = await _run_step(ctx, session_id, objective, step, live_steps.index(step) if step in live_steps else i,
+                                     len(live_steps), emit, plan=live_steps, notes=notes, ref=ref)
             first = False
             if not ok:
                 failed += 1
@@ -873,6 +898,9 @@ async def run_goal(session_id: str, objective: str, emit, steps: list[str] | Non
         # 驗收、補做在哪一段也存著：程式重開接回時，補到一半的接著補完、再驗，輪數照算，不從頭驗
         fix_max = flow_settings()["fix_rounds"]
         _goal_set(session_id, doing=None)
+        cur_todos = _state(session_id).get("todos") or []
+        if cur_todos:   # 使用者取消的項目不交給驗收，不然會被當成缺口補回來
+            steps = [t["text"] for t in cur_todos if t.get("status") != "cancelled"] or steps
         rc = resume_check if first else None   # 接回時 TODO 還有沒做的就照常做完、重新驗收
         if rc and rc.get("phase") == "fix" and rc.get("gaps"):
             rnd0, gaps = int(rc.get("rnd") or 1), list(rc["gaps"])

@@ -689,6 +689,17 @@ body.resizing iframe,body.resizing webview{pointer-events:none}
 .todo.doing .ti{color:var(--acc);opacity:1}
 .todo.done{opacity:.55;text-decoration:line-through}
 .todo.failed{color:var(--warn)}
+.todo{display:flex;align-items:baseline;gap:2px}
+.todo .tt{flex:1;min-width:0}
+.todo.cancelled{opacity:.5}
+.todo.cancelled .tt{text-decoration:line-through}
+.todo-x{flex:none;font-size:11px;color:var(--faint);cursor:pointer;padding:0 6px;border-radius:var(--r-sm);visibility:hidden}
+.todo:hover .todo-x,.todo.cancelled .todo-x{visibility:visible}
+.todo-x:hover{background:var(--hover);color:var(--text)}
+.cp-win{display:flex;align-items:center;gap:8px}
+.cp-win input{flex:1;min-width:0;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:var(--r-sm);padding:6px 8px}
+.cp-win input:focus{border-color:var(--acc);outline:none}
+.cp-win>span:not(.btn){font-size:12px;color:var(--dim)}
 
 .subtog,.subbatch{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dim);padding:3px 8px 3px 22px;margin:0 6px;
   border-radius:7px;cursor:pointer;user-select:none;min-height:22px}

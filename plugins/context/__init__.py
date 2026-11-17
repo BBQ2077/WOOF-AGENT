@@ -194,7 +194,7 @@ def register(woof):
 
         from woof import tokens
 
-        window = tokens.window_of(ctx.model_cfg)
+        window = tokens.window_of(ctx.model_cfg, ctx.session_id)
         if not window:
             return
 
@@ -216,7 +216,7 @@ def register(woof):
         from woof import tokens
 
         model = ctx.model_cfg
-        window = tokens.window_of(model)
+        window = tokens.window_of(model, ctx.session_id)
         force = bool(getattr(ctx, "force_compact", False))
         can = model.get("provider") in ctx.registry.providers or aux_model("compact", None)
         if not can:

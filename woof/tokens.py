@@ -105,9 +105,22 @@ def reestimate(session_id: str, window: int | None = None) -> dict:
     return usage
 
 
-def window_of(model_cfg: dict | None) -> int:
+def session_window(session_id: str | None) -> int:
+    """這個對話自己設的上下文大小（上下文面板調的）；0＝照壓縮設定。"""
+    if not session_id:
+        return 0
+    from woof import store
+
+    try:
+        return max(0, int(((store.get_session(session_id) or {}).get("engine_state") or {}).get("ctx_window") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def window_of(model_cfg: dict | None, session_id: str | None = None) -> int:
     """這個對話算用量、判斷壓縮時用的上下文大小。
-    壓縮設定填了「上下文大小」就用它（不超過模型本身的窗口）；沒填（0）就用模型的 context_window。"""
+    這個對話在上下文面板設了上限就用它；否則壓縮設定填了「上下文大小」就用它；都沒填（0）就用模型的 context_window。
+    都不超過模型本身的窗口。"""
     from woof.loader import REG
 
     mw = int((model_cfg or {}).get("context_window") or 0)
@@ -116,6 +129,8 @@ def window_of(model_cfg: dict | None) -> int:
         cap = int((info.settings or {}).get("window") or 0) if info and info.enabled else 0
     except (TypeError, ValueError):
         cap = 0
+    if info and info.enabled:
+        cap = session_window(session_id) or cap
     if cap > 0:
         return min(cap, mw) if mw else cap
     return mw

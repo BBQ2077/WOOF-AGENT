@@ -22,6 +22,7 @@ LABEL = {
     "resume": "中斷後接續",
     "bg_done": "背景指令結束",
     "steps_low": "步數快用完",
+    "todo_cancel": "使用者改了待辦",
 }
 
 

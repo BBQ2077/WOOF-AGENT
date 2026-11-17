@@ -2215,16 +2215,21 @@ function renderTaskBar() {
   const bar = $('#taskBar'); if (!bar) return;
   renderModePill();
   const rs = resumeInfo();
-  const ICON = { pending: '○', doing: '◐', done: '●', skipped: '–', failed: '✕' };
+  const ICON = { pending: '○', doing: '◐', done: '●', skipped: '–', failed: '✕', cancelled: '⊘' };
   const todos = S.todos[S.sid] || [];
   // ask_user 的卡片不放這裡：它是「對話的一部分」，放在對話串尾端跟著捲（見 renderChat），
   // 放輸入區上方會固定佔版面，把對話區壓到看不見上下文。
   let h = '';
   if (todos.length) {
     const done = todos.filter((t) => t.status === 'done').length;
+    const live = todos.filter((t) => t.status !== 'cancelled').length;
     // 收合狀態每個對話各自記住，進度更新重畫時照舊，不會自己彈開
-    h += `<details class="todos"${todoFolded(S.sid) ? '' : ' open'}><summary>TODO ${done}/${todos.length}</summary>`
-      + todos.map((t) => `<div class="todo ${esc(t.status)}"><span class="ti">${ICON[t.status] || '○'}</span>${esc(t.text)}</div>`).join('')
+    // 沒做完的項目右邊有「取消」；取消的可以「恢復」。只有使用者能取消，模型不能改回
+    const act = (t, i) => ['pending', 'doing', 'failed'].includes(t.status)
+      ? `<span class="todo-x" data-todo-x="${i}" title="取消這項：模型不再做${t.status === 'doing' ? '（正在做的會停手）' : ''}">取消</span>`
+      : t.status === 'cancelled' ? `<span class="todo-x" data-todo-back="${i}" title="恢復這項">恢復</span>` : '';
+    h += `<details class="todos"${todoFolded(S.sid) ? '' : ' open'}><summary>TODO ${done}/${live}${live < todos.length ? `（取消 ${todos.length - live}）` : ''}</summary>`
+      + todos.map((t, i) => `<div class="todo ${esc(t.status)}"><span class="ti">${ICON[t.status] || '○'}</span><span class="tt">${esc(t.text)}</span>${act(t, i)}</div>`).join('')
       + '</details>';
   }
   if (rs) {
@@ -2244,7 +2249,19 @@ $('#taskBar').addEventListener('toggle', (e) => {
   if (e.target.open) s.add(S.sid); else s.delete(S.sid);
   localStorage.setItem('woof.todoOpen', JSON.stringify([...s].slice(-200)));
 }, true);
-$('#taskBar').addEventListener('click', (e) => {
+$('#taskBar').addEventListener('click', async (e) => {
+  const tx = e.target.closest('[data-todo-x],[data-todo-back]');
+  if (tx && S.sid) {
+    e.preventDefault();
+    const sid = S.sid, cancel = tx.hasAttribute('data-todo-x');
+    const i = Number(cancel ? tx.dataset.todoX : tx.dataset.todoBack), t = (S.todos[sid] || [])[i];
+    if (!t) return;
+    try {
+      const r = await api('POST', `/api/sessions/${sid}/todos/cancel`, { index: i, text: t.text, cancel });
+      S.todos[sid] = r.items || []; if (sid === S.sid) renderTaskBar();
+    } catch (err) { notify('error', cancel ? '取消失敗' : '恢復失敗', err.message); }
+    return;
+  }
   if (e.target.closest('[data-resume]')) continueRun();
   else if (e.target.closest('[data-resume-x]')) { const r = resumeInfo(); if (r) S.resumeHide[S.sid] = r.key; renderTaskBar(); }
 });
@@ -3882,6 +3899,12 @@ function renderCtxPanel() {
       <small>${used.toLocaleString()} / ${win ? win.toLocaleString() : '—'} tokens${win ? `（${pct.toFixed(1)}%）` : ''}</small></div>
     <div class="cp-stats">${cells.map(([k, v]) => `<div><span>${k}</span><b>${esc(String(v))}</b></div>`).join('')}</div>
     <div class="cp-sec">
+      <div class="cp-sh"><b>上下文上限（這個對話）</b><span class="pr-badge${sessWin() ? ' ov' : ''}">${sessWin() ? '這個對話自訂' : '照設定'}</span></div>
+      <small class="cp-note">只改這個對話：壓縮門檻和用量圈都照這個數字算。留空或 0＝照「設定 → 上下文壓縮」（目前 ${S.ctxCap ? Number(S.ctxCap).toLocaleString() + ' token' : '照模型'}）。比模型本身的上下文（${Number(m && m.context_window) ? Number(m.context_window).toLocaleString() : '—'}）大時以模型為準。調小後，下一次送出前超過門檻就先壓縮。${S.ctxOn === false ? '<b>壓縮插件目前關閉，這個設定不會生效。</b>' : ''}</small>
+      <div class="cp-win"><input id="cpWin" type="number" min="0" step="1000" placeholder="0＝照設定" value="${sessWin() || ''}"><span>token</span>
+        <span class="btn" data-cp="winReset">照設定</span><span class="btn primary" data-cp="winSave">套用</span></div>
+    </div>
+    <div class="cp-sec">
       <div class="cp-sh"><b>基礎提示詞</b><span class="pr-badge ${isOv ? 'ov' : ''}">${isOv ? '已手動覆寫' : '使用預設'}</span></div>
       <small class="cp-note">只取代這個對話的「基礎提示詞」，插件片段（記憶、專案指示、技能、MCP）照常加入。存了從下一則訊息起生效，但系統提示詞在最前面，<b>改它會讓這個對話的快取整段重算一次</b>（之後照常命中）。只是想補一句要求，直接在對話裡講比較省。</small>
       <textarea id="cpPrompt" class="pr-ta" spellcheck="false">${esc(draft)}</textarea>
@@ -3942,6 +3965,17 @@ $('#ctxPanel').addEventListener('click', async (e) => {
   if (k === 'aux') { closeCtxPanel(); openSettings('aux'); return; }
   if (k === 'webset') { closeCtxPanel(); showView('plug'); return; }
   if (k === 'compact') { await compactNow(); await refreshCtxPanel(); return; }
+  if (k === 'winSave' || k === 'winReset') {
+    const sid = S.sid, v = k === 'winReset' ? 0 : Math.max(0, Math.round(Number($('#cpWin').value) || 0));
+    try {
+      const r = await api('POST', `/api/sessions/${sid}/ctx_window`, { window: v });
+      const s = S.sessions.find((x) => x.id === sid);
+      if (s) { s.engine_state = { ...(s.engine_state || {}) }; if (r.window) s.engine_state.ctx_window = r.window; else delete s.engine_state.ctx_window; }
+      notify('ok', r.window ? `這個對話的上下文上限：${Number(r.effective || r.window).toLocaleString()} token` : '這個對話改回照設定');
+      renderMeter(); renderCtxPanel();
+    } catch (err) { notify('error', '設定失敗', err.message); }
+    return;
+  }
   if (k === 'style') { pickStyle(b); return; }
   if (k === 'noop') { notify('info', b.title || '這個工具不能在這裡開'); return; }
   if (k === 'toolOff' || k === 'toolKeep') {
@@ -6125,12 +6159,14 @@ async function pfSave(auto) {
 const CMP_KEYS = ['window', 'method', 'parallel', 'ratio', 'trigger', 'keep'];
 // 壓縮用的上下文大小（設定頁填的）；0＝照模型。用量圈、上下文面板都用它算百分比
 async function loadCtxCap() {
-  try { const p = (await api('GET', '/api/plugins')).find((r) => r.name === 'context'); S.ctxCap = p && p.enabled ? Number((p.settings || {}).window) || 0 : 0; }
+  try { const p = (await api('GET', '/api/plugins')).find((r) => r.name === 'context'); S.ctxOn = !!(p && p.enabled); S.ctxCap = p && p.enabled ? Number((p.settings || {}).window) || 0 : 0; }
   catch { S.ctxCap = S.ctxCap || 0; }
   renderMeter();
 }
+// 這個對話在上下文面板設的上限；0＝照設定。壓縮插件關掉時不算
+const sessWin = () => S.ctxOn === false ? 0 : Number(((cur() || {}).engine_state || {}).ctx_window) || 0;
 function winOf(u, m) {
-  const mw = Number(m && m.context_window) || 0, cap = Number(S.ctxCap) || 0;
+  const mw = Number(m && m.context_window) || 0, cap = sessWin() || Number(S.ctxCap) || 0;
   if (cap > 0) return mw ? Math.min(cap, mw) : cap;
   return mw || Number(u && u.context_window) || 0;
 }

@@ -58,7 +58,8 @@ def register(woof):
     woof.add_tool(
         "todo",
         "更新這個對話的 TODO 清單（會顯示在聊天區上方）。每次都傳完整清單。"
-        "status 只能是 pending、doing、done、skipped、failed。多步驟工作開始時先列清單，做完一步就更新。",
+        "status 只能是 pending、doing、done、skipped、failed。多步驟工作開始時先列清單，做完一步就更新。"
+        "cancelled 是使用者在畫面上取消的項目：不要做，也不能改回，照原狀態放在清單裡。",
         todo_schema,
         todo,
     )

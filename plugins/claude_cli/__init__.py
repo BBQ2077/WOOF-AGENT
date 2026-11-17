@@ -208,7 +208,7 @@ class ClaudeCLI:
                 usage = {"input_tokens": total, "output_tokens": u.get("output_tokens"),
                          "cache_read": u.get("cache_read_input_tokens"),
                          "cache_write": u.get("cache_creation_input_tokens"),
-                         "context_window": __import__("woof.tokens", fromlist=["window_of"]).window_of(ctx.model_cfg) or None}
+                         "context_window": __import__("woof.tokens", fromlist=["window_of"]).window_of(ctx.model_cfg, sid) or None}
                 es["usage"] = usage
                 await ctx.emit({"type": "usage", "session_id": sid, **usage})
             return False

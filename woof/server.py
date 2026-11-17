@@ -2692,6 +2692,60 @@ async def session_tasks(sid: str):
     return {"todos": st.get("todos") or [], "goal": st.get("goal") or None, "plan": bool(st.get("plan")), "gate": st.get("gate") or "off"}
 
 
+@app.post("/api/sessions/{sid}/todos/cancel")
+async def cancel_todo_ep(sid: str, body: dict):
+    """使用者在畫面上取消（cancel=true）或恢復（false）一項 TODO。
+    模型正在做事時排一則通知，這一步結束就看到：取消的停手、不要做；恢復的照常做。閒置時不另開回合。"""
+    from woof.agent import tasks
+    from woof.agent.internal import meta as _imeta
+
+    if not store.get_session(sid):
+        raise HTTPException(404)
+    text = str(body.get("text") or "")
+    cancel = bool(body.get("cancel", True))
+    try:
+        idx = int(body.get("index", -1))
+    except (TypeError, ValueError):
+        idx = -1
+    items, old = tasks.cancel_todo(sid, idx, text, cancel)
+    if not old:
+        raise HTTPException(404, "找不到這項 TODO（可能剛被模型改掉）")
+    await broadcast({"type": "todos", "session_id": sid, "items": items})
+    changed = old in ("pending", "doing", "failed") if cancel else old == "cancelled"
+    if changed and ((sid in RUNS and not RUNS[sid].done()) or tasks.is_running(sid)):
+        msg = (f"使用者在畫面上取消了 TODO「{text}」：這項不要做了，正在做就停手，接著做其他項目；不要改回。"
+               if cancel else f"使用者在畫面上恢復了 TODO「{text}」：這項照常要做。")
+        push_steer(sid, [{"type": "text", "text": msg}], _imeta("todo_cancel"))
+        await broadcast({"type": "queue", "session_id": sid,
+                         "items": [{"text": it["blocks"][0].get("text", "") if it["blocks"] else "",
+                                    "internal": (it.get("meta") or {}).get("internal")} for it in peek_steer(sid)]})
+    return {"ok": True, "items": items}
+
+
+@app.post("/api/sessions/{sid}/ctx_window")
+async def set_ctx_window(sid: str, body: dict):
+    """這個對話自己的上下文上限（token）：壓縮門檻和用量圈都照它算。0＝照「設定 → 上下文壓縮」。
+    比模型本身的上下文窗口大時以模型為準。下一次送出前檢查，超過門檻就先壓縮。"""
+    s = store.get_session(sid)
+    if not s:
+        raise HTTPException(404)
+    try:
+        n = max(0, int(body.get("window") or 0))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "window 要是整數（0＝照設定）")
+    if 0 < n < 8000:
+        raise HTTPException(400, "上限至少 8000 token")
+    st = dict(s.get("engine_state") or {})
+    if n:
+        st["ctx_window"] = n
+    else:
+        st.pop("ctx_window", None)
+    store.update_session(sid, engine_state=st)
+    from woof.tokens import window_of
+
+    return {"ok": True, "window": n, "effective": window_of(REG.model_cfg(s.get("model")), sid)}
+
+
 @app.post("/api/sessions/{sid}/goal")
 async def start_goal_ep(sid: str, body: dict):
     from woof.agent import tasks

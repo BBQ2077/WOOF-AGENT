@@ -1181,7 +1181,7 @@ async def run_model_loop(ctx: TurnContext) -> None:
                         in_tok = ev.get("input_tokens") or in_tok
                         cache_tok = ev.get("cache_read") or cache_tok
                         from woof.tokens import window_of
-                        usage["context_window"] = window_of(ctx.model_cfg) or None
+                        usage["context_window"] = window_of(ctx.model_cfg, ctx.session_id) or None
                         # input_tokens 已含快取讀寫；上下文用量＝輸入＋輸出。through＝這次請求包含到哪一則（用量錨點）
                         usage["context_used"] = int(usage.get("input_tokens") or 0) + int(usage.get("output_tokens") or 0)
                         usage["through"] = through
