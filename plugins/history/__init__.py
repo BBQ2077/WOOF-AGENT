@@ -54,6 +54,16 @@ def register(woof):
         sid = str(args.get("session_id") or "").strip()
         limit = max(1, min(int(args.get("limit") or 5), 10))
         here = tctx.session_id
+        if sid and q:
+            # 指定對話裡找關鍵字（包括目前這個對話：壓縮掉的較早原文從這裡查）
+            if not store.get_session(sid):
+                return {"output": f"沒有這個對話：{sid}", "is_error": True}
+            hits = [h for h in store.search_messages(q, limit=limit * 6, sid=sid)][:limit * 3]
+            if not hits:
+                return {"output": f"對話 {sid} 裡找不到「{q}」"}
+            lines = [f"對話 {sid} 裡「{q}」出現 {len(hits)} 處（要看前後文：session_id 同上，around=訊息編號）"]
+            lines += [f"  #{h['mid']} {h['role']}（{_when(h['created'])}）：{h['snippet']}" for h in hits]
+            return {"output": "\n".join(lines)}
         if sid:
             s = store.get_session(sid)
             if not s:
@@ -101,11 +111,12 @@ def register(woof):
     woof.add_tool(
         "session_search",
         "搜尋或翻閱過去的對話紀錄（全文檢索）。使用者問「之前做過什麼」「上次停在哪」「某某是哪次講的」時使用。"
-        "query＝找關鍵字（多個關鍵字用空白隔開，全部都要出現）；session_id＝讀那個對話，加 around＝訊息編號只讀那則前後；"
-        "都不填＝列出最近的對話。搜尋不含目前這個對話。只查對話紀錄，查不到不代表事情不存在。",
+        "query＝找關鍵字（多個關鍵字用空白隔開，全部都要出現）；session_id＝讀那個對話，加 around＝訊息編號只讀那則前後，"
+        "加 query＝只在那個對話裡找（目前這個對話也可以，壓縮掉的較早原文從這裡查）；"
+        "都不填＝列出最近的對話。只填 query 時不含目前這個對話。只查對話紀錄，查不到不代表事情不存在。",
         {"type": "object", "properties": {
             "query": {"type": "string", "description": "關鍵字，空白隔開"},
-            "session_id": {"type": "string", "description": "要讀的對話 id"},
+            "session_id": {"type": "string", "description": "要讀或要在裡面找的對話 id（可以是目前這個對話）"},
             "around": {"type": "integer", "description": "訊息編號（搜尋結果的 #數字），只讀那則前後幾則"},
             "after": {"type": "string", "description": "只找這之後的：7d、24h、2w 或 2026-11-01"},
             "limit": {"type": "integer", "description": "最多幾個對話，預設 5"},

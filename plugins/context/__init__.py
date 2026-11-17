@@ -25,7 +25,13 @@ _bg: dict[str, asyncio.Task] = {}
 
 MSG_CAP = 6000       # 單則訊息送給摘要的字數上限
 SEG_MIN = 12000      # 每段至少這麼多字才值得分開
-TARGET_MIN, TARGET_MAX = 400, 12000
+# 摘要長度（token）：被摘要內容的「摘要比例」，至少 2000，最多上下文的 5%、且不超過 10000；送給模型時換算成字
+SUM_MIN_TOK, SUM_MAX_TOK, SUM_WIN = 2000, 10000, 0.05
+CHARS_PER_TOK = 1.5
+# 最近的訊息除了「保留最近幾輪」，另外至少留上下文的 2.5%（一萬到兩萬五千 token）原樣：最近幾輪都很短時才不會只剩幾則
+TAIL_MIN_TOK, TAIL_MAX_TOK, TAIL_WIN = 10000, 25000, 0.025
+# 摘要後面附上被壓縮那段裡使用者的原話（新的在前）：合計上限、單則上限（字）
+USERS_BUDGET, USER_MAX = 24000, 4000
 MID_KEEP = 2         # 回合中途壓縮時，保留最近幾步（模型呼叫＋工具結果）原樣
 WHO = {"user": "使用者", "assistant": "助手", "tool": "工具"}
 
@@ -53,6 +59,31 @@ def _text_of(content: list) -> str:
         elif t == "image":
             parts.append(f"[圖片 {b.get('path', '')}]")
     return "\n".join(p for p in parts if p).strip()
+
+
+def _elide(text: str, cap: int) -> str:
+    if len(text) <= cap:
+        return text
+    head = cap * 3 // 4
+    return f"{text[:head]}\n…（中間省略 {len(text) - cap} 字）…\n{text[-(cap - head):]}"
+
+
+def _users_section(messages: list[dict], through: int) -> str:
+    """被壓縮那段（id ≤ through）裡使用者親口講的話，新的在前，照字數上限收。內部訊息（接續、回報…）不算。"""
+    picked, used = [], 0
+    for m in reversed(messages):
+        if m.get("role") != "user" or int(m.get("id") or 0) > through or (m.get("meta") or {}).get("internal"):
+            continue
+        text = "\n".join(b.get("text") or "" for b in m.get("content") or [] if b.get("type") == "text").strip()
+        if not text:
+            continue
+        room = USERS_BUDGET - used
+        if room < 200:
+            break
+        text = _elide(text, min(USER_MAX, room))
+        picked.append("> " + text.replace("\n", "\n> "))
+        used += len(text)
+    return "\n\n".join(picked)
 
 
 def _render(items: list[tuple[str, str]]) -> str:
@@ -109,11 +140,13 @@ def register(woof):
                          emit, session_id: str) -> tuple[str, int]:
         mode = _mode()
         base = _prompt_in("compact", mode)
-        if prev:
-            items = [("先前摘要", prev), *items]
+        size = (f"\n長度約 {target} 字以內；路徑、數字、名稱、決定、未完成事項寧可多留，不要為了縮短漏掉。")
+        # 已經有摘要：是「更新」不是重寫——先前摘要原樣交給模型，只把新的對話併進去，不會一次次越摘越短
+        upd = f"\n{_prompt_in('compact_update', mode)}" if prev else ""
+        head = f"【先前摘要】\n{prev}\n\n【之後新增的對話】\n" if prev else ""
         segs = _segments(items, _parallel())
         if len(segs) == 1:
-            return await _call(model, f"{base}\n約 {target} 字以內。", _render(segs[0])), 1
+            return await _call(model, f"{base}{upd}{size}", head + _render(segs[0])), 1
         n = len(segs)
         per = max(200, target // n)
         await emit({"type": "notice", "session_id": session_id,
@@ -125,7 +158,7 @@ def register(woof):
         await emit({"type": "notice", "session_id": session_id, "text": f"{n} 段都摘要完成，正在合併…"})
         merged = "\n\n".join(f"【第 {i + 1} 段摘要】\n{p}" for i, p in enumerate(parts))
         tail = f"\n{_STRUCT}" if mode == "常規" else ""
-        final = await _call(model, f"{_prompt_in('compact_merge', mode)}{tail}\n約 {target} 字以內。", merged)
+        final = await _call(model, f"{_prompt_in('compact_merge', mode)}{tail}{upd}{size}", head + merged)
         return final, n
 
     async def _precompact(session_id: str, model: dict, registry, emit) -> None:
@@ -210,6 +243,20 @@ def register(woof):
         else:
             ctx.compact_reason = f"還沒壓縮過的只有 {len(starts)} 輪，最近 {keep} 輪要保留原樣，不需要壓縮"
             return
+        # 最近的訊息另外至少留一段 token 原樣（最近幾輪都很短時，才不會只剩幾則、前面在做的事全進摘要）。
+        # 從新往舊收，放不下的那一則就停（大的舊工具輸出不會被保底留住）；開頭是工具結果就往後挪，不拆散呼叫和結果
+        tail_tok = max(TAIL_MIN_TOK, min(TAIL_MAX_TOK, int(window * TAIL_WIN))) if window else TAIL_MIN_TOK
+        tcut, acc = len(pending), 0
+        while tcut > 0:
+            t = tokens.estimate_blocks(pending[tcut - 1]["content"])
+            if acc + t > tail_tok:
+                break
+            acc += t
+            tcut -= 1
+        while tcut < len(pending) and pending[tcut]["role"] == "tool":
+            tcut += 1
+        if 0 < tcut < cut:
+            cut = tcut
         older, recent_ids = pending[:cut], {m["id"] for m in pending[cut:]}
 
         # 先試只清舊工具輸出：較早、已經用過的工具結果換成一行佔位，夠降到門檻以下就不花模型呼叫寫摘要。
@@ -252,8 +299,12 @@ def register(woof):
             ctx.compact_reason = "較早的訊息都是空的，沒有可以摘要的內容"
             return
         prev = summary.get("text") or ""
-        src = sum(len(b) for _, b in items)
-        target = max(TARGET_MIN, min(TARGET_MAX, int((src + len(prev)) * _ratio())))
+        # 摘要長度照「被摘要的內容有多少 token」算（工具輸出全文也算，不是送給摘要模型的節錄），
+        # 有先前摘要時不短於它：更新只會加，不會越摘越短
+        src_tok = tokens.estimate_messages(older)
+        cap_tok = min(SUM_MAX_TOK, int(window * SUM_WIN)) if window else SUM_MAX_TOK
+        want = max(SUM_MIN_TOK, min(cap_tok, int(src_tok * _ratio())))
+        target = max(int(want * CHARS_PER_TOK), min(len(prev), int(cap_tok * CHARS_PER_TOK)))
         mode = _mode()
         method = _method()
 
@@ -316,6 +367,12 @@ def register(woof):
             return None
         kept = tokens.apply_prune(kept, st.get("engine_state"))
         body = _prompt_get("compact_head", summary=summary["text"])
+        # 使用者的原話照抄在摘要後面（不經摘要模型），跟摘要有出入以原話為準；同一份摘要每次都一樣，快取不斷
+        users = _users_section(messages, through)
+        if users:
+            body += _prompt_get("compact_users", users=users)
+        if "session_search" in getattr(getattr(ctx, "registry", None), "tools", {}):
+            body += _prompt_get("compact_recall", sid=ctx.session_id)
         # 回合中途壓縮時，使用者這次的要求被摘要進去了：在摘要後面原文重述，模型才知道還在做什麼
         inf = int(summary.get("inflight") or 0)
         newer_user = any(m["role"] == "user" and not (m.get("meta") or {}).get("internal") for m in kept)
