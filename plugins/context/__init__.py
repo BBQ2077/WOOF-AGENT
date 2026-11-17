@@ -32,6 +32,7 @@ CHARS_PER_TOK = 1.5
 TAIL_MIN_TOK, TAIL_MAX_TOK, TAIL_WIN = 10000, 25000, 0.025
 # 摘要後面附上被壓縮那段裡使用者的原話（新的在前）：合計上限、單則上限（字）
 USERS_BUDGET, USER_MAX = 24000, 4000
+REPLY_MAX = 600      # 每段原話前面附上它回應的助手那則（結尾節錄）：使用者常常只回「好」「照這樣」，要看得出認可了什麼
 MID_KEEP = 2         # 回合中途壓縮時，保留最近幾步（模型呼叫＋工具結果）原樣
 WHO = {"user": "使用者", "assistant": "助手", "tool": "工具"}
 
@@ -70,20 +71,35 @@ def _elide(text: str, cap: int) -> str:
 
 def _users_section(messages: list[dict], through: int) -> str:
     """被壓縮那段（id ≤ through）裡使用者親口講的話，新的在前，照字數上限收。內部訊息（接續、回報…）不算。"""
+    def text_of(m):
+        return "\n".join(b.get("text") or "" for b in m.get("content") or [] if b.get("type") == "text").strip()
+
+    pairs, last_reply = [], ""
+    for m in messages:
+        if int(m.get("id") or 0) > through:
+            break
+        if m.get("role") == "assistant":
+            last_reply = text_of(m) or last_reply
+        elif m.get("role") == "user" and not (m.get("meta") or {}).get("internal"):
+            text = text_of(m)
+            if text:
+                pairs.append((m, text, last_reply))
     picked, used = [], 0
-    for m in reversed(messages):
-        if m.get("role") != "user" or int(m.get("id") or 0) > through or (m.get("meta") or {}).get("internal"):
-            continue
-        text = "\n".join(b.get("text") or "" for b in m.get("content") or [] if b.get("type") == "text").strip()
-        if not text:
-            continue
+    for m, text, reply in reversed(pairs):
         room = USERS_BUDGET - used
         if room < 200:
             break
         text = _elide(text, min(USER_MAX, room))
+        reply = reply[-REPLY_MAX:] if reply else ""
+        if len(reply) == REPLY_MAX:
+            reply = "…" + reply
         when = time.strftime("%m-%d %H:%M", time.localtime(m["created"])) if m.get("created") else ""
-        picked.append((f"> （{when}）" if when else "> ") + text.replace("\n", "\n> "))
-        used += len(text)
+        block = f"（{when}）\n" if when else ""
+        if reply:
+            block += "助手前一則（結尾）：" + reply.replace("\n", " ") + "\n"
+        block += "使用者：" + text
+        picked.append("> " + block.replace("\n", "\n> "))
+        used += len(text) + len(reply)
     return "\n\n".join(picked)
 
 
