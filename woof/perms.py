@@ -54,7 +54,7 @@ TOOL_CAT = {
     "terminal": "exec", "process": "exec", "Bash": "exec",
     "web_search": "network", "web_extract": "network", "image_generate": "network", "video_generate": "network",
     "memory": "write", "memory_view": "read", "memory_write": "write",
-    "delegate_task": "agent", "stop_subagent": "agent", "schedule": "agent",
+    "delegate_task": "agent", "schedule": "agent",
 }
 
 # 危險指令：全自動以外，會自動執行的時候改成先問

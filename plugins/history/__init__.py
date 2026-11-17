@@ -110,15 +110,13 @@ def register(woof):
 
     woof.add_tool(
         "session_search",
-        "搜尋或翻閱過去的對話紀錄（全文檢索）。使用者問「之前做過什麼」「上次停在哪」「某某是哪次講的」時使用。"
-        "query＝找關鍵字（多個關鍵字用空白隔開，全部都要出現）；session_id＝讀那個對話，加 around＝訊息編號只讀那則前後，"
-        "加 query＝只在那個對話裡找（目前這個對話也可以，壓縮掉的較早原文從這裡查）；"
-        "都不填＝列出最近的對話。只填 query 時不含目前這個對話。只查對話紀錄，查不到不代表事情不存在。",
+        "查過去的對話紀錄（全文）。query＝關鍵字（空白隔開、全部要出現，不含目前對話）；session_id＝讀那個對話（可以是目前這個，壓縮掉"
+        "的原文從這裡查），加 around 只讀某則前後、加 query 只在裡面找；都不填＝列最近的對話。查不到不代表事情不存在。",
         {"type": "object", "properties": {
-            "query": {"type": "string", "description": "關鍵字，空白隔開"},
-            "session_id": {"type": "string", "description": "要讀或要在裡面找的對話 id（可以是目前這個對話）"},
-            "around": {"type": "integer", "description": "訊息編號（搜尋結果的 #數字），只讀那則前後幾則"},
-            "after": {"type": "string", "description": "只找這之後的：7d、24h、2w 或 2026-11-01"},
+            "query": {"type": "string", "description": "關鍵字"},
+            "session_id": {"type": "string", "description": "對話 id"},
+            "around": {"type": "integer", "description": "訊息編號（結果裡的 #數字）"},
+            "after": {"type": "string", "description": "只找這之後：7d、24h、2w 或 2026-11-01"},
             "limit": {"type": "integer", "description": "最多幾個對話，預設 5"},
         }},
         session_search,

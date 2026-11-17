@@ -2783,7 +2783,7 @@ class SubagentAlwaysReports(unittest.TestCase):
 
     def test_source_has_steer_and_report(self):
         lp = open(str(ROOT / "woof/agent/loop.py"), encoding="utf-8").read()
-        self.assertIn("子代理被停下（主對話用 stop_subagent 或你按了停止）", lp)
+        self.assertIn("子代理被停下（主對話叫停或你按了停止）", lp)
         self.assertIn("asyncio.shield(inject(parent_sid, \"bg_done\", report_text(r)))", lp)
         sp = open(str(ROOT / "plugins/subagent/__init__.py"), encoding="utf-8").read()
         self.assertIn("if sub_alive(sid):", sp)

@@ -240,21 +240,19 @@ def register(woof):
     _py = _py_cmd()
     woof.add_tool(
         "terminal",
-        "在 Git Bash 執行指令（POSIX 語法）。長時間任務設 background=true，或超過 timeout 會自動轉背景；"
-        "背景指令結束時會自動通知，不必反覆查。"
-        "停止時會結束整棵程序樹。"
-        f"要用 Python 時直接呼叫這一顆（已裝 pandas、openpyxl、numpy，整串連引號照貼）：{_py}；"
-        "系統 PATH 上的 python 不一定有這些套件，不要為此重複安裝。"
-        "不要用 start／explorer／Invoke-Item 開檔驗收（會在使用者桌面跳視窗）：看畫面用瀏覽器 headless 截圖再 vision_analyze。",
+        "在 Git Bash 執行指令（POSIX 語法）。長任務設 background=true，超過 timeout 也會自動轉背景；背景結束"
+        f"會自動通知，不用反覆查。要用 Python 直接用 {_py}（已裝 pandas、openpyxl、"
+        "numpy，整串含引號照貼），不要另外裝套件。不要用 start／explorer／Invoke-Item 開檔驗收（會在使用者桌面跳視窗）"
+        "，看畫面用 view_page 或 headless 截圖。",
         {
             "type": "object",
             "properties": {
                 "command": {"type": "string", "description": "要執行的指令"},
-                "workdir": {"type": "string", "description": "工作目錄，預設為 WOOF 工作目錄"},
-                "timeout": {"type": "integer", "description": "前景等待秒數，超過就轉背景繼續跑"},
-                "background": {"type": "boolean", "description": "直接放到背景執行"},
-                "notify": {"type": "boolean", "description": "背景指令結束時自動把結果送回對話（預設 true；不需要時設 false）"},
-                "open_gui": {"type": "boolean", "description": "使用者明確要你在他桌面打開檔案／網址時才設 true（start、explorer、Invoke-Item 這類）"},
+                "workdir": {"type": "string", "description": "預設 WOOF 工作目錄"},
+                "timeout": {"type": "integer", "description": "前景等幾秒，超過轉背景"},
+                "background": {"type": "boolean", "description": "直接背景執行"},
+                "notify": {"type": "boolean", "description": "背景結束時把結果送回對話（預設 true）"},
+                "open_gui": {"type": "boolean", "description": "使用者明確要你在他桌面開檔／網址時才設 true"},
             },
             "required": ["command"],
         },

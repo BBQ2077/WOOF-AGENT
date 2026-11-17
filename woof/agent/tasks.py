@@ -442,7 +442,7 @@ def resume_digest(session_id: str, tools: int = 8, ask: bool = True) -> str:
     if alive:
         names = "；".join(f"{k}（{str((store.get_session(k) or {}).get('title') or '')[:30]}）" for k in alive[:12])
         out.append(f"你派出的子代理還有 {len(alive)} 個在跑或排隊（重開後已自動接回，做完照樣回報）：{names}。"
-                   "不要重派同樣的工作；要改方向帶它的 session_id 追加要求，不需要了才用 stop_subagent 停")
+                   "不要重派同樣的工作；要改方向帶它的 session_id 追加要求，不需要了才帶 session_id 加 stop=true 停")
     goal = ((s.get("engine_state") or {}).get("goal") or {})
     if goal.get("objective"):
         out.append("目標：" + str(goal["objective"])[:300])

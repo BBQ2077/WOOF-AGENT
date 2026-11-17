@@ -57,30 +57,25 @@ def register(woof):
     }
     woof.add_tool(
         "todo",
-        "更新這個對話的 TODO 清單（會顯示在聊天區上方）。每次都傳完整清單。"
-        "status 只能是 pending、doing、done、skipped、failed。多步驟工作開始時先列清單，做完一步就更新。"
-        "cancelled 是使用者在畫面上取消的項目：不要做，也不能改回，照原狀態放在清單裡。",
+        "更新這個對話的 TODO 清單（顯示在聊天區上方），每次傳完整清單。status：pending、doing、done、skipped、fa"
+        "iled。多步驟工作先列清單，做完一步就更新。cancelled 是使用者取消的：不要做、不能改回，照原樣保留。",
         todo_schema,
         todo,
     )
     woof.add_tool(
         "ask_user",
-        "向使用者提問並等待回答。遇到需要使用者決定的事（方向、偏好、有風險的操作）就用這個，不要自己猜；小事自己決定。"
-        "所有問題放在 questions（1～5 題）：只問一題就是一個元素的陣列；幾個彼此獨立的問題放在同一次一起問"
-        "（一張卡片勝過連續問好幾次），某題的答案會改變另一題時才分開問。"
-        "每題可以單選（options 最多 4 個，把你推薦的放第一個，畫面會標「推薦」）、複選（multi_select=true）、"
-        "或不給 options 讓使用者自由回答；每題使用者都可以不選、改成自己打字。選項只放在 options，不要寫在題目文字裡（寫在題目裡點不到）。"
-        "回傳依題目順序寫出每題的回答，沒答的標「略過」。使用者一段時間（預設 3 分鐘）沒回應會自動略過，回傳會寫明人不在；"
-        "這時自己判斷繼續，收不回來的事留到最後再問。",
+        "問使用者並等回答。方向、偏好、有風險的操作要使用者決定時用，不要自己猜；小事自己決定。互不相關的問題一次問（1～5 題同一張卡），某題答案會"
+        "改變另一題時才分開問。選項只放 options（最多 4 個，推薦的放第一個），不給就是自由回答；使用者每題都能改成自己打字。回傳依序寫每題"
+        "回答，沒答標「略過」；逾時沒回應也會略過並寫明人不在，這時自己判斷繼續，收不回來的事留到最後再問。",
         {"type": "object", "properties": {
             "questions": {
                 "type": "array", "minItems": 1, "maxItems": 5,
-                "description": "要問的問題，依序顯示在同一張卡片上",
+                
                 "items": {"type": "object", "properties": {
-                    "question": {"type": "string", "description": "題目，說清楚為什麼要問；不要把選項寫在這裡"},
+                    "question": {"type": "string", "description": "題目，說明為什麼問；選項不要寫在這裡"},
                     "options": {"type": "array", "items": {"type": "string"}, "maxItems": 4,
-                                "description": "可選的答案，推薦的放第一個；不給就是自由回答"},
-                    "multi_select": {"type": "boolean", "description": "可以複選"}},
+                                "description": "推薦的放第一個；不給＝自由回答"},
+                    "multi_select": {"type": "boolean", "description": "可複選"}},
                     "required": ["question"]}}},
          "required": ["questions"]},
         ask_user,

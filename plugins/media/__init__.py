@@ -79,26 +79,26 @@ def register(woof):
 
     woof.add_tool(
         "image_generate",
-        "生成圖片（文字生圖；給 images 就是圖生圖或多圖合成）。prompt 寫清楚主體、場景、風格、光線、構圖。"
-        "完成後回傳檔案路徑，回覆時寫 MEDIA:<路徑> 讓使用者看到。",
+        "生成圖片（給 images 就是圖生圖或多圖合成）。prompt 寫清主體、場景、風格、光線、構圖。回覆時寫 MEDIA:<路徑> 讓使用者"
+        "看到。",
         {"type": "object", "properties": {
-            "prompt": {"type": "string", "description": "要生成的畫面描述"},
-            "ratio": {"type": "string", "description": "長寬比，例如 16:9；不填用設定的預設，不支援的換成最接近的"},
-            "size": {"type": "string", "description": "解析度，例如 1K、2K；不填用設定的預設"},
-            "images": {"type": "array", "items": {"type": "string"}, "description": "參考圖的本機路徑（選填）"},
-            "save_to": {"type": "string", "description": "要留的成品存到哪（資料夾或檔名，例如專案資料夾）；不填只放對話暫存，刪對話會一起刪"},
+            "prompt": {"type": "string", "description": "畫面描述"},
+            "ratio": {"type": "string", "description": "長寬比，如 16:9；不填用預設"},
+            "size": {"type": "string", "description": "解析度，如 1K、2K；不填用預設"},
+            "images": {"type": "array", "items": {"type": "string"}, "description": "參考圖本機路徑"},
+            "save_to": {"type": "string", "description": "成品存到哪（資料夾或檔名）；不填只放對話暫存，刪對話會一起刪"},
         }, "required": ["prompt"]},
         image_generate,
     )
     woof.add_tool(
         "video_generate",
-        "生成短影片（文字生影片）。要等 1–3 分鐘，使用者明確要影片才用。完成後回覆時寫 MEDIA:<路徑>。",
+        "生成短影片，要等 1～3 分鐘，使用者明確要影片才用。回覆時寫 MEDIA:<路徑>。",
         {"type": "object", "properties": {
-            "prompt": {"type": "string", "description": "畫面、動作、鏡頭運動、光線"},
-            "seconds": {"type": "integer", "description": "長度（秒）；不填用設定的預設，超出模型範圍會自動調整"},
-            "aspect_ratio": {"type": "string", "description": "例如 16:9、9:16；不填用設定的預設"},
-            "resolution": {"type": "string", "description": "例如 720p；不填用設定的預設"},
-            "save_to": {"type": "string", "description": "要留的成品存到哪（資料夾或檔名，例如專案資料夾）；不填只放對話暫存，刪對話會一起刪"},
+            "prompt": {"type": "string", "description": "畫面、動作、鏡頭、光線"},
+            "seconds": {"type": "integer", "description": "秒數；不填用預設"},
+            "aspect_ratio": {"type": "string", "description": "如 16:9、9:16；不填用預設"},
+            "resolution": {"type": "string", "description": "如 720p；不填用預設"},
+            "save_to": {"type": "string", "description": "成品存到哪（資料夾或檔名）；不填只放對話暫存，刪對話會一起刪"},
         }, "required": ["prompt"]},
         video_generate,
     )

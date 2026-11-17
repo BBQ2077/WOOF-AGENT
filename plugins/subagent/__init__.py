@@ -188,6 +188,8 @@ def register(woof):
         if parent is None:
             return {"output": "這個環境不能開子代理", "is_error": True}
         follow = str(args.get("session_id") or "").strip()
+        if args.get("stop"):
+            return _stop(follow, tctx)
         tasks = args.get("tasks") or []
         if args.get("goal"):
             tasks = [{"goal": args["goal"], "context": args.get("context", "")}] + list(tasks)
@@ -226,7 +228,7 @@ def register(woof):
             return {"output": f"子代理名額不夠：現在有 {inuse} 個在跑或排隊，同時最多 {cap} 個，這次要再開 {new} 個"
                               f"（只剩 {free} 個名額）。在跑的：{names or '（正在派出）'}。\n"
                               + (f"可以只派 {free} 個，其餘等前面的做完再派；" if free else "")
-                              + "它們做完會自己回報，回報到了再派下一批；不需要的用 stop_subagent 停掉就空出名額。"
+                              + "它們做完會自己回報，回報到了再派下一批；不需要的用 delegate_task 帶 session_id 加 stop=true 停掉就空出名額。"
                               "要改它們的方向，帶 session_id 追加要求（不佔名額）。同時最多幾個在「設定 → 模型用途 → 子代理」",
                     "is_error": True}
 
@@ -299,7 +301,7 @@ def register(woof):
                 parts.append(f"{head}（派不出去）\n{r['error']}")
             elif r.get("dup"):
                 parts.append(f"{head}沒有重派：同樣的工作子代理 {r['dup']} 還在跑或排隊，做完會回報。"
-                             "要改方向帶 session_id 追加要求；不需要了用 stop_subagent 停")
+                             "要改方向帶 session_id 追加要求；不需要了帶 session_id 加 stop=true 停")
             elif r.get("steered"):
                 parts.append(f"{head}它還在跑，這句話已經送進去了（對話 {r.get('session_id')}）："
                              "它這一步跑完就會看到，不用重派、也不用再催。要它的結論就等它自己回報。"
@@ -320,14 +322,14 @@ def register(woof):
                 parts.append(f"{head}\n{r}")
         return {"output": "\n\n".join(parts), "is_error": bad == len(results)}
 
-    async def stop_subagent(args, ctx):
+    def _stop(sid: str, ctx) -> dict:
+        """delegate_task 帶 stop=true：停下自己派出、還在跑的子代理。"""
         from woof.agent import loop as _l
 
-        sid = str(args.get("session_id") or "").strip()
         mine = {ctx.session_id, getattr(ctx, "root_session_id", ctx.session_id)}
         if not sid:
             kids = _l.bg_children(ctx.session_id)
-            return {"output": "要停哪一個：帶 session_id。還在跑的子代理：" + ("、".join(kids) if kids else "沒有"), "is_error": True}
+            return {"output": "要停哪一個：帶 session_id 和 stop=true。還在跑的子代理：" + ("、".join(kids) if kids else "沒有"), "is_error": True}
         from woof import store as _store
 
         child = _store.get_session(sid)
@@ -338,34 +340,22 @@ def register(woof):
         return {"output": f"已停下子代理 {sid}，它停在哪、做了什麼會照樣送回報告；要它接著做或改做別的，帶同一個 session_id 呼叫 delegate_task"}
 
     woof.add_tool(
-        "stop_subagent",
-        "停下自己派出、還在跑的背景子代理（帶它的 session_id）。只在你判斷它做的事已經不需要、方向錯了、或跟使用者剛說的衝突時用；"
-        "使用者插話不代表要停子代理，跟它無關就讓它繼續跑。停下後它的進度會照樣回報；要改方向就帶同一個 session_id 用 delegate_task 追加要求，不用停。",
-        {"type": "object", "properties": {"session_id": {"type": "string", "description": "要停的子代理 id（delegate_task 回傳的）"}},
-         "required": ["session_id"]},
-        stop_subagent,
-    )
-
-    woof.add_tool(
         "delegate_task",
-        "把能獨立做的子任務交給子代理（自己乾淨的上下文，做完只回報告）：大量搜尋或讀檔、互不相關的平行工作、會塞爆上下文的調查；"
-        "預設唯讀（只能讀、查、搜尋）；要它建立或修改檔案（寫資料、寫程式、存檔），一定要 mode=write 並用 scope 給它能改的資料夾。"
-        "也能生圖、生影片（見 model）。它看不到目前的對話，goal 和 context 要寫齊需求、路徑、限制。"
-        "派出後不用等，主對話照常跟使用者說話，它跑完會自己送回報告。"
-        "要問進度、追加要求或接著做，帶同一個 session_id 再呼叫：還在跑就是插話，跑完了就接同一份上下文繼續；不要重開，也不要反覆催。"
-        "它會出現在側欄，使用者可能直接在那條對話裡追加要求。",
+        "把能獨立做的子任務交給背景子代理（乾淨上下文，做完自動送回報告，不用等、不要催）：大量搜尋讀檔、平行工作、會塞爆上下文的調查；也能生圖、生影"
+        "片（見 model）。預設唯讀；要建檔改檔一定要 mode=write 加 scope。它看不到這個對話，goal、context 要寫齊需求、"
+        "路徑、限制。帶同一個 session_id 再呼叫＝問進度、追加要求或接著做（還在跑就是插話），不要重派；使用者也可能直接在側欄那條對話裡跟"
+        "它說話。帶 session_id 加 stop=true＝停下它，只在它的工作已不需要、方向錯了或跟使用者剛說的衝突時用；使用者插話不代表要"
+        "停，要改方向就追加要求。",
         {"type": "object", "properties": {
             "goal": {"type": "string", "description": "單一子任務：要達成什麼、完成標準"},
             "context": {"type": "string", "description": "背景：路徑、已知事實、限制"},
             "mode": {"type": "string", "enum": ["read", "write"],
-                     "description": "read＝唯讀，只能讀、查、搜尋（預設）；write＝要建檔或改檔就用這個，搭配 scope。"
-                                    "寫入子代理範圍重疊也同時跑，同一個檔一次寫一個"},
-            "scope": {"type": "string", "description": "write 用：允許改的資料夾或檔案（多個用 ; 分隔），範圍外不准動。"
-                                                       "平行派多個寫入時各給各的資料夾"},
-            "model": {"type": "string", "description": "選填，不填＝預設子代理模型。只能用設定裡開放的（填錯會列出可用的），簡單量大的挑便宜的。"
-                                                          "image／video＝生圖／影片，直接回傳檔案：goal 只寫畫面（可含比例、秒數），context 放參考圖路徑，scope 填存檔資料夾"},
-            "session_id": {"type": "string", "description": "接續之前回傳的子代理 id"},
-            "tasks": {"type": "array", "description": "一次派多個子任務，欄位同上（goal、context、mode、scope、model）",
+                     "description": "read＝唯讀（預設）；write＝可建檔改檔，搭配 scope。範圍重疊也能同時跑，同一個檔一次寫一個"},
+            "scope": {"type": "string", "description": "write 用：可改的資料夾或檔案，; 分隔，範圍外不准動。平行寫入各給各的資料夾"},
+            "model": {"type": "string", "description": "選填，預設子代理模型；只能用設定開放的（填錯會列出可用的），簡單量大挑便宜的。image／video＝生圖／影片：goal 寫畫面（可含比例、秒數），context 放參考圖路徑，scope 填存檔資料夾"},
+            "session_id": {"type": "string", "description": "之前回傳的子代理 id：接續、追加要求或停下"},
+            "stop": {"type": "boolean", "description": "true＝停下 session_id 這個子代理，它的進度照樣回報"},
+            "tasks": {"type": "array", "description": "一次派多個，欄位同上",
                       "items": {"type": "object", "properties": {
                           "goal": {"type": "string"}, "context": {"type": "string"},
                           "mode": {"type": "string", "enum": ["read", "write"]}, "scope": {"type": "string"},

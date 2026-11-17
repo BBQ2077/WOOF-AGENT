@@ -46,18 +46,17 @@ def register(woof):
 
     woof.add_tool(
         "schedule",
-        "管理定時執行的提示詞（排程工作）。每次到時間會開一個新對話執行 prompt。"
-        "schedule 用 5 欄 cron（分 時 日 月 週，本機時間），例如每天 9 點＝0 9 * * *、工作日 8:30＝30 8 * * 1-5、每 15 分鐘＝*/15 * * * *。"
-        "建立前先跟使用者確認時間與內容。",
+        "管理排程：到時間開新對話執行 prompt。schedule 是 5 欄 cron（分 時 日 月 週，本機時間），如每天 9 點＝0 9 "
+        "* * *、工作日 8:30＝30 8 * * 1-5。建立前先跟使用者確認時間和內容。",
         {
             "type": "object",
             "properties": {
                 "action": {"type": "string", "enum": ["list", "create", "delete", "pause", "resume"]},
-                "name": {"type": "string", "description": "名稱（create）"},
-                "prompt": {"type": "string", "description": "每次執行時要做的事，寫成完整指令（create）"},
-                "schedule": {"type": "string", "description": "5 欄 cron 表達式（create）"},
-                "model": {"type": "string", "description": "模型 id，省略就用目前對話的模型（create）"},
-                "id": {"type": "string", "description": "排程 id（delete / pause / resume）"},
+                "name": {"type": "string", "description": "名稱"},
+                "prompt": {"type": "string", "description": "每次要做的事，寫成完整指令"},
+                "schedule": {"type": "string", "description": "5 欄 cron"},
+                "model": {"type": "string", "description": "模型 id，預設目前對話的模型"},
+                "id": {"type": "string", "description": "排程 id（delete／pause／resume）"},
             },
             "required": ["action"],
         },

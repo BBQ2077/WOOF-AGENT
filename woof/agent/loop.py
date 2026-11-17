@@ -129,7 +129,7 @@ class TurnContext:
         if session.get("parent") and "read_only" in sub:
             ro = bool(sub["read_only"])
             self.root_session_id = sub.get("root") or session["parent"]
-            self.tool_exclude |= {"delegate_task", "stop_subagent"} | mutating_tools(ro)
+            self.tool_exclude |= {"delegate_task"} | mutating_tools(ro)
             self.write_scope = None if ro else [Path(p) for p in sub.get("scope") or []]
             if sub.get("cwd"):
                 self.cwd = sub["cwd"]
@@ -907,7 +907,7 @@ def _missing_result(session_id: str, call: dict, msg: dict, nxt: dict | None) ->
                              + ("，還在跑" if k["id"] in BG_BY_SID and not BG_BY_SID[k["id"]].done() else "")
                              for k in reversed(kids))
             return (f"這次派工途中程式被關閉，但已經派出這些子代理：{names}。程式重開後它們自動接回，做完會照樣回報；"
-                    "不要重派。要改方向帶 session_id 追加要求，不需要了用 stop_subagent 停")
+                    "不要重派。要改方向帶 session_id 追加要求，不需要了帶 session_id 加 stop=true 停")
     return "沒有結果：工具執行到一半，程式被關閉或中斷。需要的話重新執行。"
 
 
@@ -1538,7 +1538,7 @@ async def _prepare_subagent(parent: TurnContext, goal: str, context: str = "", m
     ctx = TurnContext(child, model_cfg, effort, emit)
     ctx.root_session_id = getattr(parent, "root_session_id", parent.session_id)
     ctx.turn_mid = getattr(parent, "turn_mid", 0)
-    ctx.tool_exclude = set(parent.tool_exclude) | {"delegate_task", "stop_subagent"}
+    ctx.tool_exclude = set(parent.tool_exclude) | {"delegate_task"}
     ctx.tool_exclude |= mutating_tools(read_only)
     ctx.write_scope = None if read_only else list(write_scope or [])
     ctx.cwd = parent.cwd
@@ -1768,7 +1768,7 @@ async def run_subagent_bg(parent: TurnContext, goal: str, context: str = "", mod
                         await _drive(ctx)
         except asyncio.CancelledError:
             # 被停掉也要回報，否則主對話會一直以為「它還在跑」而卡住
-            err, status = ("子代理被停下（主對話用 stop_subagent 或你按了停止），任務還沒做完，上面是它停下前最後說的；"
+            err, status = ("子代理被停下（主對話叫停或你按了停止），任務還沒做完，上面是它停下前最後說的；"
                            "要它接著做，帶同一個 session_id 呼叫 delegate_task"), "stopped"
             raise
         except Exception as e:  # 背景任務炸掉不能拖垮主對話
@@ -1839,7 +1839,7 @@ async def resume_bg(child_id: str, rec: dict, emit: Emit) -> bool:
         return False
     pctx = TurnContext(parent, pm, parent.get("effort") or pm.get("default_effort"), emit)
     pctx.root_session_id = rec.get("root") or parent["id"]
-    pctx.tool_exclude = set(rec.get("exclude") or []) - {"delegate_task", "stop_subagent"}
+    pctx.tool_exclude = set(rec.get("exclude") or []) - {"delegate_task"}
     if rec.get("cwd"):
         pctx.cwd = rec["cwd"]
     scope = [Path(p) for p in rec.get("scope") or []]

@@ -509,16 +509,14 @@ def register(woof):
 
     woof.add_tool(
         "vision_analyze",
-        "看圖片（本機 path 或 http/https 的 url）。你能看圖時圖直接放進你的上下文，不能看圖時由看圖模型轉成文字。"
-        "好幾張（改前改後、整張和局部）用 images 一次給齊，不要一張叫一次。"
-        "整張會縮小，小字、接縫、對齊、錯位容易漏看：先看整張，再用 region 裁切放大。"
-        "網頁、HTML、SVG 改用 view_page；使用者直接貼的圖不用這個工具。",
+        "看圖片（本機 path 或 url）。多張（改前改後、整張和局部）用 images 一次給齊。整張會縮小，小字、對齊、錯位容易漏：先看整張，"
+        "再用 region 裁切放大。網頁、HTML、SVG 用 view_page；使用者直接貼的圖不用這個工具。",
         {"type": "object", "properties": {
-            "path": {"type": "string", "description": "本機圖片的絕對路徑（與 url 二選一）"},
+            "path": {"type": "string", "description": "本機圖片絕對路徑（或用 url）"},
             "url": {"type": "string", "description": "圖片網址"},
             "region": {"type": "array", "items": {"type": "integer"}, "minItems": 4, "maxItems": 4,
-                       "description": "裁切 [x1, y1, x2, y2]，原圖像素，左上 0,0；縮小前裁，保留原解析度。省略＝整張"},
-            "images": {"type": "array", "description": "多張，取代 path／url，依序放入",
+                       "description": "裁切 [x1, y1, x2, y2]，原圖像素；省略＝整張"},
+            "images": {"type": "array", "description": "多張，取代 path／url",
                        "items": {"type": "object", "properties": {
                            "path": {"type": "string"}, "url": {"type": "string"},
                            "region": {"type": "array", "items": {"type": "integer"}, "minItems": 4, "maxItems": 4}}}},
@@ -529,27 +527,26 @@ def register(woof):
 
     woof.add_tool(
         "view_page",
-        "開網頁或本機 HTML／SVG 截圖，直接放進你的上下文（不能看圖時由看圖模型轉成文字），不用先跑指令截圖再叫 vision_analyze。"
-        "shots 一次截多張：不同視窗大小、整頁、某個元素（selector）、某塊區域（region，可加 scale 放大）。"
-        "每張截之前可跑 js（轉視角、捲動、點按鈕、讀尺寸位置），效果留給下一張，回傳值也給你。console 錯誤、資源載入失敗會一起回報。",
+        "開網頁或本機 HTML／SVG 截圖直接給你看，不用自己跑指令截圖。shots 一次截多張（不同寬度、整頁、某元素、某區域）；每張前可跑 j"
+        "s（捲動、點擊、讀尺寸），效果延續到下一張，回傳值也給你。console 錯誤和載入失敗會一起回報。",
         {"type": "object", "properties": {
-            "path": {"type": "string", "description": "本機 HTML、SVG 或圖片（與 url 二選一；相對路徑以工作目錄為準）"},
-            "url": {"type": "string", "description": "http、https 或 file:/// 網址"},
-            "shots": {"type": "array", "description": "依序截，省略＝一張 1280×800",
+            "path": {"type": "string", "description": "本機 HTML、SVG 或圖片（或用 url；相對路徑以工作目錄為準）"},
+            "url": {"type": "string", "description": "http(s) 或 file:/// 網址"},
+            "shots": {"type": "array", "description": "依序截；省略＝一張 1280×800",
                       "items": {"type": "object", "properties": {
-                          "label": {"type": "string", "description": "名稱，如「手機寬度」"},
-                          "width": {"type": "integer", "description": "預設 1280"},
-                          "height": {"type": "integer", "description": "預設 800"},
+                          "label": {"type": "string"},
+                          "width": {"type": "integer"},
+                          "height": {"type": "integer"},
                           "js": {"type": "string", "description": "截前執行（可 await）"},
-                          "wait_ms": {"type": "integer", "description": "js 後等幾毫秒再截（動畫、轉場）"},
-                          "selector": {"type": "string", "description": "只截這個元素（CSS 選擇器）"},
+                          "wait_ms": {"type": "integer", "description": "js 後等幾毫秒"},
+                          "selector": {"type": "string", "description": "只截這個 CSS 元素"},
                           "region": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4,
                                      "description": "只截 [x1, y1, x2, y2]，CSS 像素"},
-                          "full_page": {"type": "boolean", "description": "整頁含捲動部分"},
-                          "scale": {"type": "number", "description": "放大 0.25～4，預設 1"},
+                          "full_page": {"type": "boolean", "description": "整頁含捲動"},
+                          "scale": {"type": "number", "description": "放大 0.25～4"},
                       }}},
-            "wait_ms": {"type": "integer", "description": "載入後先等幾毫秒（WebGL、字型、動畫），預設 1000"},
-            "question": {"type": "string", "description": "要檢查什麼；空白＝描述畫面並指出明顯問題"},
+            "wait_ms": {"type": "integer", "description": "載入後等幾毫秒，預設 1000"},
+            "question": {"type": "string", "description": "要檢查什麼；空白＝描述畫面並指出問題"},
         }},
         view_page,
     )

@@ -45,9 +45,8 @@ def register(woof):
 
     woof.add_tool(
         "current_time",
-        "查現在的日期、時間、星期與時區。需要知道今天幾號、現在幾點、星期幾時使用。"
-        "timezone 可留空（本機時間）或填 Asia/Taipei、Asia/Tokyo、UTC、America/New_York 等。",
-        {"type": "object", "properties": {"timezone": {"type": "string", "description": "時區名稱，留空＝本機"}}},
+        "查現在的日期、時間、星期。timezone 留空＝本機，或填 IANA 名稱，如 Asia/Tokyo、UTC。",
+        {"type": "object", "properties": {"timezone": {"type": "string"}}},
         current_time,
     )
     woof.add_tool(

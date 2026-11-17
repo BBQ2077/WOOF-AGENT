@@ -333,16 +333,15 @@ def register(woof):
         cap = max(50, min(int(args.get("limit") or 400), 2000))
         return {"output": await asyncio.to_thread(_tree, root, depth, cap)}
 
-    woof.add_tool("list_tree", "列出資料夾的樹狀結構（預設 2 層、最多 4 層），附檔案大小、修改時間和最近修改的 10 個檔案；"
-                  "略過 .git、node_modules、__pycache__、虛擬環境等。剛接觸一個專案時先用它定位。",
+    woof.add_tool("list_tree", "列出資料夾樹狀結構，附大小、修改時間和最近修改的 10 個檔；略過 .git、node_modules 等。剛接觸專案時先用它定位。",
                   {"type": "object", "properties": {
-                      "path": {"type": "string", "description": "資料夾，預設工作目錄"},
-                      "depth": {"type": "integer", "description": "層數，1 到 4，預設 2"},
-                      "limit": {"type": "integer", "description": "最多列幾項，預設 400"}}}, list_tree)
+                      "path": {"type": "string", "description": "預設工作目錄"},
+                      "depth": {"type": "integer", "description": "1～4，預設 2"},
+                      "limit": {"type": "integer", "description": "最多幾項，預設 400"}}}, list_tree)
     woof.add_tool("read_file", "讀取文字檔（附行號），或列出資料夾內容。",
                   {"type": "object", "properties": {
                       "path": {"type": "string"}, "offset": {"type": "integer", "description": "起始行，從 1 開始"},
-                      "limit": {"type": "integer", "description": "最多行數／xlsx 最多列數，上限 2000。xlsx 會直接給工作表、範圍、欄位與前幾列，不要自己開 python 拆；要看整張表的原始數值就同一個檔加 limit=200000（吐 TSV，太長會存成 .tsv 檔給你）"}},
+                      "limit": {"type": "integer", "description": "最多行數（xlsx 是列數），上限 2000。xlsx 直接給工作表、欄位和前幾列，不要自己用 python 拆；要整張原始數值設 limit=200000（輸出 TSV，太長存成 .tsv 檔）"}},
                    "required": ["path"]}, read_file)
     woof.add_tool("write_file", "寫入整個檔案（覆蓋），會自動建立資料夾並讀回驗證。",
                   {"type": "object", "properties": {

@@ -60,24 +60,23 @@ def register(woof):
         promptfiles.write(target, body)
         return {"output": f"已寫入{label}（共 {len(ents)} 條，{len(body)} 字），新對話起生效"}
 
-    _target = {"type": "string", "enum": ["memory", "user"], "description": "memory＝記憶檔（環境與經驗），user＝使用者檔（偏好與習慣）；預設 memory"}
+    _target = {"type": "string", "enum": ["memory", "user"], "description": "預設 memory"}
     woof.add_tool(
         "memory_view",
-        "只讀：列出記憶檔或使用者檔目前的條目，不會改任何東西。系統提示裡是對話開始時的版本，要看最新內容或改之前先確認用這個。",
+        "只讀：列出記憶檔或使用者檔的最新條目（系統提示裡是對話開始時的版本），改之前先看。",
         {"type": "object", "properties": {"target": _target}},
         memory_view,
     )
     woof.add_tool(
         "memory_write",
-        "寫入長期記憶：把之後的對話也用得到的事記下來（新對話起放進系統提示）。"
-        "target=memory 記環境與經驗（路徑、工具怪癖、做過的決定）；target=user 記使用者的偏好與習慣。"
-        "只記穩定、會重複用到的事；一次性的任務進度、對話內容不要記。使用者說「記住」時一定要記。"
-        "action：add 新增、replace 用 old 對到一條改成 text、remove 用 old 對到一條刪掉。",
+        "寫入長期記憶（之後的新對話會放進系統提示）。target=memory 記環境與經驗（路徑、工具怪癖、決定），user 記使用者偏好與習慣。"
+        "只記穩定、會重複用到的；任務進度、對話內容不記。使用者說「記住」就一定要記。action：add 新增；replace／remove 用 o"
+        "ld 對到一條，改成 text 或刪掉。",
         {"type": "object", "properties": {
             "action": {"type": "string", "enum": ["add", "replace", "remove"]},
             "target": _target,
-            "text": {"type": "string", "description": "要記的內容，一條講一件事，簡短"},
-            "old": {"type": "string", "description": "replace／remove 時，要對到的那條裡面的一段文字"},
+            "text": {"type": "string", "description": "一條一件事，簡短"},
+            "old": {"type": "string", "description": "那條裡的一段文字"},
         }, "required": ["action"]},
         memory_write,
     )
