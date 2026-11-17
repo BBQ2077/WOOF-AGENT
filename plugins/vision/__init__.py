@@ -292,6 +292,9 @@ def _norm_shots(raw, limit: int) -> list[dict]:
     return out
 
 
+_VIS_HINT = "\n看圖用「設定 → 模型用途 → 看圖」指定的模型，沒指定就用主要模型；要換請到那裡改"
+
+
 def register(woof):
     async def _prep(item: dict, max_px: int, cwd: str | None) -> dict:
         """讀一張圖、裁切縮小；回傳 media、data（b64）、來源與尺寸說明。錯誤拋 ValueError。"""
@@ -409,7 +412,7 @@ def register(woof):
             for f, _ in files:
                 f.unlink(missing_ok=True)
         if model is None:
-            return {"output": "看圖失敗：\n" + "\n".join(errs), "is_error": True}
+            return {"output": "看圖失敗：\n" + "\n".join(errs) + _VIS_HINT, "is_error": True}
         who = model.get("label") or model["id"]
         tried = f"（{'；'.join(errs)}，改用 {who}）" if errs else ""
         return {"output": f"（{who}）{tried}\n{info}\n{text or '（模型沒有回覆）'}"}
@@ -501,7 +504,7 @@ def register(woof):
             for f in files:
                 f.unlink(missing_ok=True)
         if model is None:
-            return {"output": info + "\n看圖失敗：\n" + "\n".join(errs2), "is_error": True}
+            return {"output": info + "\n看圖失敗：\n" + "\n".join(errs2) + _VIS_HINT, "is_error": True}
         return {"output": f"（{model.get('label') or model['id']}）{info}\n{text or '（模型沒有回覆）'}"}
 
     woof.add_tool(

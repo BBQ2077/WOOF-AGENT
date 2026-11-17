@@ -325,6 +325,31 @@ async def _describe_images(woof, messages: list[dict]) -> list[dict]:
     return out
 
 
+def _reset_at(body: str) -> float | None:
+    """錯誤訊息裡的額度重置時間（例如「quota resets at 2026-11-20T02:05」）；沒寫時區當本機時間。"""
+    import re
+    from datetime import datetime
+    mm = re.search(r"reset\w*\s+(?:at|on)\s+(\d{4}-\d\d-\d\d[T ]\d\d:\d\d(?::\d\d)?(?:\.\d+)?(?:Z|[+-]\d\d:?\d\d)?)", body or "", re.I)
+    if not mm:
+        return None
+    try:
+        t = datetime.fromisoformat(mm.group(1).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    ts = t.timestamp()   # 沒有時區就是本機時間
+    return ts if ts > time.time() else None
+
+
+def _pool_down_text(pool) -> str:
+    """金鑰池全部不能用時給人看的說明：哪一種狀況、什麼時候恢復。"""
+    es = pool.entries
+    ex = [e for e in es if e.status == "exhausted" and e.until]
+    if ex and len(ex) == len(es):
+        t = time.strftime("%m-%d %H:%M", time.localtime(min(e.until for e in ex)))
+        return f"金鑰池「{pool.name}」額度用完，{t} 重置；要現在用請在對話換一個模型，或在「設定 → API 金鑰」加一把"
+    return f"金鑰池「{pool.name}」的 key 都在冷卻或失效，稍後再試或加一把新的"
+
+
 def _effort_kwargs(style: str, effort: str | None) -> dict:
     if not effort or style == "none":
         return {}
@@ -396,7 +421,7 @@ class OpenAICompat:
                 if not pool.entries:
                     raise RuntimeError(f"「{model.get('label', model.get('id'))}」還沒設定 API key（金鑰池「{pool.name}」是空的），"
                                        "請到「設定 → API 金鑰」貼上")
-                raise RuntimeError(f"金鑰池「{pool.name}」的 key 都在冷卻或失效，稍後再試或加一把新的")
+                raise RuntimeError(_pool_down_text(pool))
             started = False
             try:
                 async for ev in self._once(entry.key, model, system, messages, tools, effort):
@@ -467,8 +492,16 @@ class OpenAICompat:
                 if not isinstance(e, openai.APIStatusError):
                     raise
                 tried += 1
+                if e.status_code == 402:
+                    # 額度用完：這把 key 記到服務商說的重置時間（沒說就一天），期間不再送請求；還有別把 key 就換下一把
+                    body = f"{e.message} {json.dumps(e.body, ensure_ascii=False) if e.body else ''}"
+                    until = _reset_at(body) or time.time() + 86400
+                    pool.mark(entry, "exhausted", until, f"HTTP 402 額度用完，{time.strftime('%m-%d %H:%M', time.localtime(until))} 重置")
+                    if pool.get() is not None:
+                        continue
+                    raise RuntimeError(f"{model.get('label', model['id'])}：{_pool_down_text(pool)}（{_short_reason(e)}）") from e
                 if e.status_code in _RETRY_STATUS and tried < len(pool.entries):
-                    status = {429: "rate_limited", 402: "exhausted"}.get(e.status_code, "invalid")
+                    status = {429: "rate_limited"}.get(e.status_code, "invalid")
                     until = time.time() + (60 if status == "rate_limited" else 86400)
                     pool.mark(entry, status, until, f"HTTP {e.status_code}")
                     continue

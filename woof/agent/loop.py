@@ -438,13 +438,16 @@ def aux_model(task: str, fallback: dict | None) -> dict | None:
 
 
 def vision_chain(turn_model: dict | None) -> list[dict]:
-    """看圖用的模型，依序試：輔助模型的看圖 → 這個對話的模型 → 主要模型。
-    跳過不能看圖的（手動關掉或自動偵測到）、服務商暫停中的（caps.down）、不是 API 連線的。不會自己挑別的付費模型。"""
+    """看圖用的模型：設了「模型用途 → 看圖」就只用它；沒設就用這個對話的模型（能看圖時）、主要模型。
+    不會自己換別的模型。跳過不能看圖的（手動關掉或自動偵測到）、服務商暫停中的（caps.down）、不是 API 連線的。"""
     from woof import caps
 
+    if (REG.config.get("aux") or {}).get("vision"):
+        m = aux_model("vision", None)
+        cfg = (REG.model_cfg(m["id"]) or m) if m else None
+        return [cfg] if cfg and cfg.get("provider") in REG.providers else []
     out: list[dict] = []
-    for m in (aux_model("vision", None) if (REG.config.get("aux") or {}).get("vision") else None,
-              turn_model, find_model(REG.config.get("default_model") or "")):
+    for m in (turn_model, find_model(REG.config.get("default_model") or "")):
         if not m or any(x["id"] == m["id"] for x in out):
             continue
         cfg = REG.model_cfg(m["id"]) or m
