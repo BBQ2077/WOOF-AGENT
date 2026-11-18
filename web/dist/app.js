@@ -504,6 +504,24 @@ const NLOG = { items: [], filter: localStorage.getItem('woof.noteF') || 'all', o
 localStorage.removeItem('woof.noteUnread');
 try { const a = JSON.parse(localStorage.getItem(NLOG_KEY) || '[]'); if (Array.isArray(a)) NLOG.items = a; } catch {}
 let nlogSaveT = 0;
+// 通知放 7 天就刪（和工具長輸出、背景指令紀錄一樣）；開程式時、每次新增、每小時整理
+const NLOG_DAYS = 7;
+function nlogPrune() {
+  const cut = Date.now() - NLOG_DAYS * 86400000;
+  const n = NLOG.items.length;
+  NLOG.items = NLOG.items.filter((x) => (x.at || 0) >= cut);
+  if (NLOG.items.length === n) return false;
+  try { NLOG.items.length ? localStorage.setItem(NLOG_KEY, JSON.stringify(NLOG.items)) : localStorage.removeItem(NLOG_KEY); } catch {}
+  return true;
+}
+function nlogClearAll() {
+  clearTimeout(nlogSaveT);
+  NLOG.items = []; NLOG.open.clear();
+  localStorage.removeItem(NLOG_KEY);
+  if (typeof renderNotesLog === 'function') renderNotesLog();
+}
+nlogPrune();
+setInterval(() => { if (nlogPrune()) renderNotesLog(); }, 3600000);
 function nlogAdd(type, title, detail, sid) {
   const last = NLOG.items[NLOG.items.length - 1];
   const now = Date.now();
@@ -512,6 +530,7 @@ function nlogAdd(type, title, detail, sid) {
     const s = sid ? (S.sessions || []).find((x) => x.id === sid) : null;
     NLOG.items.push({ id: now.toString(36) + Math.random().toString(36).slice(2, 6), at: now, type, title, detail, sid: sid || '', st: s ? s.title || '' : '' });
     if (NLOG.items.length > NLOG_MAX) NLOG.items.splice(0, NLOG.items.length - NLOG_MAX);
+    nlogPrune();
   }
   const pn = $('#paneNotes'), rt = $('#right');
   const seen = !!(pn && rt && pn.classList.contains('on') && !rt.classList.contains('hide') && !document.hidden);
@@ -535,7 +554,7 @@ function renderNotesLog() {
   const nErr = all.filter((x) => x.type === 'error' || x.type === 'warn').length;
   const head = `<div class="nlog-hd"><div class="seg nlog-seg">${[['all', '全部', all.length], ['cur', '此對話', all.filter((x) => x.sid && x.sid === S.sid).length], ['err', '錯誤與警告', nErr]]
     .map(([k, l, n]) => `<b class="${f === k ? 'on' : ''}" data-nf="${k}">${l}<i>${n}</i></b>`).join('')}</div>`
-    + (all.length ? `<a class="nlog-clear" data-nlog="clear" title="清掉全部通知紀錄">清除</a>` : '') + `</div>`;
+    + (all.length ? `<a class="nlog-clear" data-nlog="clear" title="清掉全部通知紀錄（通知放 7 天會自動刪）">清除通知</a>` : '') + `</div>`;
   if (!shown.length) {
     pane.innerHTML = head + `<div class="blank">${all.length ? '這個分類沒有通知' : '還沒有通知'}<small>跳出來的提示（方案進度、插話、重試、錯誤）都會留在這裡，錯過了可以回來看</small></div>`;
     return;
@@ -4263,8 +4282,7 @@ $('#paneNotes').addEventListener('click', (e) => {
   if (a.dataset.nlog === 'clear') {
     modal({ title: '清除通知紀錄？', desc: `${NLOG.items.length} 則通知會全部刪掉`, ok: '清除', danger: true }).then((ok) => {
       if (!ok) return;
-      NLOG.items = []; NLOG.open.clear();
-      localStorage.removeItem(NLOG_KEY); renderNotesLog();
+      nlogClearAll();
     });
     return;
   }
@@ -5789,7 +5807,7 @@ const SET_Q = {
     ['gTerm', '終端機', 'shell 終端機 Git Bash PowerShell 命令提示字元'],
     ['gPreview', '可預覽資料夾', '預覽 圖片 資料夾 allowed_dirs'],
     ['gCost', '花費與預算', '花費 預算 金額 上限 單價 計費'],
-    ['gRetention', '暫存與紀錄', '一鍵清除 清除 刪除 暫存 紀錄 用量紀錄 保留 7 天 30 天 隱私 spill logs'],
+    ['gRetention', '暫存與紀錄', '一鍵清除 清除 刪除 暫存 紀錄 用量紀錄 通知 保留 7 天 30 天 隱私 spill logs'],
     ['gFiles', '設定檔與資料夾', 'config.toml keys.toml 資料夾 開發者工具 console'],
   ],
   appearance: [
@@ -6606,7 +6624,7 @@ function renderGeneral(box) {
     <div class="frow" data-f="gCost"><div><b>花費與預算</b><small>依模型單價算金額，可設每日、每月上限。打開後模型商的模型表多一欄「單價」，右側「額度」多一張預算卡。用免費模型或訂閱就不用開。</small></div><div class="fctl"><span class="sw${S.cfg.cost_on ? ' on' : ''}" id="costOn"></span></div></div>
   </div>
   <div class="card">
-    <div class="card-hd" data-f="gRetention"><b>暫存與紀錄</b><small>工具長輸出的全文、背景指令紀錄放 7 天就自動刪；用量紀錄（模型、token 數、時間）放 30 天就刪。開程式時整理一次，之後每 6 小時一次。對話本身不受影響，刪對話時它的資料會一起刪。</small></div>
+    <div class="card-hd" data-f="gRetention"><b>暫存與紀錄</b><small>工具長輸出的全文、背景指令紀錄、通知放 7 天就自動刪；用量紀錄（模型、token 數、時間）放 30 天就刪。開程式時整理一次，之後每 6 小時一次。對話本身不受影響，刪對話時它的資料會一起刪。</small></div>
     <div class="frow"><div><b>現在留著的</b><small id="retInfo">讀取中…</small></div><div class="fctl"><span class="btn danger" id="retPurge">一鍵清除</span></div></div>
   </div>
   <div class="card">
@@ -6624,17 +6642,18 @@ function renderGeneral(box) {
     try {
       const r = await api('GET', '/api/retention');
       const old = r.usage_oldest ? `，最早 ${new Date(r.usage_oldest * 1000).toLocaleDateString()}` : '';
-      el.textContent = `暫存檔 ${r.files} 個（${mb(r.bytes)}）、用量紀錄 ${r.usage_rows} 筆${old}。資料庫 ${mb(r.db_bytes)}`;
+      el.textContent = `暫存檔 ${r.files} 個（${mb(r.bytes)}）、用量紀錄 ${r.usage_rows} 筆${old}、通知 ${NLOG.items.length} 則。資料庫 ${mb(r.db_bytes)}`;
     } catch (e) { el.textContent = '讀取失敗：' + e.message; }
   };
   showRet();
   $('#retPurge', box).onclick = async () => {
-    if (!await confirmBox('一鍵清除暫存與紀錄', '會馬上刪掉：工具長輸出的全文、背景指令紀錄（還在跑的除外）、全部用量紀錄（用量統計會歸零），並重整資料庫，把已刪對話留在檔案裡的舊內容一起清掉。\n\n對話本身不會刪。', { ok: '下一步', danger: true })) return;
+    if (!await confirmBox('一鍵清除暫存與紀錄', '會馬上刪掉：工具長輸出的全文、背景指令紀錄（還在跑的除外）、全部用量紀錄（用量統計會歸零）、全部通知，並重整資料庫，把已刪對話留在檔案裡的舊內容一起清掉。\n\n對話本身不會刪。', { ok: '下一步', danger: true })) return;
     if (!await confirmBox('再確認一次', '刪掉的資料無法復原，用量統計會從零開始算。確定要清除？', { ok: '清除', danger: true })) return;
     const b = $('#retPurge', box); b.classList.add('disabled'); b.textContent = '清除中…';
     try {
       const r = await api('POST', '/api/retention/purge');
-      notify('ok', '已清除', `暫存 ${r.files} 個（${mb(r.bytes)}）、用量紀錄 ${r.usage_rows} 筆；資料庫 ${mb(r.db_before)} → ${mb(r.db_after)}`
+      const nn = NLOG.items.length; nlogClearAll();
+      notify('ok', '已清除', `暫存 ${r.files} 個（${mb(r.bytes)}）、用量紀錄 ${r.usage_rows} 筆、通知 ${nn} 則；資料庫 ${mb(r.db_before)} → ${mb(r.db_after)}`
         + (r.vacuum_error ? `。資料庫重整沒做成（${r.vacuum_error}），舊內容會在下次清除時再處理` : ''));
     } catch (e) { notify('error', '清除失敗', e.message); }
     b.classList.remove('disabled'); b.textContent = '一鍵清除';

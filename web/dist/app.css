@@ -1948,7 +1948,7 @@ body.pane2 #paneA{padding:0}
 .askmulti-done > .a{margin-top:6px}
 /* ---- 右側「通知」分頁：彈窗的紀錄 ---- */
 #paneNotes{padding:10px 10px 16px}
-.nlog-hd{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.nlog-hd{display:flex;align-items:center;flex-wrap:wrap;gap:6px 8px;margin-bottom:10px}
 .nlog-seg b{padding:4px 9px;font-size:12px;display:inline-flex;align-items:center;gap:5px}
 .nlog-seg b i{font-style:normal;font-size:10.5px;color:var(--faint);font-weight:500}
 .nlog-clear{margin-left:auto;font-size:12px;color:var(--faint);cursor:pointer}
