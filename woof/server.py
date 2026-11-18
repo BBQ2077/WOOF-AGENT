@@ -1007,6 +1007,23 @@ async def _purge_sessions(ids: list[str]) -> int:
     return len(ids)
 
 
+@app.get("/api/retention")
+async def retention_stats():
+    """設定 → 一般 → 暫存與紀錄：現在有多少暫存、用量紀錄，保留天數。"""
+    from . import retention
+
+    return await asyncio.to_thread(retention.stats)
+
+
+@app.post("/api/retention/purge")
+async def retention_purge():
+    """一鍵清除：暫存與用量紀錄全刪、重整資料庫。對話本身不動。"""
+    from . import retention
+
+    live = {s["id"] for s in store.list_sessions()}
+    return await asyncio.to_thread(retention.purge_all, live)
+
+
 @app.delete("/api/sessions/{sid}")
 async def delete_session(sid: str):
     # 刪主對話時，底下的子代理對話（含更深一層）一起刪
@@ -1567,6 +1584,15 @@ async def _snapshot_housekeeping():
                 logging.getLogger("woof").info("回收沒人用的貼圖 %d 張（%.1f MB）", n, size / 1e6)
         except Exception:
             logging.getLogger("woof").exception("整理快照失敗")
+        try:
+            from . import retention
+
+            r = await asyncio.to_thread(retention.prune, {s["id"] for s in store.list_sessions()})
+            if r["files"] or r["usage_rows"] or r["orphan_rows"]:
+                logging.getLogger("woof").info("清掉過期暫存 %d 個（%.1f MB）、用量紀錄 %d 筆、已刪對話殘留 %d 筆",
+                                               r["files"], r["bytes"] / 1e6, r["usage_rows"], r["orphan_rows"])
+        except Exception:
+            logging.getLogger("woof").exception("清理過期資料失敗")
         await asyncio.sleep(6 * 3600)
 
 

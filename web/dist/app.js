@@ -6605,6 +6605,10 @@ function renderGeneral(box) {
     <div class="frow" data-f="gCost"><div><b>花費與預算</b><small>依模型單價算金額，可設每日、每月上限。打開後模型商的模型表多一欄「單價」，右側「額度」多一張預算卡。用免費模型或訂閱就不用開。</small></div><div class="fctl"><span class="sw${S.cfg.cost_on ? ' on' : ''}" id="costOn"></span></div></div>
   </div>
   <div class="card">
+    <div class="card-hd" data-f="gRetention"><b>暫存與紀錄</b><small>工具長輸出的全文、背景指令紀錄放 7 天就自動刪；用量紀錄（模型、token 數、時間）放 30 天就刪。開程式時整理一次，之後每 6 小時一次。對話本身不受影響，刪對話時它的資料會一起刪。</small></div>
+    <div class="frow"><div><b>現在留著的</b><small id="retInfo">讀取中…</small></div><div class="fctl"><span class="btn danger" id="retPurge">一鍵清除</span></div></div>
+  </div>
+  <div class="card">
     <div class="card-hd" data-f="gFiles"><b>設定檔與資料夾</b><small>想直接改檔案或看資料庫時從這裡打開。</small></div>
     <div class="frow"><div><b>設定檔</b><small>模型商、模型、工作目錄（config.toml）</small></div><div class="fctl"><span class="btn" data-open="config.toml">開啟</span></div></div>
     <div class="frow"><div><b>金鑰檔</b><small>所有 API 金鑰（keys.toml）。不要分享這個檔。</small></div><div class="fctl"><span class="btn" data-open="keys.toml">開啟</span></div></div>
@@ -6613,6 +6617,28 @@ function renderGeneral(box) {
   </div>`;
   box.querySelectorAll('[data-open]').forEach((b) => (b.onclick = async () => { if (D) D.openPath((await D.root()) + '\\' + b.dataset.open); }));
   $('#devtools', box).onclick = () => D && D.win('devtools');
+  const mb = (n) => `${(Number(n || 0) / 1048576).toFixed(1)} MB`;
+  const showRet = async () => {
+    const el = $('#retInfo', box); if (!el) return;
+    try {
+      const r = await api('GET', '/api/retention');
+      const old = r.usage_oldest ? `，最早 ${new Date(r.usage_oldest * 1000).toLocaleDateString()}` : '';
+      el.textContent = `暫存檔 ${r.files} 個（${mb(r.bytes)}）、用量紀錄 ${r.usage_rows} 筆${old}。資料庫 ${mb(r.db_bytes)}`;
+    } catch (e) { el.textContent = '讀取失敗：' + e.message; }
+  };
+  showRet();
+  $('#retPurge', box).onclick = async () => {
+    if (!await confirmBox('一鍵清除暫存與紀錄', '會馬上刪掉：工具長輸出的全文、背景指令紀錄（還在跑的除外）、全部用量紀錄（用量統計會歸零），並重整資料庫，把已刪對話留在檔案裡的舊內容一起清掉。\n\n對話本身不會刪。', { ok: '下一步', danger: true })) return;
+    if (!await confirmBox('再確認一次', '刪掉的資料無法復原，用量統計會從零開始算。確定要清除？', { ok: '清除', danger: true })) return;
+    const b = $('#retPurge', box); b.classList.add('disabled'); b.textContent = '清除中…';
+    try {
+      const r = await api('POST', '/api/retention/purge');
+      notify('ok', '已清除', `暫存 ${r.files} 個（${mb(r.bytes)}）、用量紀錄 ${r.usage_rows} 筆；資料庫 ${mb(r.db_before)} → ${mb(r.db_after)}`
+        + (r.vacuum_error ? `。資料庫重整沒做成（${r.vacuum_error}），舊內容會在下次清除時再處理` : ''));
+    } catch (e) { notify('error', '清除失敗', e.message); }
+    b.classList.remove('disabled'); b.textContent = '一鍵清除';
+    showRet();
+  };
 }
 
 // ---- 連線

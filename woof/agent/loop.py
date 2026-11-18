@@ -43,8 +43,8 @@ SPILL = DATA / "spill"
 SPILL.mkdir(exist_ok=True)
 
 
-def _clean_spill(days: int = 30) -> None:
-    """工具長輸出的全文存檔放 30 天就刪，資料夾不會無限長大。"""
+def _clean_spill(days: int = 7) -> None:
+    """工具長輸出的全文存檔放 7 天就刪（開程式時；之後由 woof.retention 每 6 小時整理）。"""
     cut = time.time() - days * 86400
     for p in SPILL.glob("*.txt"):
         try:
