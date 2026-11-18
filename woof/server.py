@@ -1020,8 +1020,17 @@ async def retention_purge():
     """一鍵清除：暫存與用量紀錄全刪、重整資料庫。對話本身不動。"""
     from . import retention
 
-    live = {s["id"] for s in store.list_sessions()}
-    return await asyncio.to_thread(retention.purge_all, live)
+    log = logging.getLogger("woof")
+    log.info("一鍵清除：開始")
+    try:
+        r = await asyncio.to_thread(retention.purge_all, set())
+    except Exception:
+        log.exception("一鍵清除失敗")
+        raise
+    log.info("一鍵清除：暫存 %d 個（%.1f MB）、用量紀錄 %d 筆、已刪對話殘留 %d 筆；資料庫 %.1f → %.1f MB%s",
+             r["files"], r["bytes"] / 1e6, r["usage_rows"], r["orphan_rows"], r["db_before"] / 1e6, r["db_after"] / 1e6,
+             f"；重整沒做成：{r['vacuum_error']}" if r["vacuum_error"] else "")
+    return r
 
 
 @app.delete("/api/sessions/{sid}")
