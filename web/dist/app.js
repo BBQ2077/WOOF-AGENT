@@ -2896,7 +2896,9 @@ function renderChat(scrollBottom) {
 function foldTools(root) {
   // 已收好的一列也算分隔：每次重畫都會再跑一遍，不能跨過它把前後兩段併成一列（會把後面的卡搬到前面、看起來像同一回合）
   let kids = [...root.children].filter((k) => k.classList && (k.classList.contains('tool') || k.classList.contains('toolfold')));
-  const nameOf = (k) => (k.classList.contains('toolfold') ? '' : ((k.querySelector('.th code') || {}).textContent || ''));
+  // 等你允許的卡（含子代理的）不收：當分隔，前後跑完的照收，它自己留在外面看得到
+  const waiting = (k) => !!(k.querySelector('.approve') || (k.dataset.id && S.approvals && S.approvals[k.dataset.id]));
+  const nameOf = (k) => (k.classList.contains('toolfold') || waiting(k) ? '' : ((k.querySelector('.th code') || {}).textContent || ''));
   let guard = 0;
   for (let i = 0; i < kids.length && guard++ < 200;) {
     const name = nameOf(kids[i]);
