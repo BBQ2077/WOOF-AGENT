@@ -5789,6 +5789,7 @@ const SET_Q = {
     ['gTerm', '終端機', 'shell 終端機 Git Bash PowerShell 命令提示字元'],
     ['gPreview', '可預覽資料夾', '預覽 圖片 資料夾 allowed_dirs'],
     ['gCost', '花費與預算', '花費 預算 金額 上限 單價 計費'],
+    ['gRetention', '暫存與紀錄', '一鍵清除 清除 刪除 暫存 紀錄 用量紀錄 保留 7 天 30 天 隱私 spill logs'],
     ['gFiles', '設定檔與資料夾', 'config.toml keys.toml 資料夾 開發者工具 console'],
   ],
   appearance: [
