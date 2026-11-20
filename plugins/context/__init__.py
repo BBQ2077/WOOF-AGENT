@@ -205,13 +205,62 @@ def register(woof):
             return
         _bg[ctx.session_id] = asyncio.create_task(_precompact(ctx.session_id, ctx.model_cfg, ctx.registry, ctx.emit))
 
-    async def prepare_turn(ctx):
-        from woof import store
-        from woof.agent.loop import aux_model
+    # 同一個對話一次只壓一個：手動、回合中、背景共用一把鎖。
+    # 鎖用 async with，成功、失敗、被叫停都會放掉；手動和背景另有時間上限，卡住也不會永遠鎖死
+    _locks: dict[str, asyncio.Lock] = {}
+    _last_done: dict[str, float] = {}
+    GUARD_TIMEOUT = 1800
+    RECENT_SEC = 10
 
-        pending_bg = _bg.get(ctx.session_id)
+    async def _compact_state(ctx, on: bool):
+        from woof.agent.loop import COMPACTING
+
+        if on:
+            COMPACTING[ctx.session_id] = time.time()
+        elif COMPACTING.pop(ctx.session_id, None) is None:
+            return
+        try:
+            await ctx.emit({"type": "compact_state", "session_id": ctx.session_id, "compacting": on})
+        except Exception:
+            pass
+
+    async def prepare_turn(ctx):
+        from woof.agent.loop import COMPACTING
+
+        sid = ctx.session_id
+        pending_bg = _bg.get(sid)
         if pending_bg and not pending_bg.done() and not getattr(ctx, "force_compact", False) and not getattr(ctx, "is_bg", False):
             await pending_bg  # 背景摘要還在跑，等它完成，下一回合直接用結果
+        manual = bool(getattr(ctx, "manual", False))
+        if manual and sid in COMPACTING:
+            ctx.compact_reason = "這個對話正在壓縮，等這次做完；不會重複壓縮"
+            return
+        lk = _locks.setdefault(sid, asyncio.Lock())
+        async with lk:
+            if manual and time.time() - _last_done.get(sid, 0) < RECENT_SEC:
+                ctx.compact_reason = "剛壓縮完，不用再壓一次"
+                return
+            try:
+                if manual or getattr(ctx, "is_bg", False):
+                    try:
+                        done = await asyncio.wait_for(_compact(ctx), GUARD_TIMEOUT)
+                    except asyncio.TimeoutError:
+                        raise RuntimeError(f"壓縮超過 {GUARD_TIMEOUT // 60} 分鐘沒做完，這次放棄；可以再壓一次") from None
+                else:
+                    done = await _compact(ctx)
+                if done:
+                    _last_done[sid] = time.time()
+                return done
+            except Exception as e:
+                if manual:
+                    ctx.compact_reason = f"壓縮失敗：{str(e)[:300]}"
+                raise
+            finally:
+                await _compact_state(ctx, False)
+
+    async def _compact(ctx):
+        from woof import store
+        from woof.agent.loop import aux_model
 
         from woof import tokens
 
@@ -329,6 +378,7 @@ def register(woof):
         if mid:
             why = "回合進行中，" + why
         ctx.compact_count = len(older)
+        await _compact_state(ctx, True)
         await ctx.emit({"type": "notice", "session_id": ctx.session_id,
                         "text": f"{why}，正在壓縮較早的 {len(older)} 則訊息（{method}・{mode}模式，目標約 {target} 字）…"})
         text, parts = await _summarize(model, prev, items, target, ctx.emit, ctx.session_id)
@@ -403,6 +453,7 @@ def register(woof):
 
     async def force_compact(ctx):
         ctx.force_compact = True
+        ctx.manual = True
         return bool(await prepare_turn(ctx))
 
     async def mid_turn(ctx):

@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import cron, keypool, procs, remote, store
-from .agent.loop import (AGENT_RUNS, sub_alive, flush_steer, mark_interrupted, peek_steer, pending_approvals, pop_steer,
+from .agent.loop import (AGENT_RUNS, COMPACTING, sub_alive, flush_steer, mark_interrupted, peek_steer, pending_approvals, pop_steer,
                          push_steer, requeue_steer, reset_allow_all,
                          resolve_approval, resume_session, run_turn)
 from . import config
@@ -121,6 +121,8 @@ async def broadcast(ev: dict) -> None:
     if sid and "busy" not in ev:
         ev["busy"] = _busy(sid)   # 每個事件都順便告訴前端「這個對話還在不在跑」
         ev["flow"] = _flow(sid)
+    if sid and "compacting" not in ev:
+        ev["compacting"] = sid in COMPACTING
     dead = []
     for ws in list(CLIENTS):
         try:
@@ -933,6 +935,7 @@ async def sessions():
     for r in rows:
         r["busy"] = _busy(r.get("id"))
         r["flow"] = _flow(r.get("id"))
+        r["compacting"] = r.get("id") in COMPACTING
     return rows
 
 
@@ -2928,6 +2931,7 @@ async def compact_session(sid: str):
     ctx.session_id = sid
     ctx.model_cfg = model_cfg
     ctx.registry = REG
+    ctx.manual = True
 
     async def emit(ev):
         await broadcast(ev)

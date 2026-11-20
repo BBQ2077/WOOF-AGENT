@@ -872,8 +872,9 @@ function bgRunInfo() {
   const s = cur(); if (!s) return null;
   const kids = S.sessions.filter((k) => k.parent === s.id && (S.running.has(k.id) || k.busy));
   const self = S.running.has(s.id) || s.busy;
-  if (!kids.length && !self) return null;
   const a = S.act[s.id] || {};
+  if (s.compacting) return { who: '', label: '正在壓縮', text: '把較早的訊息寫成摘要，做完前不會重複壓縮', at: a.at || 0 };
+  if (!kids.length && !self) return null;
   const lv = S.live[s.id];
   // 主對話正在串流字的時候不用這行（畫面本來就在動）
   if (!kids.length && lv && (Date.now() - (a.at || 0) < 4000)) return null;
@@ -885,10 +886,10 @@ function renderBgRun() {
   const el = $('#bgRun'); if (!el) return;
   const i = bgRunInfo();
   if (!i) { el.hidden = true; el._k = ''; return; }
-  const k = `${i.who}|${i.text}`;
+  const k = `${i.label || ''}|${i.who}|${i.text}`;
   if (el._k !== k) {
     el._k = k;
-    el.innerHTML = `<i class="run"></i><span class="bg-who">${esc(i.who ? `還在跑：${i.who}` : '還在跑')}</span>`
+    el.innerHTML = `<i class="run"></i><span class="bg-who">${esc(i.label || (i.who ? `還在跑：${i.who}` : '還在跑'))}</span>`
       + (i.text ? `<span class="bg-tx" title="${esc(i.text)}">${esc(i.text)}</span>` : '') + '<span class="bg-age"></span>';
   }
   el.hidden = false;
@@ -901,6 +902,10 @@ function onEvent(ev) {
   try { window.dispatchEvent(new CustomEvent('woof:event', { detail: ev })); } catch {}
   const sid = ev.session_id;
   noteAct(ev);
+  if (typeof ev.compacting === 'boolean' && sid) {
+    const s = S.sessions.find((x) => x.id === sid);
+    if (s && !!s.compacting !== ev.compacting) { s.compacting = ev.compacting; renderSessions(); renderBgRun(); }
+  }
   if (typeof ev.busy === 'boolean' && sid) {
     const s = S.sessions.find((x) => x.id === sid);
     const was = s && (s.busy || s.flow);
@@ -1307,7 +1312,7 @@ function renderSessions() {
     const deep = child && s._deep;
     delete s._deep;
     return `<div class="item${s.id === S.sid ? ' on' : ''}${child ? ' child' : ''}${deep ? ' deep' : ''}" data-sid="${s.id}" draggable="true"${child ? ' title="拖到群組或日期標題上＝拆出來變成獨立對話"' : ''}>`
-      + `<span class="t"${child ? ` title="${esc(s.title || '')}"` : ''}>${S.running.has(s.id) || s.busy || (kids[s.id] || []).some((k) => S.running.has(k.id) || k.busy) ? '<i class="run"></i>' : ''}${s.pinned ? `<span class="pin">${ico('pin')}</span>` : ''}${esc(child ? (s.title || '子代理').replace(/^(子代理|審核模型|拓展模型)[:：]\s*/, '') : (s.title || '新對話'))}</span>`
+      + `<span class="t"${child ? ` title="${esc(s.title || '')}"` : ''}>${S.running.has(s.id) || s.busy || s.compacting || (kids[s.id] || []).some((k) => S.running.has(k.id) || k.busy) ? '<i class="run"></i>' : ''}${s.pinned ? `<span class="pin">${ico('pin')}</span>` : ''}${esc(child ? (s.title || '子代理').replace(/^(子代理|審核模型|拓展模型)[:：]\s*/, '') : (s.title || '新對話'))}</span>`
       + `<small>${wait ? '等你確認 · ' : ''}${(s.engine_state || {}).forked_from ? '分支 · ' : ''}${esc(m ? m.label : s.model || '')}</small><span class="del" title="刪除">${ico('x')}</span></div>`;
   };
   const live = (idList) => idList.filter((id) => S.running.has(id) || (S.sessions.find((x) => x.id === id) || {}).busy).length;
@@ -2072,7 +2077,7 @@ function toolCard(call, result) {
     for (const p of imgs) {
       const im = document.createElement('img');
       im.src = fileUrl(p.path); im.loading = 'lazy'; im.title = p.path;
-      im.onclick = (ev) => { ev.stopPropagation(); openPreview(p.path); };
+      im.onclick = (ev) => { ev.stopPropagation(); openViewer(im, [...box.querySelectorAll('img')].map((x) => x.src)); };
       box.appendChild(im);
     }
     el.insertBefore(box, $('pre', el));
@@ -2146,13 +2151,13 @@ $('#chat').addEventListener('click', (e) => {
 // ── 看圖（在 WOOF 裡開，不丟瀏覽器）────────────────────────────
 const V = { list: [], i: 0, s: 1, x: 0, y: 0, rot: 0, fit: 1, moved: false };
 const vImg = $('#viewerImg'), vStage = $('#vStage');
-function openViewer(img) {
+function openViewer(img, list) {
   // 寵物欄的圖：左右切換只在寵物送過的圖之間，不混進主對話的圖
   const pet = img && img.closest && img.closest('#panePet');
   const all = (pet ? [...$('#petHist').querySelectorAll('.patt img')] : [...$('#chat').querySelectorAll('.thumbs img, .md img, .bubble img')]).filter((x) => x.src);
-  V.list = [...new Set(all.map((x) => x.src))];
-  V.i = Math.max(0, V.list.indexOf(img.src));
-  if (!V.list.length) V.list = [img.src];
+  V.list = list && list.length ? [...new Set(list)] : [...new Set(all.map((x) => x.src))];
+  V.i = V.list.indexOf(img.src);
+  if (V.i < 0) { V.list = [img.src]; V.i = 0; }   // 不在對話裡的圖（檔案、產物）只看那一張，不會跳成別張
   $('#viewer').classList.add('on');
   $('#viewer').classList.toggle('multi', V.list.length > 1);
   showViewerImg();
@@ -4213,15 +4218,27 @@ document.addEventListener('keydown', (e) => {
   if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === 'b') { e.preventDefault(); setSide(document.body.classList.contains('side-off')); }
 });
 
+const COMPACT_REQ = new Set();   // 這個畫面送出、還沒回來的手動壓縮（擋連按；後端另有鎖）
 async function compactNow() {
   if (!S.sid) { notify('warn', '還沒有對話可以壓縮'); return; }
+  const sid = S.sid, s = cur();
+  if (COMPACT_REQ.has(sid) || (s && s.compacting)) { notify('info', '正在壓縮', '這個對話已經在壓縮，做完前不會重複壓縮'); return; }
+  COMPACT_REQ.add(sid);
+  if (s) { s.compacting = true; renderSessions(); renderBgRun(); }
   const n = notify('info', '壓縮中…', '', 0);
   try {
-    const r = await api('POST', '/api/sessions/' + S.sid + '/compact');
+    const r = await api('POST', '/api/sessions/' + sid + '/compact');
     if (r.ok) { notify('ok', `已壓縮較早的 ${r.count} 則訊息`, '原始訊息還在，只是送給模型時改用摘要。'); await loadSessions(); renderMeter(); }
+    else if (/^壓縮失敗/.test(r.reason || '')) notify('error', '壓縮失敗', `${r.reason.replace(/^壓縮失敗：/, '')}\n可以再按一次壓縮重試。`);
     else notify('info', '這次沒有壓縮', r.reason || '內容還不夠長，不需要壓縮');
-  } catch (e) { notify('error', '壓縮失敗', e.message); }
-  n.remove();
+  } catch (e) { notify('error', '壓縮失敗', `${e.message}\n可以再按一次壓縮重試。`); }
+  finally {
+    // 不管成功失敗都放開，不會卡在「正在壓縮」；後端還在壓的話，它的事件會再亮起來
+    COMPACT_REQ.delete(sid);
+    const s2 = S.sessions.find((x) => x.id === sid);
+    if (s2) { s2.compacting = false; renderSessions(); renderBgRun(); }
+    n.remove();
+  }
 }
 $('#compactBtn').onclick = compactNow;
 
@@ -4835,7 +4852,17 @@ document.addEventListener('drop', (e) => {
 // ---- 預覽：圖片、影音、Markdown、HTML、程式碼與文字；其他檔用預設程式開
 const PV_LANG = { js: 'javascript', mjs: 'javascript', cjs: 'javascript', ts: 'typescript', tsx: 'typescript', jsx: 'javascript', py: 'python', json: 'json', toml: 'ini', ini: 'ini', yml: 'yaml', yaml: 'yaml', md: 'markdown', html: 'xml', htm: 'xml', xml: 'xml', svg: 'xml', css: 'css', sh: 'bash', bash: 'bash', ps1: 'powershell', bat: 'dos', cmd: 'dos', c: 'c', h: 'c', cpp: 'cpp', cs: 'csharp', java: 'java', go: 'go', rs: 'rust', rb: 'ruby', php: 'php', sql: 'sql', lua: 'lua', kt: 'kotlin', swift: 'swift' };
 const AUD_EXT = /\.(mp3|wav|m4a|ogg|flac)$/i;
+// 同一區的其他圖片（產物分頁、檔案樹裡看得到的），看圖器左右切換用；找不到就只看這一張
+function imgSiblings(path) {
+  const pick = (sel, attr) => [...document.querySelectorAll(sel)].map((x) => x.getAttribute(attr) || '').filter((p) => IMG_EXT.test(p));
+  for (const ps of [pick('.art-grid [data-ap]', 'data-ap'), pick('.ft-row[data-fp]', 'data-fp')]) {
+    if (ps.includes(path)) return ps.map(fileUrl);
+  }
+  return [];
+}
 async function openPreview(path) {
+  // 圖片一律用看圖器開（可以縮放、拖曳、旋轉），PNG、JPG、GIF、WebP、BMP 都一樣
+  if (IMG_EXT.test(path)) { openViewer({ src: fileUrl(path) }, imgSiblings(path)); return; }
   $$('.pv-bg').forEach((x) => x.remove());
   const name = path.split(/[\\/]/).pop(), ext = (name.split('.').pop() || '').toLowerCase();
   const bg = document.createElement('div'); bg.className = 'pv-bg';
@@ -4858,7 +4885,7 @@ async function openPreview(path) {
     if (k === 'open') D.openPath(path);
   });
   const url = fileUrl(path);
-  if (IMG_EXT.test(name) || ext === 'svg') { bd.innerHTML = `<div class="pv-img"><img data-img="${esc(path)}" src="${url}"></div>`; $('img', bd).onerror = () => { bd.innerHTML = '<div class="blank">讀不到這張圖（檔案不存在或不在允許的資料夾）</div>'; }; return; }
+  if (IMG_EXT.test(name) || ext === 'svg') { bd.innerHTML = `<div class="pv-img"><img data-img="${esc(path)}" src="${url}" title="點一下放大看" style="cursor:zoom-in"></div>`; $('img', bd).onclick = () => openViewer({ src: url }); $('img', bd).onerror = () => { bd.innerHTML = '<div class="blank">讀不到這張圖（檔案不存在或不在允許的資料夾）</div>'; }; return; }
   if (VID_EXT.test(name)) { bd.innerHTML = `<div class="pv-img"><video src="${url}" controls></video></div>`; return; }
   if (AUD_EXT.test(name)) { bd.innerHTML = `<div class="pv-aud"><audio src="${url}" controls></audio></div>`; return; }
   if (ext === 'pdf') { bd.innerHTML = `<div class="blank">PDF 用預設程式開比較完整<span class="btn sm" data-pv="open">用預設程式開</span></div>`; return; }
@@ -6274,8 +6301,7 @@ async function renderCompressSec(box) {
     }
     if (e.target.closest('[data-cmpnow]')) {
       if (!S.sid) { notify('warn', '先開一個對話'); return; }
-      try { await api('POST', `/api/sessions/${S.sid}/compact`); }
-      catch (err) { notify('error', '壓縮失敗', err.message); }
+      await compactNow();
     }
   };
 }

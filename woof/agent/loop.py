@@ -1710,6 +1710,10 @@ def bg_children(session_id: str) -> list[str]:
             if p == session_id and c in BG_BY_SID and not BG_BY_SID[c].done()]
 
 
+# 正在寫摘要的對話（session_id → 開始時間）：context 插件寫，事件和側欄用來亮「正在壓縮」
+COMPACTING: dict[str, float] = {}
+
+
 def sub_alive(session_id: str) -> bool:
     """這個子代理對話還有人在跑它：正在跑一步、或背景任務還沒結束（排隊等名額、重開後剛接回）。
     這時對它說話一律當插話排進去，不能另開一輪（同一個對話兩邊同時跑會互相打架）。"""
