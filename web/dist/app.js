@@ -1703,10 +1703,12 @@ function renderModelMenu() {
   const favSet = new Set(favs.map((m) => m.id));
   if (favs.length) {
     html += '<div class="mgrp fav">我的最愛</div>';
-    let lastV = null;
-    for (const m of favs) {
-      if (m.vendor !== lastV) { html += `<div class="mfv">${esc(vendorName(m.vendor))}</div>`; lastV = m.vendor; }
-      html += modelRowHtml(m);
+    // 同一家放在一起，家的順序跟下面服務商清單一樣
+    const vo = S.vendors.map((v) => v.id), rank = (k) => vo.indexOf(k || '') + 1 || 999;
+    const byV = new Map();
+    for (const m of favs) { const k = m.vendor || ''; if (!byV.has(k)) byV.set(k, []); byV.get(k).push(m); }
+    for (const k of [...byV.keys()].sort((a, b) => rank(a) - rank(b))) {
+      html += `<div class="mfv">${esc(vendorName(k))}</div>` + byV.get(k).map(modelRowHtml).join('');
     }
   }
   const groups = new Map();
@@ -6349,9 +6351,11 @@ function openSpick(anchor, items, current, onPick) {
 // ---- 共用模型選擇：先選服務商，再選模型。設定頁選模型的地方都用這組。
 const MPICK = {};        // id -> { o, cur }，每次渲染時登記
 const MPICK_VENDOR = {}; // id -> 已選服務商（還沒選模型時）
-function mpVendorList(filter) {
+// 設定頁選模型時列哪些：「編輯模型」有勾、插件有載入的；已經選著的照樣列，設定值不會看起來不見
+function mpShown(m, cur) { return (m.enabled !== false && m.available !== false) || m.id === cur; }
+function mpVendorList(filter, cur) {
   const seen = new Map();
-  for (const m of S.models || []) if (filter(m) && !seen.has(m.vendor)) seen.set(m.vendor, m.vendor_label || m.vendor || '其他');
+  for (const m of S.models || []) if (filter(m) && mpShown(m, cur) && !seen.has(m.vendor)) seen.set(m.vendor, m.vendor_label || m.vendor || '其他');
   return [...seen].map(([id, label]) => ({ id, label }));
 }
 function mpVendorOf(id) {
@@ -6364,7 +6368,7 @@ function mpPairHtml(id, cur, o) {
   const filter = o.filter || (() => true);
   const m = (S.models || []).find((x) => x.id === (cur || ''));
   const vid = mpVendorOf(id);
-  const vend = mpVendorList(filter).find((v) => v.id === vid) || (m ? { label: m.vendor_label || m.vendor } : null);
+  const vend = mpVendorList(filter, cur).find((v) => v.id === vid) || (m ? { label: m.vendor_label || m.vendor } : null);
   const vText = vend ? vend.label : (o.blank || '未設定');
   const mText = m ? m.label : (vid ? '請選模型' : '—');
   return `<div class="apair mpick" data-mpid="${esc(id)}">`
@@ -6389,8 +6393,8 @@ document.addEventListener('click', (e) => {
   if (vb) {
     const id = vb.dataset.mpv, p = MPICK[id]; if (!p) return;
     const filter = p.o.filter || (() => true);
-    const items = [{ v: '', label: p.o.blank || '未設定' }, ...mpVendorList(filter).map((v) => ({
-      v: v.id, label: v.label, sub: `${(S.models || []).filter((m) => m.vendor === v.id && filter(m)).length} 個模型` }))];
+    const items = [{ v: '', label: p.o.blank || '未設定' }, ...mpVendorList(filter, p.cur).map((v) => ({
+      v: v.id, label: v.label, sub: `${(S.models || []).filter((m) => m.vendor === v.id && filter(m) && mpShown(m, p.cur)).length} 個模型` }))];
     openSpick(vb, items, mpVendorOf(id), (vid) => {
       if (!vid) { delete MPICK_VENDOR[id]; mpSet(id, ''); return; }
       MPICK_VENDOR[id] = vid;
@@ -6403,7 +6407,7 @@ document.addEventListener('click', (e) => {
   if (mb) {
     const id = mb.dataset.mpm, p = MPICK[id]; if (!p) return;
     const vid = mpVendorOf(id), filter = p.o.filter || (() => true);
-    const items = (S.models || []).filter((m) => m.vendor === vid && filter(m)).map((m) => {
+    const items = (S.models || []).filter((m) => m.vendor === vid && filter(m) && mpShown(m, p.cur)).map((m) => {
       const subs = [m.no_key ? '還沒設 API key' : '', m.vision ? '看圖' : '', m.available === false ? '插件未載入' : ''].filter(Boolean);
       return { v: m.id, label: m.label || m.id, sub: subs.join(' · '), disabled: m.available === false };
     });
@@ -6417,7 +6421,7 @@ function mchkHtml(id, selected, o) {
   const sel = new Set((Array.isArray(selected) ? selected : String(selected || '').split(',')).map((x) => x.trim()).filter(Boolean));
   MCHK[id] = { sel, def: o.def || '', o };
   const filter = o.filter || (() => true);
-  const ms = (S.models || []).filter((m) => m.kind !== 'image' && m.kind !== 'video' && !m.hidden && filter(m));
+  const ms = (S.models || []).filter((m) => m.kind !== 'image' && m.kind !== 'video' && !m.hidden && filter(m) && (mpShown(m) || sel.has(m.id)));
   const groups = new Map();
   for (const m of ms) {
     const k = m.vendor || '';
