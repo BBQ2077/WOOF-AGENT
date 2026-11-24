@@ -25,9 +25,13 @@ MAX_DOWNLOAD = 15 * 1024 * 1024  # 網址圖片上限 15 MB
 
 
 def _shrink(im: Image.Image, max_px: int, region: tuple[int, int, int, int] | None) -> tuple[str, str]:
+    from woof.agent.loop import img_fit
+
     if region:
         im = im.crop(region)
-    im.thumbnail((max_px, max_px))
+    fit = img_fit(*im.size, max_px)   # 最長邊和每張 token 上限都要符合
+    if fit != tuple(im.size):
+        im = im.resize(fit, Image.LANCZOS)
     _shrink.last = im.size
     if im.mode not in ("RGB", "RGBA"):
         im = im.convert("RGB")

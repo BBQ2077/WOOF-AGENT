@@ -1985,6 +1985,7 @@ def req_sig(session_id: str) -> list:
 
 IMG_SIDE = 1568            # 送給模型的圖最長邊預設值（看圖插件的設定 max_px 可改，256～2576）
 IMG_SIDE_MAX = 2576        # Claude 高解析度等級的最長邊上限，再大服務商也會縮
+IMG_TOK = 1500             # 每張圖最多幾 token 的預設值（看圖插件的設定 max_tokens 可改，200～4784）
 
 
 def img_side() -> int:
@@ -1996,6 +1997,31 @@ def img_side() -> int:
     except (TypeError, ValueError):
         v = IMG_SIDE
     return max(256, min(v, IMG_SIDE_MAX))
+
+
+def img_tok_max() -> int:
+    """每張圖最多幾 token（看圖插件的設定 max_tokens）：不管圖是什麼形狀都縮到這個量以內。"""
+    vp = (getattr(REG, "plugins", None) or {}).get("vision")
+    try:
+        v = int(((vp.settings if vp else None) or {}).get("max_tokens") or IMG_TOK)
+    except (TypeError, ValueError):
+        v = IMG_TOK
+    return max(200, min(v, 4784))
+
+
+def img_fit(w: int, h: int, side: int | None = None, tok: int | None = None) -> tuple[int, int]:
+    """縮到最長邊不超過 side、token（每 28×28 像素 1 個）不超過 tok 的最大尺寸，保持長寬比；本來就夠小原樣回傳。"""
+    import math
+
+    side = side or img_side()
+    tok = tok or img_tok_max()
+    s = min(1.0, side / max(w, h, 1), math.sqrt(tok * 784 / max(w * h, 1)))
+    while s > 0:
+        nw, nh = max(1, int(w * s)), max(1, int(h * s))
+        if max(nw, nh) <= side and math.ceil(nw / 28) * math.ceil(nh / 28) <= tok:
+            return nw, nh
+        s *= 0.98
+    return 1, 1
 IMG_JPEG_OVER = 700_000    # 縮完還超過這麼大就轉 JPEG（截圖存成 PNG 常常一張 1～2 MB）
 _IMG_CACHE: dict = {}
 
@@ -2015,8 +2041,8 @@ def load_image_b64(block: dict) -> tuple[str, str]:
         return hit
     p = Path(block["path"])
     st = p.stat()
-    side = img_side()
-    key = (str(p), st.st_mtime_ns, st.st_size, side)
+    side, tok = img_side(), img_tok_max()
+    key = (str(p), st.st_mtime_ns, st.st_size, side, tok)
     hit = _IMG_CACHE.get(key)
     if hit:
         return hit
@@ -2027,8 +2053,11 @@ def load_image_b64(block: dict) -> tuple[str, str]:
         from PIL import Image
 
         im = Image.open(BytesIO(data))
-        if (max(im.size) > side or len(data) > IMG_JPEG_OVER) and not getattr(im, "is_animated", False):
-            im.thumbnail((side, side))
+        fit = img_fit(*im.size, side, tok)
+        resized = fit != tuple(im.size)
+        if (resized or len(data) > IMG_JPEG_OVER) and not getattr(im, "is_animated", False):
+            if resized:
+                im = im.resize(fit, Image.LANCZOS)
             buf = BytesIO()
             if mt == "image/png" and im.mode in ("RGBA", "LA", "P"):
                 im.save(buf, "PNG", optimize=True)
@@ -2036,7 +2065,7 @@ def load_image_b64(block: dict) -> tuple[str, str]:
                 buf = BytesIO()
                 im.convert("RGB").save(buf, "JPEG", quality=85, optimize=True)
                 mt = "image/jpeg"
-            if buf.tell() < len(data):
+            if resized or buf.tell() < len(data):   # 縮了尺寸一定用新的（token 才會降）
                 data = buf.getvalue()
             else:
                 mt = block.get("media_type") or "image/png"

@@ -23,16 +23,16 @@ def estimate_text(text: str) -> int:
 
 
 def image_tokens() -> int:
-    """一張圖約幾 token：Claude 每 28×28 像素 1 個，用設定的最長邊、16:9 估（1568 px 約 1800）。"""
+    """一張圖約幾 token：Claude 每 28×28 像素 1 個；送出前已縮到每張上限以內（預設 1500），用上限和最長邊 16:9 的較小值估。"""
     import math
 
     try:
-        from woof.agent.loop import img_side
+        from woof.agent.loop import img_side, img_tok_max
 
-        s = img_side()
+        s, cap = img_side(), img_tok_max()
     except Exception:
-        s = 1568
-    return math.ceil(s / 28) * math.ceil(s * 9 / 16 / 28)
+        s, cap = 1568, 1500
+    return min(cap, math.ceil(s / 28) * math.ceil(s * 9 / 16 / 28))
 
 
 def estimate_blocks(content) -> int:
