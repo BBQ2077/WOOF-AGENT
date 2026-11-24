@@ -20,7 +20,7 @@ label = "用量超過上下文窗口的百分之幾就壓縮：回合結束後�
 in_settings = "compress"
 type = "number"
 default = 3
-label = "保留最近幾輪不壓縮（使用者一則＋模型的回覆，含中間的工具呼叫，算一輪）；最近的訊息另外至少留上下文的 2.5%（一萬到兩萬五千 token）原樣"
+label = "保留最近幾輪不壓縮（使用者一則＋模型的回覆，含中間的工具呼叫，算一輪）；最近的訊息另外至少留上下文的 2.5%（一萬到兩萬五千 token）原樣；保留的部分超過下面的上限時，只留最新放得下的部分"
 
 [settings.ratio]
 in_settings = "compress"
@@ -46,6 +46,12 @@ in_settings = "compress"
 type = "number"
 default = 1
 label = "壓縮後工具附的圖保留最近幾張（0 到 50），更早的不再送給模型（檔案都還在，要看可以再開）"
+
+[settings.tail_max]
+in_settings = "compress"
+type = "number"
+default = 15
+label = "壓縮後原樣保留的最近訊息，最多佔上下文幾 %（5 到 50）：最近幾輪太長時只留最新的部分，其餘寫進摘要"
 
 
 [settings.mid_turn]

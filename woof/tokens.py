@@ -26,8 +26,13 @@ def estimate_blocks(content) -> int:
     n = 4  # 每則訊息的角色、分隔等固定開銷
     for b in content or []:
         t = b.get("type")
-        if t in ("text", "thinking"):
+        if t == "text":
             n += estimate_text(b.get("text") or "")
+        elif t == "thinking":
+            # Claude 回傳的思考文字只是摘要，完整思考加密在 signature 裡，送回去時照完整長度算輸入
+            n += max(estimate_text(b.get("text") or ""), len(b.get("signature") or "") // 3)
+        elif t == "redacted_thinking":
+            n += len(b.get("data") or "") // 3
         elif t == "tool_call":
             n += estimate_text(b.get("name") or "") + estimate_text(json.dumps(b.get("args") or {}, ensure_ascii=False))
         elif t == "tool_result":
