@@ -5,11 +5,13 @@ description = "讓 agent 看圖：本機或網址圖片（vision_analyze）、�
 enabled = true
 
 [settings.max_px]
+in_settings = "compress"
 type = "number"
 default = 1568
 label = "送給模型的圖最長邊（像素，256～2576）：使用者貼的圖、工具附的圖都照這個縮，另外每張還要在下面的 token 上限以內（Claude 每 28×28 像素算 1 個 token）"
 
 [settings.max_tokens]
+in_settings = "compress"
 type = "number"
 default = 1500
 label = "每張圖最多幾 token（200～4784）：不管圖是什麼形狀都縮到這個量以內再送給模型。1500 約等於 16:9 的 1460×820；改了以後新的圖照新設定，工具附過的圖維持當時大小，使用者貼過的圖下一次送出起改用新大小（快取重算一次）"

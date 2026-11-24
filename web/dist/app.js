@@ -5563,7 +5563,7 @@ const SECTIONS = [
   ['flow', '方案模式', '對話框左下「方案・人工／對抗／拓展」的次數上限、審核等多久，以及審核、拓展模型收到的提示詞。'],
   ['styles', '輸出風格', '每個對話可以選一種風格，內容會放進系統提示。'],
   ['pet', '寵物', '陪你聊天的小角色。他有自己的對話、記憶和角色檔，跟主對話分開；對你的對話只看不改——不會插話、不會用工具、不會動任何檔案。'],
-  ['compress', '上下文壓縮', '對話變長時把較早的內容摘要起來，全文仍留在資料庫。'],
+  ['compress', '上下文壓縮', '對話變長時把較早的內容摘要起來，全文仍留在資料庫。圖片送出前縮多小也在這裡。'],
   ['perms', '權限', '模型要用工具時，依類別決定直接執行、先問你、或不允許。'],
   ['tools', '工具', '每個工具的總開關（含 Skill、記憶的讀和寫），依插件分組。停用後模型看不到該工具；整個插件的啟停、安裝在「插件」頁，單一對話在「上下文 → 本回合工具」。'],
   ['skills', 'Skills', '有哪些 skill 文件、從哪些資料夾讀、勾選哪些（預設全部關閉）。讀寫的開關在「工具」。'],
@@ -5836,6 +5836,10 @@ const SET_Q = {
     ['c-ratio', '摘要幅度', '摘要 比例 長度'],
     ['c-method', '壓縮方式', '單次 多工 一次摘要'],
     ['c-parallel', '同時跑幾段', '多工 平行 段數'],
+    ['c-tail', '原樣保留上限', '保留 尾段 百分比'],
+    ['c-imgtok', '每張圖最多幾 token', '圖片 token 縮圖 上限 截圖'],
+    ['c-imgpx', '圖最長邊', '圖片 像素 解析度 縮圖'],
+    ['c-imgkeep', '壓縮後保留幾張工具圖', '圖片 保留 張數'],
     ['cSave', '儲存壓縮設定', '儲存 立即壓縮'],
   ],
   perms: [
@@ -6294,6 +6298,9 @@ async function renderCompressSec(box) {
   if (!p) { box.innerHTML = '<div class="blank">找不到 context 插件，請到「插件」頁確認已載入</div>'; return; }
   const sc = p.settings_schema || {};
   const val = (k) => ((p.settings || {})[k] ?? (sc[k] || {}).default ?? '');
+  const vp = rows.find((r) => r.name === 'vision');
+  const vval = (k) => ((vp && vp.settings) || {})[k] ?? (((vp && vp.settings_schema) || {})[k] || {}).default ?? '';
+  const vnum = (k, min, max, unit = '', cls = '') => `<label class="cin ${cls}"><input type="number" data-vnum="${k}" min="${min}" max="${max}" value="${esc(String(vval(k)))}"><span>${unit}</span></label>`;
   const seg = (k, opts) => `<div class="seg" data-cseg="${k}">${opts.map((o) => `<b data-cv="${esc(o)}" class="${String(val(k)) === o ? 'on' : ''}">${esc(o)}</b>`).join('')}</div>`;
   const num = (k, min, max, unit = '', cls = '') => `<label class="cin ${cls}"><input type="number" data-cnum="${k}" min="${min}" max="${max}" value="${esc(String(val(k)))}"><span>${unit}</span></label>`;
   const row = (id, title, hint, ctl) => `<div class="frow" data-f="${id}"><div><b>${title}</b><small>${hint}</small></div><div>${ctl}</div></div>`;
@@ -6315,6 +6322,13 @@ async function renderCompressSec(box) {
       ${row('c-ratio', '摘要幅度', '摘要長度佔原文的百分比，5 到 60。建議 10 到 30。', num('ratio', 5, 60, '%'))}
       ${row('c-method', '壓縮方式', '單次＝整段一次摘要。多工＝依字數分段，同時摘要後合併，長對話比較快。', seg('method', ['單次', '多工']))}
       ${row('c-parallel', '同時跑幾段', '只在多工時生效，1 到 8。', num('parallel', 1, 8, '段'))}
+      ${row('c-tail', '原樣保留上限', '壓縮後原樣保留的最近訊息，最多佔上下文幾 %（5 到 50）。超過時只留最新放得下的部分，其餘寫進摘要。', num('tail_max', 5, 50, '%'))}
+    </div>
+    <div class="cmp-h">圖片</div>
+    <div class="card cmp">
+      ${vp ? row('c-imgtok', '每張圖最多幾 token', '你貼的圖、工具附的圖、截圖都先縮到這個量以內再送（200 到 4784）。Claude 每 28×28 像素算 1 個 token：1500 約等於 16:9 的 1416×797、正方形 1062×1062。改了以後新的圖照新設定；工具附過的圖維持當時大小，你貼過的圖下一次送出起改用新大小（快取重算一次）。', vnum('max_tokens', 200, 4784, 'token', 'wide'))
+      + row('c-imgpx', '圖最長邊', '另一個上限：最長邊不超過幾像素（256 到 2576）。', vnum('max_px', 256, 2576, 'px', 'wide')) : ''}
+      ${row('c-imgkeep', '壓縮後保留幾張工具圖', '壓縮後工具附的圖保留最近幾張（0 到 50），更早的不再送給模型（檔案都還在，要看可以再開）。', num('keep_images', 0, 50, '張'))}
       <div class="cmp-foot" data-f="cSave"><span class="btn primary" data-cmpsave>儲存壓縮設定</span><span class="btn" data-cmpnow${S.sid ? '' : ' style="opacity:.5"'}>立即壓縮目前對話</span></div>
     </div>`;
   const vals = { method };
@@ -6322,10 +6336,15 @@ async function renderCompressSec(box) {
   box.onclick = async (e) => {
     const sb = e.target.closest('[data-cseg] b'); if (sb) return pick(sb.parentElement.dataset.cseg, sb.dataset.cv);
     if (e.target.closest('[data-cmpsave]')) {
-      const settings = { method: vals.method };
+      // 後端整份覆寫設定：先帶上原本的值，沒顯示在這頁的欄位才不會被清掉
+      const settings = { ...(p.settings || {}), method: vals.method };
       box.querySelectorAll('[data-cnum]').forEach((el) => { settings[el.dataset.cnum] = Number(el.value); });
-      try { await api('POST', '/api/plugins/context', { settings }); }
-      catch (err) { notify('error', '儲存失敗', err.message); return; }
+      const vset = { ...((vp && vp.settings) || {}) };
+      box.querySelectorAll('[data-vnum]').forEach((el) => { vset[el.dataset.vnum] = Number(el.value); });
+      try {
+        await api('POST', '/api/plugins/context', { settings });
+        if (vp) await api('POST', '/api/plugins/vision', { settings: vset });
+      } catch (err) { notify('error', '儲存失敗', err.message); return; }
       notify('ok', '壓縮設定已儲存', '下一次壓縮就用新設定');
       loadCtxCap();
       renderCompressSec(box);
