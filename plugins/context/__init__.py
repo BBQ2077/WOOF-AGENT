@@ -117,24 +117,6 @@ def _users_section(messages: list[dict], through: int) -> str:
     return "\n\n".join(picked)
 
 
-def _strip_kept_thinking(kept: list[dict], summary: dict) -> list[dict]:
-    """Claude 的思考綁著它前面的全部內容。壓縮時原樣留下的那幾則，前面已經換成摘要，
-    它們的思考就對不上了（可能回 400，也可能照收費、讓模型讀到過期的推理）：送出時拿掉那幾則的思考，其餘照留。
-    壓縮之後才產生的思考是接在摘要後面想的，照常送回。資料庫裡的原訊息不動。"""
-    ids = {int(i) for i in summary.get("kept") or []}
-    if not ids:
-        return kept
-    out = []
-    for m in kept:
-        if int(m.get("id") or 0) in ids and any(b.get("type") in ("thinking", "redacted_thinking") for b in m.get("content") or []):
-            blocks = [b for b in m["content"] if b.get("type") not in ("thinking", "redacted_thinking")]
-            if not blocks:
-                continue
-            m = {**m, "content": blocks}
-        out.append(m)
-    return out
-
-
 def _render(items: list[tuple[str, str]]) -> str:
     return "\n\n".join(f"【{WHO.get(role, role)}】\n{body}" for role, body in items)
 
@@ -470,7 +452,9 @@ def register(woof):
             if last_id and n_res and used - saved < window * trigger * 0.8:
                 cur = dict((store.get_session(ctx.session_id) or {}).get("engine_state") or {})
                 cur["prune"] = {"through": last_id, "at": time.time(), "count": n_res, "saved": saved}
-                from woof.agent.loop import retire_images_on_compact
+                from woof.agent.loop import mark_rewrite, retire_images_on_compact
+
+                mark_rewrite(cur, pending[-1]["id"])
 
                 retire_images_on_compact(ctx.session_id, cur, _keep_images())   # 前綴反正重算，舊圖一起收
                 s2 = store.update_session(ctx.session_id, engine_state=cur)
@@ -556,9 +540,10 @@ def register(woof):
         cur["summary"] = {"through": older[-1]["id"], "text": text, "at": time.time(),
                           "kept": sorted(recent_ids), "mode": mode, "method": method, "parts": parts,
                           "inflight": inflight, **({"how": how} if how else {})}
-        from woof.agent.loop import retire_images_on_compact
+        from woof.agent.loop import mark_rewrite, retire_images_on_compact
 
         retire_images_on_compact(ctx.session_id, cur, _keep_images())   # 前綴反正重算，舊圖一起收，只留最新幾張
+        mark_rewrite(cur, pending[-1]["id"])   # 原樣保留的那幾則，前面已經換成摘要：它們的思考（Claude）之後不送
         s2 = store.update_session(ctx.session_id, engine_state=cur)
         # 對話畫面據此在被摘要的訊息後面畫一條分隔線（可展開看摘要）
         await ctx.emit({"type": "session_updated", "session": s2})
@@ -588,8 +573,6 @@ def register(woof):
         if not any("id" in m for m in messages):
             return None
         kept = tokens.apply_prune(kept, st.get("engine_state"))
-        if (getattr(ctx, "model_cfg", None) or {}).get("provider") == "anthropic":
-            kept = _strip_kept_thinking(kept, summary)
         body = _prompt_get("compact_head", summary=summary["text"])
         # 使用者的原話照抄在摘要後面（不經摘要模型），跟摘要有出入以原話為準；同一份摘要每次都一樣，快取不斷
         users = _users_section(messages, through)

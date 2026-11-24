@@ -1183,6 +1183,7 @@ async def run_model_loop(ctx: TurnContext) -> None:
         through = hist[-1]["id"] if hist else 0
         messages = await REG.events.pipe("before_request", hist, ctx)
         messages, moved = trim_images(ctx.session_id, messages, force=too_large)
+        messages = strip_stale_thinking(ctx.session_id, messages, ctx.model_cfg)
         too_large = False
         if moved:
             await ctx.emit({"type": "notice", "session_id": ctx.session_id,
@@ -2157,6 +2158,36 @@ def _drop_missing_images(messages: list[dict]) -> list[dict]:
     return out
 
 
+def mark_rewrite(es: dict, upto: int) -> None:
+    """改到前面的內容（壓縮、清舊工具輸出、收圖）時記下改到哪一則（訊息 id，只往後移），由呼叫端存回 engine_state。
+    Claude 的每段思考綁著它前面的全部內容，前面改過，到這一則為止的思考就對不上了，之後送出時拿掉（strip_stale_thinking）。"""
+    es["think_cut"] = max(int(es.get("think_cut") or 0), int(upto or 0))
+
+
+def strip_stale_thinking(session_id: str, messages: list[dict], model_cfg: dict | None) -> list[dict]:
+    """Claude：前面的內容改過之後，改動時已經存在的思考送出時拿掉（對不上的思考可能被退件，也可能照收費、
+    讓模型讀到過期的推理）。之後新產生的思考照送。資料庫裡的原訊息不動；其他服務商不處理。"""
+    if (model_cfg or {}).get("provider") != "anthropic":
+        return messages
+    es = (store.get_session(session_id) or {}).get("engine_state") or {}
+    cut = int(es.get("think_cut") or 0)
+    kept = (es.get("summary") or {}).get("kept") or []
+    if kept:   # 這個欄位出現以前就壓縮過的對話：壓縮時已經存在的訊息也算
+        cut = max(cut, max(int(i) for i in kept))
+    if not cut:
+        return messages
+    out = []
+    for m in messages:
+        if (m.get("role") == "assistant" and 0 < int(m.get("id") or 0) <= cut
+                and any(b.get("type") in ("thinking", "redacted_thinking") for b in m.get("content") or [])):
+            blocks = [b for b in m["content"] if b.get("type") not in ("thinking", "redacted_thinking")]
+            if not blocks:
+                continue
+            m = {**m, "content": blocks}
+        out.append(m)
+    return out
+
+
 def _drop_hollow_replies(messages: list[dict]) -> list[dict]:
     """沒有正文也沒有工具呼叫的助手訊息（例如思考到一半被停止，只存下思考）：這次請求不送。
     這種訊息轉成 API 格式會變成空的 assistant，多數端點會整個請求退件。資料庫裡的原訊息不動。"""
@@ -2200,6 +2231,7 @@ def trim_images(session_id: str, messages: list[dict], force: bool = False) -> t
         moved = sum(c[1] for c in carriers[:retire])
         before = carriers[retire - 1][0]
         es["img_before"] = before
+        mark_rewrite(es, max((int(m.get("id") or 0) for m in messages), default=0))
         store.update_session(session_id, engine_state=es)
     if not before:
         return messages, moved
