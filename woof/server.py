@@ -2830,21 +2830,31 @@ async def set_session_tool(sid: str, body: dict):
 
     st = dict(s.get("engine_state") or {})
     on = list(st.get("tools_on") or [])
-    off = [x for x in (st.get("tools_off") or []) if x != name]
+    off0 = list(st.get("tools_off") or [])
+    off = [x for x in off0 if x != name]
     drop = [x for x in (st.get("tools_drop") or []) if x != name]
+    add = [x for x in (st.get("tools_add") or []) if x != name]
     glob_off = name in disabled_tools()
-    if body.get("on"):
+    when = body.get("when")
+    if body.get("on") and when == "compress":
+        # 先用 tool_call、壓縮時正式加入：工具清單不動（快取不斷）
+        off = off0
+        if (glob_off and name not in on) or name in off0:
+            add.append(name)
+    elif body.get("on"):
         if glob_off and name not in on:
             on.append(name)
-    elif body.get("when") == "compress":
+    elif when == "unadd":
+        off = off0   # 取消「壓縮時加入」：其他不動
+    elif when == "compress":
         drop.append(name)
     else:
         on = [x for x in on if x != name]
         if not glob_off:
             off.append(name)
-    st["tools_on"], st["tools_off"], st["tools_drop"] = on, off, drop
+    st["tools_on"], st["tools_off"], st["tools_drop"], st["tools_add"] = on, off, drop, add
     store.update_session(sid, engine_state=st)
-    return {"ok": True, "tools_on": on, "tools_off": off, "tools_drop": drop}
+    return {"ok": True, "tools_on": on, "tools_off": off, "tools_drop": drop, "tools_add": add}
 
 
 @app.get("/api/media/spec")

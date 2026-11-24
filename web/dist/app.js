@@ -3900,8 +3900,11 @@ function cpToolSw(t) {
   if (t.bridge) return '';
   const on = t.enabled && !t.drop_pending;
   const can = t.enabled || t.reason === '設定中停用' || t.session_off;
-  const tip = t.drop_pending ? '下次壓縮時關；按一下取消' : !can ? `${t.reason}，要到對應的設定改` : on ? '這個對話關掉' : '這個對話打開';
-  return `<span class="sw sm cp-sw${on ? ' on' : ''}${t.drop_pending ? ' pend' : ''}${can ? '' : ' dis'}" data-cp="${!can ? 'noop' : t.drop_pending ? 'toolKeep' : on ? 'toolOff' : 'toolOn'}" data-tn="${esc(t.name)}" title="${esc(tip)}"></span>`;
+  const pend = t.drop_pending || t.add_pending;
+  const tip = t.drop_pending ? '下次壓縮時關；按一下取消' : t.add_pending ? '先用 tool_call，下次壓縮時正式加入；按一下取消'
+    : !can ? `${t.reason}，要到對應的設定改` : on ? '這個對話關掉' : '這個對話打開';
+  const act = !can ? 'noop' : t.drop_pending ? 'toolKeep' : t.add_pending ? 'toolUnadd' : on ? 'toolOff' : 'toolOn';
+  return `<span class="sw sm cp-sw${on || t.add_pending ? ' on' : ''}${pend ? ' pend' : ''}${can ? '' : ' dis'}" data-cp="${act}" data-tn="${esc(t.name)}" title="${esc(tip)}"></span>`;
 }
 async function loadCtxData() {
   const [d, st] = await Promise.all([api('GET', `/api/sessions/${S.sid}/prompt`), api('GET', `/api/sessions/${S.sid}/stats`)]);
@@ -3990,7 +3993,7 @@ function renderCtxPanel() {
       <div class="cp-sh"><b>本回合工具</b><span class="pr-badge">${onTools} / ${tools.length} 個會送出${nDefer ? `・${nDefer} 個延遲載入` : ''}・約 ${tools.filter((t) => t.enabled).reduce((a, t) => a + (t.tokens_est || 0), 0).toLocaleString()} tokens</span></div>
       <small class="cp-note">模型這一回合真正看得到的工具。灰色的是被排除，後面寫原因。每個工具的「字元」是名稱、說明與參數結構的 JSON 長度；tok 是粗估（英文約 4 字元 1 token，中文約 1.5 字元 1 token），實際計費以模型回報為準。</small>
       <small class="cp-note">右邊的開關只改這個對話，新對話照「設定 → 工具」。工具清單在快取最前面，開或關的那一則整段對話要重算一次；開著的工具也走快取，每次只多一點點。要關建議選「壓縮時一起關」：壓縮本來就整段重算，一起換不多花。權限、插件、計畫模式擋掉的不能在這裡開。</small>
-      ${tools.map((t) => `<div class="cp-tool" style="${t.enabled && !t.deferred ? '' : 'opacity:.55'}"><span>${esc(t.name)}</span><b>${esc(t.plugin)}${t.drop_pending ? ' · 壓縮時關' : t.session_on ? ' · 這個對話開著' : t.reason ? ' · ' + esc(t.reason) : ''}<em class="ctx-tok">${(t.chars || 0).toLocaleString()} 字 ≈ ${(t.tokens_est || 0).toLocaleString()} tok</em>${cpToolSw(t)}</b></div>`).join('') || '<small class="cp-note">沒有任何工具。</small>'}
+      ${tools.map((t) => `<div class="cp-tool" style="${t.enabled && !t.deferred ? '' : 'opacity:.55'}"><span>${esc(t.name)}</span><b>${esc(t.plugin)}${t.drop_pending ? ' · 壓縮時關' : t.add_pending ? ' · 先用 tool_call，壓縮時加入' : t.session_on ? ' · 這個對話開著' : t.reason ? ' · ' + esc(t.reason) : ''}<em class="ctx-tok">${(t.chars || 0).toLocaleString()} 字 ≈ ${(t.tokens_est || 0).toLocaleString()} tok</em>${cpToolSw(t)}</b></div>`).join('') || '<small class="cp-note">沒有任何工具。</small>'}
     </div>
     <div class="cp-sec">
       <div class="cp-sh"><b>輔助模型與搜尋</b></div>
@@ -4066,11 +4069,38 @@ $('#ctxPanel').addEventListener('click', async (e) => {
     } catch (err) { notify('error', '改不了', err.message); }
     return;
   }
-  if (k === 'toolOn') {
-    if (!await confirmBox('這個對話打開工具', `打開 ${b.dataset.tn}。下一則訊息整段對話要重算一次快取，之後照常命中。`, { ok: '打開' })) return;
+  if (k === 'toolUnadd') {
     try {
-      await api('POST', `/api/sessions/${S.sid}/tools`, { name: b.dataset.tn, on: true });
-      notify('ok', `這個對話打開了 ${b.dataset.tn}`, '下一則訊息起生效');
+      await api('POST', `/api/sessions/${S.sid}/tools`, { name: b.dataset.tn, on: false, when: 'unadd' });
+      notify('ok', `${b.dataset.tn} 不加入了`);
+      await refreshCtxPanel();
+    } catch (err) { notify('error', '改不了', err.message); }
+    return;
+  }
+  if (k === 'toolOn') {
+    const name = b.dataset.tn;
+    const n = ctxUsed(S.usage[S.sid]) || 0;
+    const cost = n ? `約 ${n.toLocaleString()} tokens` : '整段對話';
+    // 工具清單裡有 tool_call（延遲載入的橋接）才能先透過它用
+    const bridge = ((CP.d && CP.d.tools) || []).some((t) => t.name === 'tool_call' && t.bridge);
+    let when = await modal({
+      title: `打開 ${name}`,
+      desc: `工具清單在快取最前面，現在加進清單，下一則要把整段對話重算一次（目前${cost}）。`
+        + (bridge ? '也可以先透過 tool_call 使用（模型會收到說明），清單不動、快取不斷，等下次壓縮再正式加入。'
+                  : '這個對話的工具清單裡沒有 tool_call，沒辦法先透過它用；可以跟壓縮一起加入，就不多花。'),
+      ok: bridge ? '先用 tool_call，壓縮時加入' : '現在打開',
+      extra: `<span class="btn" data-x="compactnow">現在壓縮並打開</span>`
+        + (bridge ? `<span class="btn" data-x="now">現在打開（重算${esc(cost)}）</span>` : ''),
+      onOpen: (m, finish) => m.addEventListener('click', (e) => { const x = e.target.closest('[data-x]'); if (x) finish(x.dataset.x); }),
+    });
+    if (!when) return;
+    if (when === true) when = bridge ? 'compress' : 'now';
+    try {
+      // 現在壓縮並打開：先排「壓縮時加入」，壓縮那一刻一起換
+      await api('POST', `/api/sessions/${S.sid}/tools`, { name, on: true, ...(when === 'now' ? {} : { when: 'compress' }) });
+      if (when === 'compactnow') { await compactNow(); }
+      else notify('ok', when === 'now' ? `這個對話打開了 ${name}` : `${name} 先透過 tool_call 使用，下次壓縮時正式加入`,
+        when === 'now' ? '下一則訊息整段重算一次' : '快取不斷');
       await refreshCtxPanel();
     } catch (err) { notify('error', '改不了', err.message); }
     return;

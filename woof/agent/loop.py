@@ -118,6 +118,8 @@ class TurnContext:
         self.tool_include: set[str] = set((session.get("engine_state") or {}).get("tools_on") or [])
         # 這個對話手動關的工具（全域開著的）
         self.tool_off: set[str] = set((session.get("engine_state") or {}).get("tools_off") or [])
+        # 「先用 tool_call、壓縮時正式加入」的工具：不在工具清單裡（快取不斷），透過 tool_call 照樣能用
+        self.tool_add: set[str] = set((session.get("engine_state") or {}).get("tools_add") or [])
         self.extra_system = ""
         # 寫入子代理可改的範圍（None＝不限；唯讀子代理用不到）
         self.write_scope: list | None = None
@@ -253,6 +255,7 @@ async def tool_specs_for(ctx: TurnContext) -> list[dict]:
         les = live.get("engine_state") or {}
         ctx.tool_include = set(les.get("tools_on") or [])
         ctx.tool_off = set(les.get("tools_off") or [])
+        ctx.tool_add = set(les.get("tools_add") or [])
     specs = await REG.events.pipe("tool_specs", active_tool_specs(ctx.tool_exclude | getattr(ctx, "tool_off", set()),
                                                                   getattr(ctx, "tool_include", None)), ctx)
     sid = getattr(ctx, "session_id", None)
@@ -317,7 +320,8 @@ async def tool_overview(ctx: TurnContext) -> list[dict]:
                     "deferred": deferred, "chars": chars, "tokens_est": 0 if deferred else tok,
                     "session_on": n in inc and n not in reasons,
                     "session_off": reasons.get(n) == "這個對話關了",
-                    "drop_pending": n in set(es.get("tools_drop") or ())})
+                    "drop_pending": n in set(es.get("tools_drop") or ()),
+                    "add_pending": n in set(es.get("tools_add") or ())})
     for n, t in sent.items():
         if n not in REG.tools or n in reasons:
             chars, tok = tool_cost(n, t["description"], t.get("schema"))
@@ -430,6 +434,12 @@ def settings_note(session: dict) -> tuple[str, dict]:
             st = next((x for x in styles.all_styles() if x["id"] == sty), None)
             lines.append(_P("style_note", name=st["name"] if st else sty, text=(st or {}).get("text") or ""))
         told["style"] = sty
+    add = [n for n in (es.get("tools_add") or []) if n in REG.tools]
+    new_add = [n for n in add if n not in (told.get("tools_add") or [])]
+    if new_add:
+        lines.append(_P("tools_add_note", names="、".join(new_add)))
+    if add or told.get("tools_add"):
+        told["tools_add"] = add
     if not lines:
         return "", told
     # 編號＋時間：之後再改，模型看得出哪一則比較新，不會被舊的那則綁住
@@ -768,8 +778,8 @@ async def _run_tool(call: dict, ctx: TurnContext) -> dict:
         output, is_error = f"找不到工具：{name}", True
     elif isinstance(args, dict) and "_raw" in args:
         output, is_error = _P("raw_args"), True
-    elif ((name in disabled_tools() and name not in getattr(ctx, "tool_include", ())) or name in getattr(ctx, "tool_exclude", ())
-          or name in getattr(ctx, "tool_off", ())):
+    elif name in getattr(ctx, "tool_exclude", ()) or (name not in getattr(ctx, "tool_add", ()) and (
+            (name in disabled_tools() and name not in getattr(ctx, "tool_include", ())) or name in getattr(ctx, "tool_off", ()))):
         output, is_error = f"工具 {name} 已被停用", True
     elif not (ok := await _approved(call, ctx))[0]:
         output, is_error = ok[1], True
@@ -2096,7 +2106,7 @@ def _strip_tool_images(msg: dict) -> dict:
     return {**msg, "content": content}
 
 
-IMG_KEEP_ON_COMPACT = 8     # 壓縮／清舊工具輸出時，工具附的圖只留最新幾張（「設定 → 上下文壓縮」可改）
+IMG_KEEP_ON_COMPACT = 1     # 壓縮／清舊工具輸出時，工具附的圖只留最新幾張（「設定 → 上下文壓縮」可改）
 
 
 def retire_images_on_compact(session_id: str, es: dict, keep: int | None = None) -> int:

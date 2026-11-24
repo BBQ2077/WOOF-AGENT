@@ -118,8 +118,11 @@ def register(woof):
 
     def _pool(ctx) -> dict[str, dict]:
         """這個回合可以透過橋接取用的工具（已排除停用的）。"""
-        allowed = loop.active_tool_specs(set(getattr(ctx, "tool_exclude", None) or ()) | set(getattr(ctx, "tool_off", None) or ()),
-                                         getattr(ctx, "tool_include", None))
+        ex = set(getattr(ctx, "tool_exclude", None) or ())
+        allowed = loop.active_tool_specs(ex | set(getattr(ctx, "tool_off", None) or ()), getattr(ctx, "tool_include", None))
+        # 「先用 tool_call、壓縮時正式加入」的工具：不在清單裡，但這裡找得到、叫得到
+        add = set(getattr(ctx, "tool_add", None) or ()) - ex
+        allowed += [t for t in loop.REG.tool_specs() if t["name"] in add and t["name"] not in {a["name"] for a in allowed}]
         return {t["name"]: t for t in allowed if t["name"] not in BRIDGE}
 
     async def h_search(args, tctx):

@@ -145,9 +145,9 @@ def register(woof):
 
     def _keep_images() -> int:
         try:
-            return max(0, min(int(woof.settings.get("keep_images") if woof.settings.get("keep_images") not in (None, "") else 8), 50))
+            return max(0, min(int(woof.settings.get("keep_images") if woof.settings.get("keep_images") not in (None, "") else 1), 50))
         except (TypeError, ValueError):
-            return 8
+            return 1
 
     def _trigger() -> float:
         return max(10, min(int(woof.settings.get("trigger") or 70), 95)) / 100
@@ -466,9 +466,12 @@ def register(woof):
             raise RuntimeError("壓縮摘要是空的，已中止這次回合")
         cur = dict((store.get_session(ctx.session_id) or {}).get("engine_state") or {})
         cur["compress_count"] = int(cur.get("compress_count") or 0) + 1
-        # 「壓縮時一起關」的工具在這裡拿掉：壓縮後本來就整段重算，工具清單一起換不多花
+        # 「壓縮時一起關／壓縮時正式加入」的工具在這裡換：壓縮後本來就整段重算，工具清單一起換不多花
         drop = set(cur.get("tools_drop") or [])
-        if drop:
+        add = [n for n in (cur.get("tools_add") or []) if n not in drop]
+        if drop or add:
+            from woof.agent.loop import disabled_tools
+
             on = list(cur.get("tools_on") or [])
             off = list(cur.get("tools_off") or [])
             for n in drop:
@@ -476,7 +479,14 @@ def register(woof):
                     on.remove(n)  # 這個對話開的 → 拿掉
                 elif n not in off:
                     off.append(n)  # 全域開著的 → 這個對話關
-            cur["tools_on"], cur["tools_off"], cur["tools_drop"] = on, off, []
+            for n in add:
+                if n in off:
+                    off.remove(n)  # 這個對話關過的 → 打開
+                if n in disabled_tools() and n not in on:
+                    on.append(n)   # 全域停用的 → 這個對話開
+            cur["tools_on"], cur["tools_off"], cur["tools_drop"], cur["tools_add"] = on, off, [], []
+            if add:   # 已經正式加入了：之後同一個工具再「先用 tool_call」加一次，要再告訴模型
+                cur["told"] = {k: v for k, v in (cur.get("told") or {}).items() if k != "tools_add"}
         cur["summary"] = {"through": older[-1]["id"], "text": text, "at": time.time(),
                           "kept": sorted(recent_ids), "mode": mode, "method": method, "parts": parts,
                           "inflight": inflight, **({"how": how} if how else {})}
