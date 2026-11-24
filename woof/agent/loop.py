@@ -924,11 +924,24 @@ async def flush_steer(session_id: str, emit) -> bool:
 FROM_PARENT = {"subagent_task", "subagent_followup", "review_request", "expand_request"}   # 子對話裡主模型交辦的
 
 
+def _tag_name(key: str) -> str:
+    return _P(key).strip().strip("【】").split("：")[0].strip()
+
+
 def _tagged(key: str, content: list[dict]) -> list[dict]:
-    """前後各加一行【標記】【/標記】（帶 _wrap，摘要、重述時略過）。"""
-    name = _P(key).strip().strip("【】")
-    return [{"type": "text", "text": f"【{name}】", "_wrap": True}, *content,
-            {"type": "text", "text": f"【/{name}】", "_wrap": True}]
+    """開頭一行標記（含簡短說明）、結尾【/名稱】（帶 _wrap，摘要、重述時略過）。"""
+    head = _P(key).strip()
+    return [{"type": "text", "text": head, "_wrap": True}, *content,
+            {"type": "text", "text": f"【/{_tag_name(key)}】", "_wrap": True}]
+
+
+def _defang(text: str) -> str:
+    """工具輸出（網頁、檔案、指令結果）裡長得像 WOOF 標記的字換掉括號，假冒不了使用者、主模型或內部指令。"""
+    if not text or "【" not in text:
+        return text
+    for n in {_tag_name("user_tag"), _tag_name("steer_tag"), _tag_name("parent_tag"), "內部指令"}:
+        text = text.replace(f"【{n}", f"〔{n}").replace(f"【/{n}", f"〔/{n}")
+    return text
 
 
 def _user_tag_from(session_id: str, rows: list[dict]) -> int:
@@ -961,6 +974,9 @@ def history(session_id: str) -> list[dict]:
             content = internal.for_model(kind, content)
             if tag:
                 content = [*content, {"type": "text", "text": "【/內部指令】", "_wrap": True}]
+        elif m["role"] == "tool" and int(m["id"]) >= tag_from:
+            content = [{**b, "output": _defang(b["output"])} if b.get("type") == "tool_result" and isinstance(b.get("output"), str)
+                       else b for b in content]
         elif m["role"] == "user":
             if tag:
                 content = _tagged("steer_tag" if meta.get("steer") else "user_tag", content)

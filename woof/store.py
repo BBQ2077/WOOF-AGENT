@@ -195,7 +195,7 @@ def create_session(model: str | None, effort: str | None, title: str = "新對�
     with _lock:
         _db.execute(
             "INSERT INTO sessions(id,title,model,effort,engine_state,created,updated) VALUES(?,?,?,?,?,?,?)",
-            (sid, title, model, effort, "{}", now, now),
+            (sid, title, model, effort, '{"utag_from": 0}', now, now),   # 新對話：訊息標記從第一則就加
         )
         _db.commit()
     return get_session(sid)  # type: ignore[return-value]
