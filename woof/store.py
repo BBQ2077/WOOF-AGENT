@@ -277,6 +277,9 @@ def delete_session(sid: str) -> None:
         _db.execute("DELETE FROM prompt_snapshots WHERE session_id=?", (sid,))
         _db.execute("DELETE FROM sessions WHERE id=?", (sid,))
         _db.commit()
+    import shutil
+
+    shutil.rmtree(DATA / "imgsnap" / sid, ignore_errors=True)   # 工具圖的留存（送給模型的那份）
 
 
 def child_sessions(session_id: str) -> list[dict]:

@@ -24,7 +24,7 @@ from woof.lazy import lazy_module
 # SDK 很大（約 25 MB、1 秒）：第一次真的呼叫模型時才載入，開程式比較快
 openai = lazy_module("openai")
 
-from woof import caps
+from woof import cachediag, caps
 from woof.agent.loop import load_image_b64, new_call_id, sdk_retries
 
 _RETRY_STATUS = {401, 402, 403, 429}
@@ -38,6 +38,10 @@ def _echo_mode(model: dict) -> str:
     if v is False or v == "off" or caps.learned(model["id"]).get("no_echo"):
         return "off"
     if model.get("effort_style") == "deepseek" or "deepseek.com" in str(model.get("base_url") or ""):
+        return "all"
+    # 經別家轉接的 DeepSeek（OpenDesign、CommandCode 等）：官方規定帶工具時每一輪的思考都要回傳。
+    # 只回傳最新一輪的話，每次使用者發新訊息，上一輪的思考就從歷史裡消失，前綴從那裡斷掉、快取重算
+    if "deepseek" in str(model.get("model") or model.get("id") or "").lower():
         return "all"
     return "turn"
 
@@ -555,6 +559,8 @@ class OpenAICompat:
         kw.update(ek)
         if extra:
             kw["extra_body"] = extra
+        cachediag.record(kw["model"], None, kw.get("tools"), chat,
+                         {k: v for k, v in kw.items() if k not in ("messages", "tools", "stream", "stream_options")})
 
         text, thinking = "", ""
         details: list[dict] = []
@@ -666,6 +672,8 @@ class OpenAICompat:
         kw.update(_responses_reasoning(model, effort))
         if model.get("extra_body"):
             kw["extra_body"] = model["extra_body"]
+        cachediag.record(kw["model"], kw["instructions"], kw.get("tools"), kw["input"],
+                         {k: v for k, v in kw.items() if k not in ("instructions", "input", "tools", "stream")})
 
         text = ""
         sums: dict[str, str] = {}     # reasoning item → 思考摘要（畫面顯示這個）

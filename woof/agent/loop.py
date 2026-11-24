@@ -31,6 +31,7 @@ from ..config import DATA
 from ..loader import REG
 from ..prompts import get as _P
 from .. import redact as _redact
+from .. import cachediag
 
 log = logging.getLogger("woof.agent")
 
@@ -252,8 +253,28 @@ async def tool_specs_for(ctx: TurnContext) -> list[dict]:
         les = live.get("engine_state") or {}
         ctx.tool_include = set(les.get("tools_on") or [])
         ctx.tool_off = set(les.get("tools_off") or [])
-    return await REG.events.pipe("tool_specs", active_tool_specs(ctx.tool_exclude | getattr(ctx, "tool_off", set()),
-                                                                 getattr(ctx, "tool_include", None)), ctx)
+    specs = await REG.events.pipe("tool_specs", active_tool_specs(ctx.tool_exclude | getattr(ctx, "tool_off", set()),
+                                                                  getattr(ctx, "tool_include", None)), ctx)
+    sid = getattr(ctx, "session_id", None)
+    if not sid:
+        return specs
+    # 工具清單在請求的最前面，清單一變整段快取重算。使用者明確改的（開關工具、停用插件、全域停用、換模型）照改；
+    # 背景的變動（MCP 伺服器晚連上、斷線重連後工具順序變了、延遲載入清單更新）等到下次壓縮才換，
+    # 這段期間新出現的工具照樣能用 tool_search／tool_call 叫到
+    es = (live or {}).get("engine_state") or {}
+    key = json.dumps([ctx.model_cfg.get("id"), int(es.get("compress_count") or 0), sorted(ctx.tool_exclude),
+                      sorted(getattr(ctx, "tool_off", ()) or ()), sorted(getattr(ctx, "tool_include", ()) or ()),
+                      sorted(disabled_tools())], ensure_ascii=False)
+    old = _TOOLS_FROZEN.get(sid)
+    if old and old[0] == key:
+        return old[1]
+    if len(_TOOLS_FROZEN) > 200:
+        _TOOLS_FROZEN.clear()
+    _TOOLS_FROZEN[sid] = (key, specs)
+    return specs
+
+
+_TOOLS_FROZEN: dict[str, tuple[str, list[dict]]] = {}   # 對話 → (明確設定的指紋, 上次送的工具清單)
 
 
 async def tool_overview(ctx: TurnContext) -> list[dict]:
@@ -475,8 +496,26 @@ def active_tool_specs(exclude: set[str] | None = None, include: set[str] | None 
     return [t for t in specs if t["name"] not in off] + [t for t in specs if t["name"] in inc and t["name"] not in ex]
 
 
-async def complete(model_cfg: dict, system: str, messages: list[dict], max_text: int = 0) -> str:
-    """不帶工具、一次性的模型呼叫（壓縮摘要、看圖等輔助工作用）。"""
+class ToolCallInstead(RuntimeError):
+    """帶工具的輔助呼叫，模型卻去呼叫工具、沒有直接回文字。"""
+
+
+async def complete(model_cfg: dict, system: str, messages: list[dict], max_text: int = 0, *,
+                   tools: list[dict] | None = None, effort: Any = "__model__", session_id: str | None = None,
+                   kind: str = "aux") -> str:
+    """一次性的模型呼叫（壓縮摘要、看圖等輔助工作用）。平常不帶工具。
+    tools／effort／session_id：壓縮沿用主對話的快取時用——工具清單和思考強度要跟上一步一字不差，
+    模型若改去呼叫工具就丟 ToolCallInstead（不執行）。"""
+    sd_tok, kd_tok = cachediag.SESSION.set(session_id), cachediag.KIND.set(kind)
+    try:
+        return await _complete(model_cfg, system, messages, tools, model_cfg.get("effort") if effort == "__model__" else effort,
+                               session_id)
+    finally:
+        cachediag.SESSION.reset(sd_tok)
+        cachediag.KIND.reset(kd_tok)
+
+
+async def _complete(model_cfg: dict, system: str, messages: list[dict], tools, effort, session_id) -> str:
     backend = model_cfg.get("provider")
     provider = REG.providers.get(backend)
     if provider is None:
@@ -489,8 +528,8 @@ async def complete(model_cfg: dict, system: str, messages: list[dict], max_text:
     # 呼叫端可以在 model_cfg 放 effort（例如寵物、五子棋照自己的設定）；沒放就不送，用模型預設
     try:
         async with asyncio.timeout(first_s or None) as tmo:   # 卡住偵測同主回合（設定 → 一般的等待時間）
-            async for ev in provider.stream(model=model_cfg, system=system, messages=messages, tools=[],
-                                            effort=model_cfg.get("effort")):
+            async for ev in provider.stream(model=model_cfg, system=system, messages=messages, tools=tools or [],
+                                            effort=effort):
                 if ev.get("type") in ("text_delta", "thinking_delta", "message"):
                     got = True
                 lim = idle_s if got else first_s
@@ -503,6 +542,8 @@ async def complete(model_cfg: dict, system: str, messages: list[dict], max_text:
                         store.log_usage("aux", model_cfg.get("id"), ev)
                     except Exception:
                         pass
+                    if session_id:
+                        cachediag.finish(session_id, ev.get("input_tokens"), ev.get("cache_read"))
     except TimeoutError:
         if not tmo.expired():
             raise
@@ -510,6 +551,8 @@ async def complete(model_cfg: dict, system: str, messages: list[dict], max_text:
                            + (f"回應中途 {idle_s} 秒沒有動靜" if got else f"開始回應前 {first_s} 秒沒有動靜")) from None
     if final is None:
         raise RuntimeError("模型沒有回傳完整訊息")
+    if tools and any(b.get("type") == "tool_call" for b in final["content"]):
+        raise ToolCallInstead("模型去呼叫工具，沒有直接寫摘要")
     return "".join(b.get("text", "") for b in final["content"] if b.get("type") == "text").strip()
 
 
@@ -772,7 +815,7 @@ async def _run_tool(call: dict, ctx: TurnContext) -> dict:
         pass
     res = {"type": "tool_result", "id": cid, "name": name, "output": output, "is_error": is_error}
     if images:
-        res["images"] = images
+        res["images"] = [snapshot_image(i, ctx.session_id) for i in images]
     return res
 
 
@@ -1135,6 +1178,14 @@ async def run_model_loop(ctx: TurnContext) -> None:
             await ctx.emit({"type": "notice", "session_id": ctx.session_id,
                             "text": f"工具附的圖太多，較早的 {moved} 張這次起不再送給模型（檔案都還在，要看可以再開）"})
         specs = await tool_specs_for(ctx)
+        # 壓縮沿用快取用：記下這一步實際送出的內容（只放記憶體）
+        LAST_REQ[ctx.session_id] = {"system": system, "messages": messages, "specs": specs, "effort": ctx.effort,
+                                    "model": ctx.model_cfg.get("id"), "through": through, "at": time.time(),
+                                    "sig": req_sig(ctx.session_id)}
+        if len(LAST_REQ) > 50:
+            LAST_REQ.pop(next(iter(LAST_REQ)))
+        cachediag.SESSION.set(ctx.session_id)
+        cachediag.KIND.set("turn")
         final: dict | None = None
         partial: list[dict] = []
         text_buf = {"text": "", "thinking": ""}
@@ -1191,6 +1242,7 @@ async def run_model_loop(ctx: TurnContext) -> None:
                         es["usage"] = usage
                         store.update_session(ctx.session_id, engine_state=es)
                         store.log_usage(ctx.session_id, ctx.model_cfg.get("id"), usage)
+                        cachediag.finish(ctx.session_id, in_tok, cache_tok)
                     elif t == "notice":
                         await ctx.emit({"type": "notice", "session_id": ctx.session_id, "text": ev.get("text", "")})
                     elif t == "message":
@@ -1911,6 +1963,15 @@ def _unique_call_ids(ctx, content: list[dict]) -> None:
         seen.add(b["id"])
 
 
+LAST_REQ: dict[str, dict] = {}   # 對話 → 上一步實際送出的 system／messages／工具／思考強度（壓縮沿用快取用）
+
+
+def req_sig(session_id: str) -> list:
+    """會改到送出內容的對話狀態：壓縮次數、摘要到哪、清舊工具輸出到哪、舊圖收起線。跟記下時不同＝那份請求已經過時。"""
+    es = (store.get_session(session_id) or {}).get("engine_state") or {}
+    return [int(es.get("compress_count") or 0), int((es.get("summary") or {}).get("through") or 0),
+            int((es.get("prune") or {}).get("through") or 0), int(es.get("img_before") or 0)]
+
 IMG_SIDE = 1568            # 送給模型的圖最長邊（各家看圖模型內部也會縮到這附近，再大只是多傳）
 IMG_JPEG_OVER = 700_000    # 縮完還超過這麼大就轉 JPEG（截圖存成 PNG 常常一張 1～2 MB）
 _IMG_CACHE: dict = {}
@@ -1921,6 +1982,14 @@ def load_image_b64(block: dict) -> tuple[str, str]:
     同一張圖（路徑＋修改時間＋大小）只轉一次，每次請求送出的位元組一樣，快取前綴不會變。"""
     import base64
 
+    snap = block.get("snap")
+    if snap and Path(snap).is_file():
+        # 工具結果的圖在當下存了一份：原檔之後被覆寫或刪掉，送出的還是當時那張，前綴不變
+        hit = _IMG_CACHE.get(snap)
+        if not hit:
+            hit = (_SNAP_MT.get(Path(snap).suffix.lower(), "image/png"), base64.b64encode(Path(snap).read_bytes()).decode())
+            _IMG_CACHE[snap] = hit
+        return hit
     p = Path(block["path"])
     st = p.stat()
     key = (str(p), st.st_mtime_ns, st.st_size)
@@ -1954,6 +2023,34 @@ def load_image_b64(block: dict) -> tuple[str, str]:
         _IMG_CACHE.clear()
     _IMG_CACHE[key] = out
     return out
+
+
+_SNAP_MT = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
+_MT_EXT = {v: k for k, v in _SNAP_MT.items() if k != ".jpeg"}
+SNAP_DIR = DATA / "imgsnap"
+
+
+def snapshot_image(block: dict, session_id: str | None) -> dict:
+    """工具結果附的圖：把「送給模型的那份」（已縮圖）存進 data/imgsnap/<對話>/，記在 snap。
+    之後原檔被覆寫（例如每次都輸出成同一個 frame.png）或刪掉，舊訊息送出的位元組不變，快取不會從那一則斷掉。
+    對話刪掉時整個資料夾一起刪。存不了就原樣回傳（照舊讀原檔）。"""
+    if not session_id or not isinstance(block, dict) or not block.get("path") or block.get("snap"):
+        return block
+    try:
+        import base64
+
+        mt, b64 = load_image_b64(block)
+        if mt not in _MT_EXT:
+            return block
+        raw = base64.b64decode(b64)
+        d = SNAP_DIR / session_id
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / (hashlib.sha1(raw).hexdigest()[:20] + _MT_EXT.get(mt, ".png"))
+        if not p.exists():
+            p.write_bytes(raw)
+        return {**block, "snap": p.as_posix()}
+    except Exception:
+        return block
 
 
 # ---- 每次請求帶多少張工具圖：
@@ -1999,12 +2096,14 @@ def _strip_tool_images(msg: dict) -> dict:
     return {**msg, "content": content}
 
 
-IMG_KEEP_ON_COMPACT = 1     # 壓縮／清舊工具輸出時，帶圖的工具結果只留最新幾則
+IMG_KEEP_ON_COMPACT = 8     # 壓縮／清舊工具輸出時，工具附的圖只留最新幾張（「設定 → 上下文壓縮」可改）
 
 
-def retire_images_on_compact(session_id: str, es: dict) -> int:
+def retire_images_on_compact(session_id: str, es: dict, keep: int | None = None) -> int:
     """壓縮時順便收掉舊圖：壓縮本來就整段前綴重算，這時收圖不會多斷一次快取。
-    看過的圖之後不再送，只留最新 IMG_KEEP_ON_COMPACT 則（可能正在改的那張）。改 es（由呼叫端存），回收起幾張。"""
+    從最新的往回留，留滿 keep 張為止（一則工具結果的圖不拆開；最新那則超過 keep 張也整則留）。
+    改 es（由呼叫端存），回收起幾張。"""
+    keep = IMG_KEEP_ON_COMPACT if keep is None else max(0, int(keep))
     before = int(es.get("img_before") or 0)
     carriers = []
     for m in store.get_messages(session_id, after=before):
@@ -2012,18 +2111,22 @@ def retire_images_on_compact(session_id: str, es: dict) -> int:
             n = sum(len(b.get("images") or []) for b in m["content"] if b.get("type") == "tool_result")
             if n:
                 carriers.append((int(m["id"]), n))
-    if len(carriers) <= IMG_KEEP_ON_COMPACT:
+    kept, k = 0, len(carriers)
+    while k > 0 and (kept + carriers[k - 1][1] <= keep or (kept == 0 and keep > 0)):
+        kept += carriers[k - 1][1]
+        k -= 1
+    if k == 0:
         return 0
-    cut = carriers[-IMG_KEEP_ON_COMPACT - 1] if IMG_KEEP_ON_COMPACT else carriers[-1]
-    es["img_before"] = cut[0]
-    return sum(n for mid, n in carriers if mid <= cut[0])
+    es["img_before"] = carriers[k - 1][0]
+    return sum(n for _, n in carriers[:k])
 
 
 def _drop_missing_images(messages: list[dict]) -> list[dict]:
     """圖檔已經不在（對話或子代理刪掉時跟著清掉、被搬走）：這次請求拿掉那幾張，換成一句說明，其餘照送。
     資料庫裡的原訊息不動；檔案放回原處就又會送。"""
     def gone(i: dict) -> bool:
-        return bool(i.get("path")) and not Path(i["path"]).is_file()
+        return (bool(i.get("path")) and not Path(i["path"]).is_file()
+                and not (i.get("snap") and Path(i["snap"]).is_file()))
 
     out = []
     for m in messages:

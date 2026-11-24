@@ -16,6 +16,7 @@ from woof.lazy import lazy_module
 anthropic = lazy_module("anthropic")
 
 from woof.agent.loop import load_image_b64, sdk_retries
+from woof import cachediag
 
 
 def _to_anthropic(messages: list[dict]) -> list[dict]:
@@ -117,6 +118,13 @@ class AnthropicProvider:
             k = max((i for i, b in enumerate(blocks) if not b.get("_note")), default=None)
             if k is not None:
                 blocks[k] = {**blocks[k], "cache_control": {"type": "ephemeral"}}
+            # 第二個斷點打在上一次請求的最後一則（中間隔一則助手回覆）：服務商往回找舊快取只找 20 格，
+            # 這一步新增的區塊太多（例如一次附十幾張圖）就找不到上次寫的快取、整段重寫；在上次寫快取的位置再打一個就一定找得到
+            if len(conv) >= 3 and conv[-3]["content"]:
+                prev = conv[-3]["content"]
+                k3 = max((i for i, b in enumerate(prev) if not b.get("_note")), default=None)
+                if k3 is not None:
+                    prev[k3] = {**prev[k3], "cache_control": {"type": "ephemeral"}}
         for m in conv:
             m["content"] = [{kk: vv for kk, vv in b.items() if kk != "_note"} if isinstance(b, dict) else b
                             for b in m["content"]]
@@ -131,6 +139,8 @@ class AnthropicProvider:
             kw["tools"] = [{"name": t["name"], "description": t["description"], "input_schema": t["schema"]} for t in tools]
         if effort and effort != "off":
             kw["extra_body"] = {"output_config": {"effort": effort}}
+        cachediag.record(kw["model"], kw["system"], kw.get("tools"), kw["messages"],
+                         {"thinking": kw.get("thinking"), "extra": kw.get("extra_body"), "tool_choice": kw.get("tool_choice")})
 
         async with client.messages.stream(**kw) as stream:
             alive = 0.0

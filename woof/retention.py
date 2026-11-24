@@ -58,10 +58,22 @@ def _drop_files(paths: list[Path]) -> tuple[int, int]:
 
 
 def _orphans(db, live: set[str] | None = None) -> int:
-    """已刪對話留下的工具耗時紀錄、系統提示快照（刪對話當下它還在跑，之後才寫進來的）。
+    """已刪對話留下的工具耗時紀錄、系統提示快照、工具圖留存（刪對話當下它還在跑，之後才寫進來的）。
     直接對資料庫裡現有的對話比對，不會誤刪剛建立的對話。"""
-    return sum(db.execute(f"DELETE FROM {t} WHERE session_id NOT IN (SELECT id FROM sessions)").rowcount
-               for t in ("op_log", "prompt_snapshots"))
+    n = sum(db.execute(f"DELETE FROM {t} WHERE session_id NOT IN (SELECT id FROM sessions)").rowcount
+            for t in ("op_log", "prompt_snapshots"))
+    import shutil
+
+    from woof.config import DATA
+
+    snap = DATA / "imgsnap"
+    if snap.is_dir():
+        alive = {r[0] for r in db.execute("SELECT id FROM sessions")}
+        for d in snap.iterdir():
+            if d.is_dir() and d.name not in alive:
+                shutil.rmtree(d, ignore_errors=True)
+                n += 1
+    return n
 
 
 def prune(live: set[str]) -> dict:

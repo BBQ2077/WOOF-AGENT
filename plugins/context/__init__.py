@@ -33,6 +33,8 @@ TAIL_MIN_TOK, TAIL_MAX_TOK, TAIL_WIN = 10000, 25000, 0.025
 # 摘要後面附上被壓縮那段裡使用者的原話（新的在前）：合計上限、單則上限（字）
 USERS_BUDGET, USER_MAX = 24000, 4000
 REPLY_MAX = 600      # 每段原話前面附上它回應的助手那則（結尾節錄）：使用者常常只回「好」「照這樣」，要看得出認可了什麼
+# 沿用主對話快取寫摘要時，上一步要在這段時間內（Claude 的快取放 5 分鐘；其他家多半更久）
+CACHE_TTL_ANTHROPIC, CACHE_TTL_OTHER = 270, 600
 MID_KEEP = 2         # 回合中途壓縮時，保留最近幾步（模型呼叫＋工具結果）原樣
 WHO = {"user": "使用者", "assistant": "助手", "tool": "工具"}
 
@@ -141,6 +143,12 @@ def register(woof):
             return 1
         return max(1, min(int(woof.settings.get("parallel") or 4), 8))
 
+    def _keep_images() -> int:
+        try:
+            return max(0, min(int(woof.settings.get("keep_images") if woof.settings.get("keep_images") not in (None, "") else 8), 50))
+        except (TypeError, ValueError):
+            return 8
+
     def _trigger() -> float:
         return max(10, min(int(woof.settings.get("trigger") or 70), 95)) / 100
 
@@ -177,6 +185,64 @@ def register(woof):
         tail = f"\n{_STRUCT}" if mode == "常規" else ""
         final = await _call(model, f"{_prompt_in('compact_merge', mode)}{tail}{upd}{size}", head + merged)
         return final, n
+
+    def _marker(m: dict) -> str:
+        """保留區第一則長什麼樣（給模型認得摘要範圍到哪）。"""
+        blocks = m.get("content") or []
+        text = " ".join(str(b.get("text") or "") for b in blocks if b.get("type") == "text").strip().replace("\n", " ")
+        if m["role"] == "user":
+            return f"使用者說「{text[:60]}」那則" if text else "使用者傳來的那則"
+        if m["role"] == "assistant":
+            calls = [b.get("name") for b in blocks if b.get("type") == "tool_call"]
+            if text:
+                return f"你回覆「{text[:60]}」那則"
+            return f"你呼叫 {'、'.join(calls[:3])} 那一步" if calls else "你回覆的那則"
+        names = [b.get("name") for b in blocks if b.get("type") == "tool_result"]
+        return f"工具 {'、'.join(n for n in names[:3] if n)} 回傳結果那則"
+
+    async def _summarize_cached(ctx, model: dict, prev: str, kept: list[dict], target: int) -> str:
+        """沿用主對話的快取寫摘要：跟上一步送出的請求一字不差（系統提示詞、工具清單、思考強度、歷史），
+        之後新增的訊息接在後面，最後加一則壓縮指令。前面整段吃快取，只多付指令和摘要的錢。
+        條件不合（沒有上一步的紀錄、快取可能過期、指定了別的壓縮模型、太長、狀態已經變了）回空字串，改用一般做法。"""
+        from woof.agent import loop
+        from woof import tokens
+
+        sid = ctx.session_id
+        snap = loop.LAST_REQ.get(sid)
+        if not snap or not kept or snap["model"] != model.get("id"):
+            return ""
+        use = loop.aux_model("compact", model) or model
+        if use.get("id") != model.get("id"):
+            return ""      # 指定了別的壓縮模型：快取各模型分開，沿用不到
+        ttl = CACHE_TTL_ANTHROPIC if model.get("provider") == "anthropic" else CACHE_TTL_OTHER
+        if time.time() - snap["at"] > ttl:
+            return ""      # 快取大概過期了：整段原價重送，比一般做法（節錄）還貴
+        if getattr(ctx, "mid_turn", False) and getattr(ctx, "force_compact", False):
+            return ""      # 已經超出上下文，整段送不出去
+        if snap.get("sig") != loop.req_sig(sid):
+            return ""
+        new = [m for m in loop.history(sid) if int(m.get("id") or 0) > int(snap["through"] or 0)]
+        new = loop._drop_hollow_replies(loop._drop_missing_images(new))
+        mode = _mode()
+        rules = _prompt_in("compact", mode)
+        if prev:
+            rules += ("\n" + _prompt_in("compact_update", mode)
+                      + "（【先前摘要】＝最前面那則【上下文摘要】；【之後新增的對話】＝它後面到範圍結束為止的對話）")
+        rules += f"\n長度約 {target} 字以內；路徑、數字、名稱、決定、未完成事項寧可多留，不要為了縮短漏掉。"
+        head = "最前面的【上下文摘要】加上它後面的對話" if prev else "對話開頭"
+        scope = (f"{head}，到{_marker(kept[0])}之前為止。從那則開始的最近 {len(kept)} 則訊息壓縮後會原樣保留，"
+                 "不用寫進摘要（需要時可以參考，判斷哪些事已經做完）。")
+        # 標成內部訊息：只回傳「這一回合」思考的連線，回合起點不會被這則指令往後推（推了前面的思考就會被拿掉、前綴斷掉）
+        ask = {"role": "user", "meta": {"internal": "compact_ask"},
+               "content": [{"type": "text", "text": _prompt_get("compact_inline", scope=scope, rules=rules)}]}
+        msgs = [*snap["messages"], *new, ask]
+        window = tokens.window_of(model, sid)
+        est = (tokens.estimate_messages(msgs) + tokens.estimate_text(snap["system"])
+               + tokens.estimate_tools(snap["specs"]) + int(target / CHARS_PER_TOK))
+        if window and est > window * 0.95:
+            return ""
+        return (await loop.complete(model, snap["system"], msgs, tools=snap["specs"], effort=snap["effort"],
+                                    session_id=sid, kind="compact")).strip()
 
     async def _precompact(session_id: str, model: dict, registry, emit) -> None:
         job = SimpleNamespace(session_id=session_id, model_cfg=model, registry=registry, emit=emit,
@@ -346,7 +412,7 @@ def register(woof):
                 cur["prune"] = {"through": last_id, "at": time.time(), "count": n_res, "saved": saved}
                 from woof.agent.loop import retire_images_on_compact
 
-                retire_images_on_compact(ctx.session_id, cur)   # 前綴反正重算，舊圖一起收
+                retire_images_on_compact(ctx.session_id, cur, _keep_images())   # 前綴反正重算，舊圖一起收
                 s2 = store.update_session(ctx.session_id, engine_state=cur)
                 await ctx.emit({"type": "session_updated", "session": s2})
                 await ctx.emit({"type": "notice", "session_id": ctx.session_id,
@@ -381,7 +447,20 @@ def register(woof):
         await _compact_state(ctx, True)
         await ctx.emit({"type": "notice", "session_id": ctx.session_id,
                         "text": f"{why}，正在壓縮較早的 {len(older)} 則訊息（{method}・{mode}模式，目標約 {target} 字）…"})
-        text, parts = await _summarize(model, prev, items, target, ctx.emit, ctx.session_id)
+        text, parts, how = "", 1, ""
+        if method == "單次":
+            try:
+                text = await _summarize_cached(ctx, model, prev, pending[cut:], target)
+                how = "cached" if text else ""
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # 沿用快取那次失敗（模型去呼叫工具、服務商出錯）：改用一般做法再寫一次
+                text = ""
+                await ctx.emit({"type": "notice", "session_id": ctx.session_id,
+                                "text": f"沿用快取寫摘要沒成功（{str(e)[:120]}），改用一般做法"})
+        if not text:
+            text, parts = await _summarize(model, prev, items, target, ctx.emit, ctx.session_id)
         text = text.strip()
         if not text:
             raise RuntimeError("壓縮摘要是空的，已中止這次回合")
@@ -400,10 +479,10 @@ def register(woof):
             cur["tools_on"], cur["tools_off"], cur["tools_drop"] = on, off, []
         cur["summary"] = {"through": older[-1]["id"], "text": text, "at": time.time(),
                           "kept": sorted(recent_ids), "mode": mode, "method": method, "parts": parts,
-                          "inflight": inflight}
+                          "inflight": inflight, **({"how": how} if how else {})}
         from woof.agent.loop import retire_images_on_compact
 
-        retire_images_on_compact(ctx.session_id, cur)   # 前綴反正重算，看過的舊圖一起收，只留最新一則
+        retire_images_on_compact(ctx.session_id, cur, _keep_images())   # 前綴反正重算，舊圖一起收，只留最新幾張
         s2 = store.update_session(ctx.session_id, engine_state=cur)
         # 對話畫面據此在被摘要的訊息後面畫一條分隔線（可展開看摘要）
         await ctx.emit({"type": "session_updated", "session": s2})
