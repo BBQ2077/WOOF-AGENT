@@ -22,6 +22,19 @@ def estimate_text(text: str) -> int:
     return round(asc / 4 + (len(text) - asc) / 1.5)
 
 
+def image_tokens() -> int:
+    """一張圖約幾 token：Claude 每 28×28 像素 1 個，用設定的最長邊、16:9 估（1568 px 約 1800）。"""
+    import math
+
+    try:
+        from woof.agent.loop import img_side
+
+        s = img_side()
+    except Exception:
+        s = 1568
+    return math.ceil(s / 28) * math.ceil(s * 9 / 16 / 28)
+
+
 def estimate_blocks(content) -> int:
     n = 4  # 每則訊息的角色、分隔等固定開銷
     for b in content or []:
@@ -36,9 +49,9 @@ def estimate_blocks(content) -> int:
         elif t == "tool_call":
             n += estimate_text(b.get("name") or "") + estimate_text(json.dumps(b.get("args") or {}, ensure_ascii=False))
         elif t == "tool_result":
-            n += estimate_text(b.get("output") or "") + 1500 * len(b.get("images") or [])
+            n += estimate_text(b.get("output") or "") + image_tokens() * len(b.get("images") or [])
         elif t == "image":
-            n += 1500  # 各家圖片約 1–1.6k tokens
+            n += image_tokens()
     return n
 
 

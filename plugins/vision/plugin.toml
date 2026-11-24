@@ -7,7 +7,7 @@ enabled = true
 [settings.max_px]
 type = "number"
 default = 1568
-label = "送出前最長邊縮小到幾個像素"
+label = "送給模型的圖最長邊（像素，256～2576）：使用者貼的圖、工具附的圖都照這個縮。Claude 每 28×28 像素算 1 個 token，16:9 的圖在 1568 約 1800、1280 約 1200、1024 約 780、768 約 450。改了以後新的圖照新設定；工具附過的圖維持當時大小，使用者貼過的圖下一次送出起改用新大小（快取重算一次）"
 
 [settings.max_shots]
 type = "number"

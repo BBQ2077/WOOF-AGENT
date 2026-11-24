@@ -351,7 +351,7 @@ def register(woof):
                 return {"output": f"一次最多 {limit} 張，這次給了 {len(items)} 張", "is_error": True}
         else:
             items = [{"path": args.get("path"), "url": args.get("url"), "region": args.get("region")}]
-        max_px = max(256, int(woof.settings.get("max_px") or 1568))
+        max_px = max(256, min(int(woof.settings.get("max_px") or 1568), 2576))
         cwd = getattr(ctx, "cwd", None)
         pics, fails = [], []
         for k, it in enumerate(items, 1):
@@ -440,7 +440,7 @@ def register(woof):
             shots = _norm_shots(args.get("shots"), max(1, int(woof.settings.get("max_shots") or 6)))
         except (TypeError, ValueError) as e:
             return {"output": str(e), "is_error": True}
-        max_px = max(256, int(woof.settings.get("max_px") or 1568))
+        max_px = max(256, min(int(woof.settings.get("max_px") or 1568), 2576))
         first_wait = max(0, min(30000, int(args.get("wait_ms") if args.get("wait_ms") is not None else 1000)))
         try:
             res, errs = await asyncio.wait_for(_shoot_page(exe, url, shots, first_wait, max_px), 300)

@@ -1983,7 +1983,19 @@ def req_sig(session_id: str) -> list:
     return [int(es.get("compress_count") or 0), int((es.get("summary") or {}).get("through") or 0),
             int((es.get("prune") or {}).get("through") or 0), int(es.get("img_before") or 0)]
 
-IMG_SIDE = 1568            # 送給模型的圖最長邊（各家看圖模型內部也會縮到這附近，再大只是多傳）
+IMG_SIDE = 1568            # 送給模型的圖最長邊預設值（看圖插件的設定 max_px 可改，256～2576）
+IMG_SIDE_MAX = 2576        # Claude 高解析度等級的最長邊上限，再大服務商也會縮
+
+
+def img_side() -> int:
+    """送給模型的圖最長邊：看圖插件的設定（max_px），所有圖片（使用者貼的、工具附的）都照這個縮。
+    Claude 每 28×28 像素算 1 個 token，邊長減半、token 約剩四分之一。"""
+    vp = (getattr(REG, "plugins", None) or {}).get("vision")
+    try:
+        v = int(((vp.settings if vp else None) or {}).get("max_px") or IMG_SIDE)
+    except (TypeError, ValueError):
+        v = IMG_SIDE
+    return max(256, min(v, IMG_SIDE_MAX))
 IMG_JPEG_OVER = 700_000    # 縮完還超過這麼大就轉 JPEG（截圖存成 PNG 常常一張 1～2 MB）
 _IMG_CACHE: dict = {}
 
@@ -2003,7 +2015,8 @@ def load_image_b64(block: dict) -> tuple[str, str]:
         return hit
     p = Path(block["path"])
     st = p.stat()
-    key = (str(p), st.st_mtime_ns, st.st_size)
+    side = img_side()
+    key = (str(p), st.st_mtime_ns, st.st_size, side)
     hit = _IMG_CACHE.get(key)
     if hit:
         return hit
@@ -2014,8 +2027,8 @@ def load_image_b64(block: dict) -> tuple[str, str]:
         from PIL import Image
 
         im = Image.open(BytesIO(data))
-        if (max(im.size) > IMG_SIDE or len(data) > IMG_JPEG_OVER) and not getattr(im, "is_animated", False):
-            im.thumbnail((IMG_SIDE, IMG_SIDE))
+        if (max(im.size) > side or len(data) > IMG_JPEG_OVER) and not getattr(im, "is_animated", False):
+            im.thumbnail((side, side))
             buf = BytesIO()
             if mt == "image/png" and im.mode in ("RGBA", "LA", "P"):
                 im.save(buf, "PNG", optimize=True)
