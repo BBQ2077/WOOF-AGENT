@@ -921,23 +921,36 @@ async def flush_steer(session_id: str, emit) -> bool:
     return True
 
 
+def _user_tag_from(session_id: str, rows: list[dict]) -> int | None:
+    """從哪一則訊息起標「使用者」（None＝不標：子代理對話裡的「使用者」是派它的模型）。
+    有這個功能以前的對話，從現在最後一則起標：已經送過的訊息一個字都不改，快取和 Claude 的思考才不會斷。"""
+    s = store.get_session(session_id) or {}
+    if s.get("parent"):
+        return None
+    es = s.get("engine_state") or {}
+    if "utag_from" not in es:
+        es = dict(es)
+        es["utag_from"] = max((int(m["id"]) for m in rows), default=0)
+        store.update_session(session_id, engine_state=es)
+    return int(es["utag_from"])
+
+
 def history(session_id: str) -> list[dict]:
     from woof.agent import internal
 
     out = []
     rows = store.get_messages(session_id)
+    tag_from = _user_tag_from(session_id, rows)
     for i, m in enumerate(rows):
         content, meta = m["content"], m.get("meta") or {}
         if meta.get("internal") and m["role"] == "user":
             content = internal.for_model(meta["internal"], content)
-        elif meta.get("note") and m["role"] == "user":
+        elif m["role"] == "user" and meta.get("note"):
             content = [*content, {"type": "text", "text": meta["note"]}]  # 設定變更附在最後
-        if meta.get("steer") and m["role"] == "user":
-            # 執行途中的插話跟在工具結果後面，模型分不出是使用者還是工具輸出（會當成可疑內容而不照做）：前後加上標記。
+        if m["role"] == "user" and not meta.get("internal") and tag_from is not None and int(m["id"]) >= tag_from:
+            # 使用者自己送的訊息開頭標一行「使用者／使用者插話」：插話接在工具結果後面，不標的話模型分不出是使用者還是工具輸出。
             # 存的原文不變；標記區塊帶 _wrap，摘要、重述時略過
-            head, _, tail = _P("steer_wrap", text="\x00").partition("\x00")
-            content = [{"type": "text", "text": head.rstrip("\n"), "_wrap": True}, *content,
-                       {"type": "text", "text": tail.lstrip("\n"), "_wrap": True}]
+            content = [{"type": "text", "text": _P("steer_tag" if meta.get("steer") else "user_tag"), "_wrap": True}, *content]
         out.append({"id": m["id"], "role": m["role"], "content": content, "meta": meta, "created": m.get("created")})
         # 工具呼叫沒有對應結果（工具執行中程式被關掉）：補上「沒有結果」，否則 API 會拒絕整段對話
         if m["role"] == "assistant":
