@@ -467,6 +467,7 @@ window.WOOF_EN = {
 "保留天數": "Retention days",
 "保留最近幾輪": "Keep last few rounds",
 "原樣保留上限": "Verbatim tail cap",
+"每張圖最多幾 token（這個對話）": "Max tokens per image (this chat)",
 "圖片": "Images",
 "每張圖最多幾 token": "Max tokens per image",
 "圖最長邊": "Image long edge",

@@ -45,7 +45,7 @@ WHO = {"user": "使用者", "assistant": "助手", "tool": "工具"}
 
 _STRUCT = ("依下面的段落整理，沒有內容的段落就省略：\n"
            "## 使用者的目標與要求\n## 已完成\n## 決定與理由\n## 錯誤與修正\n"
-           "## 重要的檔案、指令與數據\n## 目前進行中\n## 待辦與下一步")
+           "## 重要的檔案、指令與數據\n## 壓縮當時進行中\n## 當時還沒做完的")
 # 摘要用的提示詞在 woof/prompts.py（compact、compact_merge、compact_part…），設定頁可以檢視、覆寫
 from woof.prompts import get as _prompt_get, get_in as _prompt_in  # noqa: E402
 
@@ -86,7 +86,8 @@ def _elide(text: str, cap: int) -> str:
 def _users_section(messages: list[dict], through: int) -> str:
     """被壓縮那段（id ≤ through）裡使用者親口講的話，新的在前，照字數上限收。內部訊息（接續、回報…）不算。"""
     def text_of(m):
-        return "\n".join(b.get("text") or "" for b in m.get("content") or [] if b.get("type") == "text").strip()
+        return "\n".join(b.get("text") or "" for b in m.get("content") or []
+                         if b.get("type") == "text" and not b.get("_wrap")).strip()
 
     pairs, last_reply = [], ""
     for m in messages:
@@ -115,6 +116,26 @@ def _users_section(messages: list[dict], through: int) -> str:
         picked.append("> " + block.replace("\n", "\n> "))
         used += len(text) + len(reply)
     return "\n\n".join(picked)
+
+
+def _turn_requests(messages: list[dict], upto: int) -> str:
+    """回合中途壓縮後要重述的使用者訊息：id ≤ upto 的最後一則「不是插話」的使用者訊息起，到 upto 為止的使用者訊息，依時間。"""
+    def text_of(m):
+        return "\n".join(b.get("text") or "" for b in m.get("content") or []
+                         if b.get("type") == "text" and not b.get("_wrap")).strip()
+
+    users = [m for m in messages if m.get("role") == "user" and int(m.get("id") or 0) <= upto
+             and not (m.get("meta") or {}).get("internal")]
+    start = max((i for i, m in enumerate(users) if not (m.get("meta") or {}).get("steer")), default=0)
+    out = []
+    for m in users[start:]:
+        t = text_of(m)
+        if not t:
+            continue
+        when = time.strftime("%m-%d %H:%M", time.localtime(m["created"])) if m.get("created") else ""
+        tag = "（途中插話）" if (m.get("meta") or {}).get("steer") else ""
+        out.append(f"（{when}）{tag}\n{t}" if when or tag else t)
+    return "\n\n".join(out)
 
 
 def _render(items: list[tuple[str, str]]) -> str:
@@ -580,14 +601,15 @@ def register(woof):
             body += _prompt_get("compact_users", users=users)
         if "session_search" in getattr(getattr(ctx, "registry", None), "tools", {}):
             body += _prompt_get("compact_recall", sid=ctx.session_id)
-        # 回合中途壓縮時，使用者這次的要求被摘要進去了：在摘要後面原文重述，模型才知道還在做什麼
+        # 回合中途壓縮時，使用者這一回合的訊息被摘要進去了：在摘要後面原文重述，模型才知道還在做什麼。
+        # 一回合＝最後一則不是插話的使用者訊息起，加上之後的插話；全部依時間貼出，不只最後一則（插話常是補充，單貼會被當成整個任務）
         inf = int(summary.get("inflight") or 0)
         newer_user = any(m["role"] == "user" and not (m.get("meta") or {}).get("internal") for m in kept)
         if inf and inf <= through and not newer_user:
-            req = store.get_message(inf)
-            req_text = "\n".join(b.get("text") or "" for b in (req or {}).get("content") or [] if b.get("type") == "text").strip()
+            req_text = _turn_requests(messages, inf)
             if req_text:
                 body += _prompt_get("compact_inflight", request=req_text)
+        body += _prompt_get("compact_end")
         head = {"role": "user", "content": [{"type": "text", "text": body}]}
         return [head, *kept]
 

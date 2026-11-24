@@ -2784,6 +2784,27 @@ async def set_ctx_window(sid: str, body: dict):
     return {"ok": True, "window": n, "effective": window_of(REG.model_cfg(s.get("model")), sid)}
 
 
+@app.post("/api/sessions/{sid}/img_tok")
+async def set_img_tok(sid: str, body: dict):
+    """這個對話每張圖最多幾 token（200～4784）。0＝照「設定 → 上下文壓縮 → 圖片」。下一次送出起生效。"""
+    s = store.get_session(sid)
+    if not s:
+        raise HTTPException(404)
+    try:
+        n = max(0, int(body.get("tok") or 0))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "tok 要是整數（0＝照設定）")
+    if n:
+        n = max(200, min(n, 4784))
+    st = dict(s.get("engine_state") or {})
+    if n:
+        st["img_tok"] = n
+    else:
+        st.pop("img_tok", None)
+    store.update_session(sid, engine_state=st)
+    return {"ok": True, "tok": n}
+
+
 @app.post("/api/sessions/{sid}/goal")
 async def start_goal_ep(sid: str, body: dict):
     from woof.agent import tasks

@@ -101,6 +101,7 @@ class TurnContext:
     def __init__(self, session: dict, model_cfg: dict, effort: str | None, emit: Emit) -> None:
         self.session = session
         self.session_id = session["id"]
+        CUR_SID.set(self.session_id)   # 送圖時照這個對話的每張圖上限縮
         self.model_cfg = model_cfg
         # 使用者選的是想要的強度；依模型支援的檔位向下兼容（woof/effort.py）
         from woof.effort import resolve as _resolve_effort
@@ -931,6 +932,12 @@ def history(session_id: str) -> list[dict]:
             content = internal.for_model(meta["internal"], content)
         elif meta.get("note") and m["role"] == "user":
             content = [*content, {"type": "text", "text": meta["note"]}]  # 設定變更附在最後
+        if meta.get("steer") and m["role"] == "user":
+            # 執行途中的插話跟在工具結果後面，模型分不出是使用者還是工具輸出（會當成可疑內容而不照做）：前後加上標記。
+            # 存的原文不變；標記區塊帶 _wrap，摘要、重述時略過
+            head, _, tail = _P("steer_wrap", text="\x00").partition("\x00")
+            content = [{"type": "text", "text": head.rstrip("\n"), "_wrap": True}, *content,
+                       {"type": "text", "text": tail.lstrip("\n"), "_wrap": True}]
         out.append({"id": m["id"], "role": m["role"], "content": content, "meta": meta, "created": m.get("created")})
         # 工具呼叫沒有對應結果（工具執行中程式被關掉）：補上「沒有結果」，否則 API 會拒絕整段對話
         if m["role"] == "assistant":
@@ -1999,8 +2006,19 @@ def img_side() -> int:
     return max(256, min(v, IMG_SIDE_MAX))
 
 
+CUR_SID: contextvars.ContextVar[str] = contextvars.ContextVar("woof_cur_sid", default="")
+
+
 def img_tok_max() -> int:
-    """每張圖最多幾 token（看圖插件的設定 max_tokens）：不管圖是什麼形狀都縮到這個量以內。"""
+    """每張圖最多幾 token：這個對話有自訂（上下文面板）就用它，否則用看圖插件的設定 max_tokens。不管圖是什麼形狀都縮到這個量以內。"""
+    sid = CUR_SID.get()
+    if sid:
+        try:
+            v = int(((store.get_session(sid) or {}).get("engine_state") or {}).get("img_tok") or 0)
+        except (TypeError, ValueError):
+            v = 0
+        if v:
+            return max(200, min(v, 4784))
     vp = (getattr(REG, "plugins", None) or {}).get("vision")
     try:
         v = int(((vp.settings if vp else None) or {}).get("max_tokens") or IMG_TOK)

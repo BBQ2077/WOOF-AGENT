@@ -3971,6 +3971,12 @@ function renderCtxPanel() {
         <span class="btn" data-cp="winReset">照設定</span><span class="btn primary" data-cp="winSave">套用</span></div>
     </div>
     <div class="cp-sec">
+      <div class="cp-sh"><b>每張圖最多幾 token（這個對話）</b><span class="pr-badge${sessImgTok() ? ' ov' : ''}">${sessImgTok() ? '這個對話自訂' : '照設定'}</span></div>
+      <small class="cp-note">只改這個對話：你貼的圖、工具附的圖送出前都縮到這個量以內（200 到 4784）。留空或 0＝照「設定 → 上下文壓縮 → 圖片」（目前 ${globalImgTok().toLocaleString()}）。從下一次送出起生效；你貼過的圖會改用新大小，快取重算一次。</small>
+      <div class="cp-win"><input id="cpImgTok" type="number" min="0" max="4784" step="100" placeholder="0＝照設定" value="${sessImgTok() || ''}"><span>token</span>
+        <span class="btn" data-cp="imgReset">照設定</span><span class="btn primary" data-cp="imgSave">套用</span></div>
+    </div>
+    <div class="cp-sec">
       <div class="cp-sh"><b>基礎提示詞</b><span class="pr-badge ${isOv ? 'ov' : ''}">${isOv ? '已手動覆寫' : '使用預設'}</span></div>
       <small class="cp-note">只取代這個對話的「基礎提示詞」，插件片段（記憶、專案指示、技能、MCP）照常加入。存了從下一則訊息起生效，但系統提示詞在最前面，<b>改它會讓這個對話的快取整段重算一次</b>（之後照常命中）。只是想補一句要求，直接在對話裡講比較省。</small>
       <textarea id="cpPrompt" class="pr-ta" spellcheck="false">${esc(draft)}</textarea>
@@ -4039,6 +4045,17 @@ $('#ctxPanel').addEventListener('click', async (e) => {
       if (s) { s.engine_state = { ...(s.engine_state || {}) }; if (r.window) s.engine_state.ctx_window = r.window; else delete s.engine_state.ctx_window; }
       notify('ok', r.window ? `這個對話的上下文上限：${Number(r.effective || r.window).toLocaleString()} token` : '這個對話改回照設定');
       renderMeter(); renderCtxPanel();
+    } catch (err) { notify('error', '設定失敗', err.message); }
+    return;
+  }
+  if (k === 'imgSave' || k === 'imgReset') {
+    const sid = S.sid, v = k === 'imgReset' ? 0 : Math.max(0, Math.round(Number($('#cpImgTok').value) || 0));
+    try {
+      const r = await api('POST', `/api/sessions/${sid}/img_tok`, { tok: v });
+      const s = S.sessions.find((x) => x.id === sid);
+      if (s) { s.engine_state = { ...(s.engine_state || {}) }; if (r.tok) s.engine_state.img_tok = r.tok; else delete s.engine_state.img_tok; }
+      notify('ok', r.tok ? `這個對話每張圖最多 ${r.tok.toLocaleString()} token` : '這個對話的圖片改回照設定');
+      renderCtxPanel();
     } catch (err) { notify('error', '設定失敗', err.message); }
     return;
   }
@@ -6284,6 +6301,8 @@ async function loadCtxCap() {
   renderMeter();
 }
 // 這個對話在上下文面板設的上限；0＝照設定。壓縮插件關掉時不算
+const sessImgTok = () => Number(((cur() || {}).engine_state || {}).img_tok) || 0;
+const globalImgTok = () => { const v = (S.plugins || []).find((x) => x.name === 'vision'); return Number(((v && v.settings) || {}).max_tokens) || 1500; };
 const sessWin = () => S.ctxOn === false ? 0 : Number(((cur() || {}).engine_state || {}).ctx_window) || 0;
 function winOf(u, m) {
   const mw = Number(m && m.context_window) || 0, cap = sessWin() || Number(S.ctxCap) || 0;
