@@ -536,15 +536,21 @@ def _doc_text(path) -> str:
         if ext in (".xlsx", ".xlsm"):
             import openpyxl
 
-            wb = openpyxl.load_workbook(p, read_only=True, data_only=True)
+            import io
+
+            # read_only 會一直開著原檔直到 close()；先讀進記憶體，原檔馬上放開
+            wb = openpyxl.load_workbook(io.BytesIO(p.read_bytes()), read_only=True, data_only=True)
             rows = []
-            for ws in wb.worksheets:
-                rows.append(f"[{ws.title}]")
-                for r in ws.iter_rows(values_only=True):
-                    if any(v is not None for v in r):
-                        rows.append("\t".join("" if v is None else str(v) for v in r))
-                    if len(rows) > 400:
-                        break
+            try:
+                for ws in wb.worksheets:
+                    rows.append(f"[{ws.title}]")
+                    for r in ws.iter_rows(values_only=True):
+                        if any(v is not None for v in r):
+                            rows.append("\t".join("" if v is None else str(v) for v in r))
+                        if len(rows) > 400:
+                            break
+            finally:
+                wb.close()
             return "\n".join(rows)
         raw = p.read_bytes()
         if b"\x00" in raw[:4096]:

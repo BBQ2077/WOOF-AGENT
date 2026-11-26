@@ -19,6 +19,13 @@ _GUI_OPEN = re.compile(
     r"""|\bwebbrowser\.open""", re.I | re.M)
 
 
+def _py_pkgs() -> str:
+    """WOOF 這顆 Python 實際裝了哪些資料處理套件（照環境列，不寫死）。"""
+    import importlib.util
+
+    return "、".join(m for m in ("pandas", "openpyxl", "numpy", "pypdf") if importlib.util.find_spec(m))
+
+
 def _py_cmd() -> str:
     """給 bash 用的 Python 路徑：正斜線、加引號（資料夾名稱有空白也能直接貼）。"""
     import sys as _sys
@@ -32,7 +39,7 @@ def _python_hint(out: str) -> str:
         return ""
     import sys as _sys
 
-    return (f"\n（提示：要用 Python 請直接呼叫 {_py_cmd()}（整串連引號照貼）—— 已裝 pandas、openpyxl、numpy；"
+    return (f"\n（提示：要用 Python 請直接呼叫 {_py_cmd()}（整串連引號照貼）—— 已裝 {_py_pkgs()}；"
             "系統 PATH 上的 python 沒有這些，改叫這一顆就好，不要重裝重試同一支指令。）")
 
 
@@ -241,8 +248,8 @@ def register(woof):
     woof.add_tool(
         "terminal",
         "在 Git Bash 執行指令（POSIX 語法）。長任務設 background=true，超過 timeout 也會自動轉背景；背景結束"
-        f"會自動通知，不用反覆查。要用 Python 直接用 {_py}（已裝 pandas、openpyxl、"
-        "numpy，整串含引號照貼），不要另外裝套件。不要用 start／explorer／Invoke-Item 開檔驗收（會在使用者桌面跳視窗）"
+        f"會自動通知，不用反覆查。要用 Python 直接用 {_py}（已裝 {_py_pkgs()}，"
+        "整串含引號照貼），不要另外裝套件。不要用 start／explorer／Invoke-Item 開檔驗收（會在使用者桌面跳視窗）"
         "，看畫面用 view_page 或 headless 截圖。",
         {
             "type": "object",

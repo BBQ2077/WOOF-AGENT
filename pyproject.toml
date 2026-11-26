@@ -20,6 +20,7 @@ dependencies = [
     "numpy>=2",
     "pandas>=2",
     "openpyxl>=3.1",
+    "pypdf>=5",   # read_file 讀 PDF
 ]
 
 [tool.uv]

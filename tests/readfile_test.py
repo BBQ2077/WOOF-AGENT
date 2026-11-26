@@ -89,7 +89,7 @@ class Paging(unittest.TestCase):
         self.assertIn("超過檔尾", read(p, offset=9)["output"])
 
     def test_binary_hints(self):
-        for ext, want in ((".pdf", "pypdf"), (".doc", "舊版 Office")):
+        for ext, want in ((".pdf", "轉文字失敗"), (".doc", "舊版 Office")):
             p = self.d / f"f{ext}"
             p.write_bytes(b"\x00\x01" * 100)
             r = read(p)
@@ -227,6 +227,106 @@ class Office(unittest.TestCase):
             os.utime(f, (old, old))
         retention._drop_files(retention._files(time.time() - 7 * 86400))
         self.assertFalse(d.exists())
+
+
+def make_pdf(path, pages=("Hello 115 PDF",), image_page=True):
+    """手寫最小的 PDF：每頁一行 Helvetica 字；最後加一頁只有一張 40x40 的圖。"""
+    objs = ["<< /Type /Catalog /Pages 2 0 R >>", None, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"]
+    kids = []
+    for t in pages:
+        s = f"BT /F1 18 Tf 50 700 Td ({t}) Tj ET".encode()
+        objs.append(b"<< /Length %d >>\nstream\n" % len(s) + s + b"\nendstream")
+        objs.append(f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> "
+                    f"/Contents {len(objs)} 0 R >>")
+        kids.append(len(objs))
+    if image_page:
+        px = bytes([200, 40, 40]) * 1600
+        objs.append(b"<< /Type /XObject /Subtype /Image /Width 40 /Height 40 /ColorSpace /DeviceRGB "
+                    b"/BitsPerComponent 8 /Length %d >>\nstream\n" % len(px) + px + b"\nendstream")
+        img = len(objs)
+        s = b"q 200 0 0 200 50 500 cm /Im1 Do Q"
+        objs.append(b"<< /Length %d >>\nstream\n" % len(s) + s + b"\nendstream")
+        objs.append(f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /XObject << /Im1 {img} 0 R >> >> "
+                    f"/Contents {len(objs)} 0 R >>")
+        kids.append(len(objs))
+    objs[1] = f"<< /Type /Pages /Kids [{' '.join(f'{k} 0 R' for k in kids)}] /Count {len(kids)} >>"
+    out, offs = bytearray(b"%PDF-1.4\n"), []
+    for i, o in enumerate(objs, 1):
+        offs.append(len(out))
+        out += f"{i} 0 obj\n".encode() + (o.encode() if isinstance(o, str) else o) + b"\nendobj\n"
+    x = len(out)
+    out += f"xref\n0 {len(objs) + 1}\n0000000000 65535 f \n".encode()
+    out += b"".join(f"{o:010d} 00000 n \n".encode() for o in offs)
+    out += f"trailer\n<< /Size {len(objs) + 1} /Root 1 0 R >>\nstartxref\n{x}\n%%EOF\n".encode()
+    Path(path).write_bytes(bytes(out))
+
+
+class Pdf(unittest.TestCase):
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp())
+
+    def test_text_and_image(self):
+        p = self.d / "卷.pdf"
+        make_pdf(p, pages=("Hello 115 PDF", "Page two"))
+        r = read(p)
+        self.assertFalse(r.get("is_error"), r["output"])
+        out = r["output"]
+        self.assertIn("pdf 轉成的文字", out)
+        self.assertIn("--- 第 1 頁 ---", out)
+        self.assertIn("Hello 115 PDF", out)
+        self.assertLess(out.index("Hello 115"), out.index("Page two"))
+        self.assertIn("1 頁幾乎只有圖", out)
+        img = re.search(r"\[圖1：(.+?)\]", out).group(1)
+        from PIL import Image
+
+        with Image.open(img) as im:
+            self.assertEqual(im.size, (40, 40))
+
+    def test_encrypted(self):
+        from pypdf import PdfReader, PdfWriter
+
+        src = self.d / "a.pdf"
+        make_pdf(src, image_page=False)
+        w = PdfWriter(clone_from=PdfReader(src))
+        w.encrypt(user_password="pw", owner_password="own", algorithm="RC4-128")
+        p = self.d / "鎖.pdf"
+        with open(p, "wb") as f:
+            w.write(f)
+        r = read(p)
+        self.assertTrue(r["is_error"])
+        self.assertIn("密碼", r["output"])
+
+    def test_without_pypdf_hints_uv(self):
+        import sys
+        from unittest import mock
+
+        p = self.d / "x.pdf"
+        make_pdf(p, pages=("no pypdf",))
+        with mock.patch.dict(sys.modules, {"pypdf": None}):
+            r = read(p)
+        self.assertTrue(r["is_error"])
+        self.assertIn("uv run --with pypdf", r["output"])
+
+    def test_radicals_mapped(self):
+        self.assertEqual("第⼀題 ⼈⼝，１？".translate(docread._RADICALS), "第一題 人口，１？")
+
+    def test_files_not_held_open(self):
+        """讀完原檔馬上放開：使用者刪得掉（Windows 上有人開著就刪不了）。"""
+        import openpyxl
+
+        pdf, docx, xlsx = self.d / "a.pdf", self.d / "b.docx", self.d / "c.xlsx"
+        make_pdf(pdf)
+        make_docx(docx)
+        wb = openpyxl.Workbook()
+        wb.active.append(["a", 1])
+        wb.save(xlsx)
+        from woof import pet
+
+        for p in (pdf, docx, xlsx):
+            read(p)
+            pet._doc_text(p)
+            os.remove(p)
+            self.assertFalse(p.exists())
 
 
 class Upload(unittest.TestCase):

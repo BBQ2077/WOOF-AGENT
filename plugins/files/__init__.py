@@ -50,8 +50,11 @@ def _xlsx_digest(path: Path, rows: int = 20, start: int = 1, raw: bool = False) 
     import xml.etree.ElementTree as ET
 
     NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+    import io
+
     try:
-        zf = zipfile.ZipFile(path)
+        # 整個讀進記憶體再拆：不留著原檔的檔案控制代碼，使用者才刪得掉、改得了
+        zf = zipfile.ZipFile(io.BytesIO(Path(path).read_bytes()))
     except Exception as e:
         return f"這個 xlsx 打不開（{e}）"
 
@@ -214,8 +217,14 @@ def register(woof):
         if path.suffix.lower() in docread.KINDS:
             try:
                 d = await asyncio.to_thread(docread.convert, path)
+            except ImportError:
+                return {"output": "這個環境沒有 pypdf，讀不了 PDF；用 terminal 轉文字：uv run --with pypdf python -c "
+                                  "\"import pypdf;r=pypdf.PdfReader(r'%s');print('\\n'.join(p.extract_text() or '' "
+                                  "for p in r.pages))\"" % path, "is_error": True}
+            except ValueError as e:
+                return {"output": f"{path.name}：{e}", "is_error": True}
             except Exception as e:
-                return {"output": f"{path.name} 轉文字失敗（{type(e).__name__}: {e}），檔案可能損壞或不是 Office 格式",
+                return {"output": f"{path.name} 轉文字失敗（{type(e).__name__}: {e}），檔案可能損壞或副檔名不對",
                         "is_error": True}
             lines = d["text"].splitlines()
             head = ""
@@ -226,14 +235,13 @@ def register(woof):
                                 + (f"（其中 {d['unviewable']} 張是 wmf/emf 這類格式，看不了）" if d["unviewable"] else ""))
                 if d["charts"]:
                     bits.append(f"圖表 {d['charts']} 個列出標題和數據")
+                if d.get("scanned"):
+                    bits.append(f"{d['scanned']} 頁幾乎只有圖，內容要看圖")
                 head = "（" + "；".join(bits) + "）\n"
             return {"output": _page(lines, offset, limit, head)}
         if b"\x00" in raw[:4096]:
             ext = path.suffix.lower()
-            if ext == ".pdf":
-                hint = ("；PDF 要用 terminal 轉文字再看（uv run --with pypdf python -c \"import pypdf;"
-                        "r=pypdf.PdfReader(r'%s');print('\\n'.join(p.extract_text() or '' for p in r.pages))\"）" % path)
-            elif ext in (".doc", ".ppt", ".xls"):
+            if ext in (".doc", ".ppt", ".xls"):
                 hint = "；這是舊版 Office 格式（.doc／.ppt／.xls），讀不了，請使用者另存成 docx／pptx／xlsx"
             else:
                 hint = ""
@@ -385,7 +393,7 @@ def register(woof):
                       "path": {"type": "string", "description": "預設工作目錄"},
                       "depth": {"type": "integer", "description": "1～4，預設 2"},
                       "limit": {"type": "integer", "description": "最多幾項，預設 400"}}}, list_tree)
-    woof.add_tool("read_file", "讀取文字檔（附行號），或列出資料夾內容。docx、pptx 直接轉成文字（圖片解出成檔案，文中標位置），xlsx 列工作表。"
+    woof.add_tool("read_file", "讀取文字檔（附行號），或列出資料夾內容。docx、pptx、pdf 直接轉成文字（圖片解出成檔案，文中標位置），xlsx 列工作表。"
                   "一次最多約 1 萬字，超過就停在完整的一行，結尾寫下一段的 offset。",
                   {"type": "object", "properties": {
                       "path": {"type": "string"}, "offset": {"type": "integer", "description": "起始行，從 1 開始"},
