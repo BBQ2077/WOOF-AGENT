@@ -34,6 +34,7 @@ UPLOADS = DATA / "uploads"
 UPLOADS.mkdir(exist_ok=True)
 FILES = DATA / "files"   # 使用者附加的檔案（xlsx、pdf、程式碼…），跟貼圖一樣跟對話一起刪
 FILES.mkdir(exist_ok=True)
+WS_MAX = 128 * 1024 * 1024   # WebSocket 單則訊息上限（前端送出前也照這個數字擋）
 
 app = FastAPI(title="WOOF")
 TOKEN: str = ""
@@ -2259,23 +2260,54 @@ async def save_paste(body: dict):
     return {"path": str(p), "name": p.name, "bytes": len(text.encode("utf-8"))}
 
 
+FILE_UPLOAD_MAX = 200 * 1024 * 1024   # 附加檔案單檔上限（HTTP 直接存檔，不經 WebSocket）
+
+
+def _file_ext(name: str, media_type: str = "") -> str:
+    ext = Path(name).suffix[:10] or mimetypes.guess_extension(media_type or "") or ".bin"
+    return ext if re.fullmatch(r"\.[A-Za-z0-9]{1,9}", ext) else ".bin"
+
+
+@app.post("/api/files")
+async def upload_file(request: Request, name: str = "附件"):
+    """附加檔案（不是圖）：原檔直接串流存進 data/files，送出時 WebSocket 只帶位置。
+    之前整個檔案用 base64 塞進 WebSocket 訊息，超過單則上限連線就會被切斷。"""
+    path = FILES / f"{uuid.uuid4().hex[:12]}{_file_ext(name, request.headers.get('content-type') or '')}"
+    size = 0
+    try:
+        with open(path, "wb") as f:
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > FILE_UPLOAD_MAX:
+                    raise HTTPException(413, f"檔案太大，單檔上限 {FILE_UPLOAD_MAX // 1048576} MB")
+                await asyncio.to_thread(f.write, chunk)
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    return {"path": str(path), "name": name, "bytes": size}
+
+
 # ---------------------------------------------------------------- WebSocket
 def _save_files(items: list[dict]) -> list[dict]:
-    """附加檔案（不是圖）：原檔存進 data/files，訊息裡留位置給模型自己讀。"""
+    """附加檔案（不是圖）：已經用 /api/files 存好的只帶位置；舊的 base64 寫法也照收。"""
     blocks = []
     for it in items or []:
+        name = str(it.get("name") or "附件")
+        if it.get("path"):
+            p = Path(str(it["path"]))
+            # 只認 data/files 底下、真的存在的檔，不讓訊息指到別的地方
+            if p.parent.resolve() != FILES.resolve() or not p.is_file():
+                continue
+            blocks.append({"type": "file", "path": str(p), "name": name, "bytes": p.stat().st_size})
+            continue
         raw = it.get("data") or ""
         if not raw:
             continue
-        name = str(it.get("name") or "附件")
-        ext = Path(name).suffix[:10] or mimetypes.guess_extension(it.get("media_type") or "") or ".bin"
-        if not re.fullmatch(r"\.[A-Za-z0-9]{1,9}", ext):
-            ext = ".bin"
         try:
             data = base64.b64decode(raw)
         except Exception:
             continue
-        path = FILES / f"{uuid.uuid4().hex[:12]}{ext}"
+        path = FILES / f"{uuid.uuid4().hex[:12]}{_file_ext(name, it.get('media_type') or '')}"
         path.write_bytes(data)
         blocks.append({"type": "file", "path": str(path), "name": name, "bytes": len(data)})
     return blocks
@@ -2290,7 +2322,7 @@ def _file_notes(blocks: list[dict]) -> list[dict]:
         kb = b.get("bytes") or 0
         size = f"{kb / 1048576:.1f} MB" if kb >= 1048576 else f"{max(1, round(kb / 1024))} KB"
         out.append({"type": "text", "text": f"（附件：{b['name']}（{size}），已存成檔案：{b['path']}；"
-                                            "需要內容時用 read_file 讀，二進位檔用 terminal 轉文字）"})
+                                            "需要內容時用 read_file 讀（docx、pptx、xlsx 也直接讀），PDF 用 terminal 轉文字）"})
     return out
 
 

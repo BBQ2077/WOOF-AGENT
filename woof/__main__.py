@@ -93,7 +93,9 @@ def main() -> None:
     kwargs = {}
     if st["https_cert"] and st["https_key"]:
         kwargs = {"ssl_certfile": st["https_cert"], "ssl_keyfile": st["https_key"]}
-    config = uvicorn.Config(server.app, host=host, port=port, log_level="warning", ws="websockets", **kwargs)
+    # ws_max_size：圖片是 base64 跟訊息一起送，uvicorn 預設 16 MB，超過連線直接斷
+    config = uvicorn.Config(server.app, host=host, port=port, log_level="warning", ws="websockets",
+                            ws_max_size=server.WS_MAX, **kwargs)
     srv = uvicorn.Server(config)
 
     async def run():

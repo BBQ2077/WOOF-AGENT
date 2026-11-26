@@ -159,6 +159,34 @@ def _xlsx_digest(path: Path, rows: int = 20, start: int = 1, raw: bool = False) 
     return "\n".join(out)
 
 
+READ_CHARS = 10_000   # 一次給模型看的字數：比工具輸出上限（12,000）少，才不會被從中間截掉
+
+
+def _page(lines: list[str], offset: int, limit: int, head: str = "") -> str:
+    """附行號分段：到字數上限就停在完整的一行，告訴下一段從哪裡讀。"""
+    total = len(lines)
+    if total and offset > total:
+        return f"{head}（offset={offset} 超過檔尾，共 {total} 行）"
+    out: list[str] = []
+    used = len(head)
+    i, end = offset - 1, min(total, offset - 1 + limit)
+    while i < end:
+        line = f"{i + 1}|{lines[i]}"
+        if len(line) > READ_CHARS and not out:   # 單行就超過上限：只能給前段
+            out.append(line[:READ_CHARS] + f"…（這一行共 {len(lines[i]):,} 字，只顯示前 {READ_CHARS:,} 字；"
+                       "後面用 search_files 找關鍵字，或 terminal 切開看）")
+            i += 1
+            break
+        if used + len(line) + 1 > READ_CHARS and out:
+            break
+        out.append(line)
+        used += len(line) + 1
+        i += 1
+    body = "\n".join(out) or "(空檔案)"
+    more = f"\n…（這次是第 {offset}–{i} 行，共 {total} 行；下一段 offset={i + 1}）" if i < total else ""
+    return head + body + more
+
+
 def register(woof):
     async def read_file(args: dict, ctx) -> dict:
         path = _resolve(args["path"], ctx.cwd)
@@ -181,18 +209,37 @@ def register(woof):
                                       "；要看某一段就 read_file 那個檔加 offset，要找人／值就用 search_files）"}
                 return {"output": txt}
             return {"output": _xlsx_digest(path, limit, offset)}
+        from woof import docread
+
+        if path.suffix.lower() in docread.KINDS:
+            try:
+                d = await asyncio.to_thread(docread.convert, path)
+            except Exception as e:
+                return {"output": f"{path.name} 轉文字失敗（{type(e).__name__}: {e}），檔案可能損壞或不是 Office 格式",
+                        "is_error": True}
+            lines = d["text"].splitlines()
+            head = ""
+            if offset == 1:
+                bits = [f"{path.suffix[1:]} 轉成的文字，共 {len(lines)} 行"]
+                if d["images"]:
+                    bits.append(f"圖 {d['images']} 張已解出到 {d['dir']}，文中「[圖N：路徑]」是原位置，要看用 vision_analyze"
+                                + (f"（其中 {d['unviewable']} 張是 wmf/emf 這類格式，看不了）" if d["unviewable"] else ""))
+                if d["charts"]:
+                    bits.append(f"圖表 {d['charts']} 個列出標題和數據")
+                head = "（" + "；".join(bits) + "）\n"
+            return {"output": _page(lines, offset, limit, head)}
         if b"\x00" in raw[:4096]:
-            hint = ""
-            if path.suffix.lower() in (".pdf", ".doc", ".pptx", ".zip", ".7z", ".docx"):
-                hint = ("；這種檔要用 terminal 轉文字再看"
-                        "（uv run --with pypdf python -c \"import pypdf;print(pypdf.PdfReader(r'%s')"
-                        ".pages[0].extract_text())\"）" % path)
+            ext = path.suffix.lower()
+            if ext == ".pdf":
+                hint = ("；PDF 要用 terminal 轉文字再看（uv run --with pypdf python -c \"import pypdf;"
+                        "r=pypdf.PdfReader(r'%s');print('\\n'.join(p.extract_text() or '' for p in r.pages))\"）" % path)
+            elif ext in (".doc", ".ppt", ".xls"):
+                hint = "；這是舊版 Office 格式（.doc／.ppt／.xls），讀不了，請使用者另存成 docx／pptx／xlsx"
+            else:
+                hint = ""
             return {"output": f"二進位檔案（{len(raw)} bytes），無法以文字讀取{hint}", "is_error": True}
         lines = raw.decode("utf-8", errors="replace").splitlines()
-        part = lines[offset - 1: offset - 1 + limit]
-        body = "\n".join(f"{i}|{l}" for i, l in enumerate(part, start=offset))
-        more = f"\n…（共 {len(lines)} 行，下一段 offset={offset + limit}）" if offset - 1 + limit < len(lines) else ""
-        return {"output": (body or "(空檔案)") + more}
+        return {"output": _page(lines, offset, limit)}
 
     async def write_file(args: dict, ctx) -> dict:
         path = _resolve(args["path"], ctx.cwd)
@@ -338,7 +385,8 @@ def register(woof):
                       "path": {"type": "string", "description": "預設工作目錄"},
                       "depth": {"type": "integer", "description": "1～4，預設 2"},
                       "limit": {"type": "integer", "description": "最多幾項，預設 400"}}}, list_tree)
-    woof.add_tool("read_file", "讀取文字檔（附行號），或列出資料夾內容。",
+    woof.add_tool("read_file", "讀取文字檔（附行號），或列出資料夾內容。docx、pptx 直接轉成文字（圖片解出成檔案，文中標位置），xlsx 列工作表。"
+                  "一次最多約 1 萬字，超過就停在完整的一行，結尾寫下一段的 offset。",
                   {"type": "object", "properties": {
                       "path": {"type": "string"}, "offset": {"type": "integer", "description": "起始行，從 1 開始"},
                       "limit": {"type": "integer", "description": "最多行數（xlsx 是列數），上限 2000。xlsx 直接給工作表、欄位和前幾列，不要自己用 python 拆；要整張原始數值設 limit=200000（輸出 TSV，太長存成 .tsv 檔）"}},

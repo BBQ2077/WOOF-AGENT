@@ -839,7 +839,10 @@ function connect() {
 }
 function wsSend(obj) {
   if (!S.ws || S.ws.readyState !== 1) { notify('error', '和後端的連線中斷', '正在重連，請稍後再送一次。'); return false; }
-  S.ws.send(JSON.stringify(obj)); return true;
+  const s = JSON.stringify(obj);
+  // 超過後端上限會被直接斷線、訊息也丟了：先擋下來，內容留在輸入框
+  if (s.length > WS_MAX) { notify('error', '這則訊息太大，沒有送出', `圖片合計約 ${fmtBytes(s.length)}，一次最多約 ${fmtBytes(WS_MAX)}。少放幾張圖再送。`); return false; }
+  S.ws.send(s); return true;
 }
 
 // 每個對話最近一次有動靜的時間與內容：背景子代理、審核在跑但畫面沒在閃時，用它告訴使用者「還在動」
@@ -3248,8 +3251,8 @@ function renderComposer() {
 function renderAttach() {
   const pics = S.attach.map((a, i) => `<div class="a"><img src="data:${a.media_type};base64,${a.data}"><span data-i="${i}">${ico('x')}</span></div>`).join('');
   const docs = (S.files || []).map((f, i) => {
-    const label = f.path ? `貼上內容 (${fmtBytes(f.bytes)})` : `附件：${f.name} (${fmtBytes(f.bytes)})`;
-    const sub = f.path ? f.path : '送出後存成檔案，模型需要時自己讀';
+    const label = f.paste ? `貼上內容 (${fmtBytes(f.bytes)})` : `附件：${f.name} (${fmtBytes(f.bytes)})`;
+    const sub = f.paste ? f.path : f.up === 'busy' ? '上傳中…' : f.up === 'fail' ? `上傳失敗：${f.err || ''}` : '已存成檔案，模型需要時自己讀';
     return `<div class="a f"><b>${esc(label)}</b><small>${esc(sub)}</small><span data-f="${i}">${ico('x')}</span></div>`;
   }).join('');
   $('#attach').innerHTML = pics + docs;
@@ -3259,24 +3262,49 @@ $('#attach').onclick = (e) => {
   const x = e.target.closest('[data-i]'); if (x) { S.attach.splice(+x.dataset.i, 1); renderAttach(); return; }
   const f = e.target.closest('[data-f]'); if (f) { S.files.splice(+f.dataset.f, 1); renderAttach(); }
 };
-const FILE_MAX = 25 * 1024 * 1024;   // 單檔上限；base64 塞在 WebSocket 裡，太大會拖垮畫面
+const FILE_MAX = 25 * 1024 * 1024;    // 圖片單檔上限；圖片是 base64 跟訊息一起走 WebSocket
+const DOC_MAX = 200 * 1024 * 1024;    // 其他檔案單檔上限；直接用 HTTP 存檔，不經 WebSocket
+const WS_MAX = 128 * 1024 * 1024;     // WebSocket 單則上限，跟後端 server.WS_MAX 一樣
+// 其他檔案：選好就用 HTTP 把原檔存進 data/files，送出時只帶位置（之前 base64 塞進 WebSocket，超過上限連線就斷）
+async function uploadDoc(it, f) {
+  try {
+    const r = await fetch(`${BASE}/api/files?name=${encodeURIComponent(f.name)}`, {
+      method: 'POST', headers: { 'x-woof-token': TOKEN, 'content-type': f.type || 'application/octet-stream' }, body: f,
+    });
+    if (!r.ok) { let m = `HTTP ${r.status}`; try { m = (await r.json()).detail || m; } catch {} throw new Error(m); }
+    const j = await r.json();
+    Object.assign(it, { path: j.path, bytes: j.bytes, up: 'ok' });
+  } catch (e) {
+    Object.assign(it, { up: 'fail', err: String(e.message || e) });
+    toast(`${f.name} 上傳失敗：${it.err}`);
+  }
+  renderAttach();
+}
+// 還在上傳或上傳失敗的附件：不能送
+function filesNotReady() {
+  const fs = S.files || [];
+  if (fs.some((f) => f.up === 'busy')) { toast('附件還在上傳，等它好了再送'); return true; }
+  if (fs.some((f) => f.up === 'fail')) { toast('有附件上傳失敗，先按 × 拿掉再送'); return true; }
+  return false;
+}
+// 送出用的附件清單：只帶位置
+const upFilesOf = (files) => (files || []).filter((f) => !f.paste && f.path).map((f) => ({ name: f.name, path: f.path }));
 function addFiles(files) {
   for (const f of files) {
-    if (f.size > FILE_MAX) { toast(`${f.name} 太大（${fmtBytes(f.size)}），單檔上限 ${fmtBytes(FILE_MAX)}`); continue; }
-    if (f.type.startsWith('image/')) {
+    const isImg = f.type.startsWith('image/');
+    const max = isImg ? FILE_MAX : DOC_MAX;
+    if (f.size > max) { toast(`${f.name} 太大（${fmtBytes(f.size)}），單檔上限 ${fmtBytes(max)}`); continue; }
+    if (isImg) {
       const r = new FileReader();
       r.onload = () => { S.attach.push({ media_type: f.type, data: String(r.result).split(',')[1] }); renderAttach(); };
       r.readAsDataURL(f);
       continue;
     }
-    // 其他檔案（xlsx、pdf、程式碼…）：存進 data/files，訊息裡留位置，模型要讀再讀
-    const r = new FileReader();
-    r.onload = () => {
-      S.files.push({ name: f.name, bytes: f.size, media_type: f.type || 'application/octet-stream',
-                     data: String(r.result).split(',')[1] });
-      renderAttach();
-    };
-    r.readAsDataURL(f);
+    // 其他檔案（xlsx、pdf、docx、程式碼…）：存進 data/files，訊息裡留位置，模型要讀再讀
+    const it = { name: f.name, bytes: f.size, up: 'busy' };
+    S.files.push(it);
+    renderAttach();
+    uploadDoc(it, f);
   }
 }
 $('#fileIn').onchange = (e) => { addFiles(e.target.files); e.target.value = ''; };
@@ -3296,7 +3324,7 @@ input.addEventListener('paste', async (e) => {
   e.preventDefault();
   try {
     const r = await api('POST', '/api/paste', { text: txt });
-    S.files.push({ path: r.path, name: r.name, bytes: r.bytes });
+    S.files.push({ path: r.path, name: r.name, bytes: r.bytes, paste: true });
     renderAttach();
     notify('ok', `貼上內容存成檔案（${fmtBytes(r.bytes)}）`, '送出後模型需要時會用 read_file 讀');
   } catch (err) { input.value += txt; toast('存檔失敗，改成直接貼進輸入框：' + err.message); }
@@ -3310,13 +3338,14 @@ input.addEventListener('blur', () => cbox.classList.remove('focus'));
 
 // 貼上的長文已經存成檔案：訊息裡只帶位置，模型需要完整內容時自己 read_file
 function withFileRefs(text) {
-  const refs = (S.files || []).filter((f) => f.path)
+  const refs = (S.files || []).filter((f) => f.paste && f.path)
     .map((f) => `（貼上內容 ${fmtBytes(f.bytes)}，已存成檔案：${f.path}；需要完整內容時用 read_file 讀）`).join(NL);
   return [text, refs].filter((x) => x && x.trim()).join(NL + NL);
 }
 async function send() {
   const text = input.value;
   if (!text.trim() && !S.attach.length && !(S.files || []).length) return;
+  if (filesNotReady()) return;
   const m = selectedModel();
   if (!m) {
     const s0 = cur();
@@ -3329,8 +3358,7 @@ async function send() {
   if (!S.sid) await createSession(m);
   S.follow = true;
   const body = withFileRefs(text);
-  const upFiles = (S.files || []).filter((f) => f.data).map((f) => ({ name: f.name, data: f.data, media_type: f.media_type }));
-  if (!wsSend({ type: 'send', session_id: S.sid, text: body, images: S.attach, files: upFiles })) return;
+  if (!wsSend({ type: 'send', session_id: S.sid, text: body, images: S.attach, files: upFilesOf(S.files) })) return;
   if (PRE.delete(S.sid)) savePre();
   input.value = ''; S.attach = []; S.files = []; renderAttach(); autosize();
   draftFlush(); if (wasNew) draftPut(null, '');
@@ -3622,9 +3650,9 @@ function queueMsg() {
   if (!S.sid) return;
   const text = input.value.trim();
   if (!text && !S.attach.length && !(S.files || []).length) return;
+  if (filesNotReady()) return;
   (S.queue[S.sid] = S.queue[S.sid] || []).push({
-    text: withFileRefs(text), images: S.attach.slice(),
-    files: (S.files || []).filter((f) => f.data).map((f) => ({ name: f.name, data: f.data, media_type: f.media_type })),
+    text: withFileRefs(text), images: S.attach.slice(), files: upFilesOf(S.files),
   });
   input.value = ''; S.attach = []; S.files = []; renderAttach(); autosize(); renderQueue(); draftFlush();
 }
@@ -3649,7 +3677,7 @@ $('#queueBox').addEventListener('click', (e) => {
   const q = (S.sid && S.queue[S.sid]) || [];
   const ins = e.target.closest('[data-qins]'), del = e.target.closest('[data-qdel]'), ed = e.target.closest('[data-qedit]');
   if (ed) { const it = q.splice(Number(ed.dataset.qedit), 1)[0]; renderQueue(); if (it) { input.value = it.text || ''; S.attach = it.images || []; renderAttach(); autosize(); draftFlush(); input.focus(); } return; }
-  if (ins) { const it = q.splice(Number(ins.dataset.qins), 1)[0]; renderQueue(); if (it) wsSend({ type: 'send', session_id: S.sid, text: it.text, images: it.images || [] }); }
+  if (ins) { const it = q.splice(Number(ins.dataset.qins), 1)[0]; renderQueue(); if (it) wsSend({ type: 'send', session_id: S.sid, text: it.text, images: it.images || [], files: it.files || [] }); }
   if (del) { q.splice(Number(del.dataset.qdel), 1); renderQueue(); }
 });
 function drainQueue(sid) {

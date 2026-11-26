@@ -1,6 +1,6 @@
 """資料保留：暫存 7 天、用量紀錄 30 天，沒有永久留著的暫存。
 
-- 工具長輸出全文（data/spill）、背景指令紀錄（data/logs）：放 7 天就刪
+- 工具長輸出全文（data/spill，含 read_file 把 docx／pptx 轉成的文字和圖）、背景指令紀錄（data/logs）：放 7 天就刪
 - 用量紀錄（usage_log：模型、token 數、時間）：放 30 天就刪，用量統計最多也只看 30 天
 - 已刪對話留下的工具耗時紀錄、系統提示快照：直接刪
 開程式時整理一次，之後每 6 小時一次。「設定 → 一般 → 暫存與紀錄」可以一鍵全部清掉，不用等。
@@ -31,7 +31,8 @@ def _files(cut: float | None) -> list[Path]:
     spill, logs = _dirs()
     keep = _running_logs()
     out = []
-    for d, pat in ((spill, "*.txt"), (logs, "task_*.log")):
+    # spill/docs/<編號>/：read_file 把 docx、pptx 轉成的文字和解出的圖
+    for d, pat in ((spill, "*.txt"), (logs, "task_*.log"), (spill / "docs", "*/*")):
         if not d.is_dir():
             continue
         for p in d.glob(pat):
@@ -54,6 +55,11 @@ def _drop_files(paths: list[Path]) -> tuple[int, int]:
             size += s
         except OSError:
             pass
+        if p.parent.parent.name == "docs":
+            try:
+                p.parent.rmdir()   # 轉檔資料夾清空了就一起刪
+            except OSError:
+                pass
     return n, size
 
 
