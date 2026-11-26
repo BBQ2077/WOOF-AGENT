@@ -3339,7 +3339,7 @@ input.addEventListener('blur', () => cbox.classList.remove('focus'));
 // 貼上的長文已經存成檔案：訊息裡只帶位置，模型需要完整內容時自己 read_file
 function withFileRefs(text) {
   const refs = (S.files || []).filter((f) => f.paste && f.path)
-    .map((f) => `（貼上內容 ${fmtBytes(f.bytes)}，已存成檔案：${f.path}；需要完整內容時用 read_file 讀）`).join(NL);
+    .map((f) => `（貼上內容 ${fmtBytes(f.bytes)}：${f.path}，用 read_file 讀）`).join(NL);
   return [text, refs].filter((x) => x && x.trim()).join(NL + NL);
 }
 async function send() {

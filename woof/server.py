@@ -2321,8 +2321,7 @@ def _file_notes(blocks: list[dict]) -> list[dict]:
             continue
         kb = b.get("bytes") or 0
         size = f"{kb / 1048576:.1f} MB" if kb >= 1048576 else f"{max(1, round(kb / 1024))} KB"
-        out.append({"type": "text", "text": f"（附件：{b['name']}（{size}），已存成檔案：{b['path']}；"
-                                            "需要內容時用 read_file 讀（docx、pptx、xlsx 也直接讀），PDF 用 terminal 轉文字）"})
+        out.append({"type": "text", "text": f"（附件 {b['name']}（{size}）：{b['path']}，用 read_file 讀）"})
     return out
 
 
