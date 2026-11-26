@@ -247,6 +247,9 @@ def register(woof):
                     bad[u] = "回傳空白（可能要 JS 或登入）"
         return ok, bad, None
 
+    SEARCH = {"firecrawl": _search_firecrawl, "tavily": _search_tavily,
+              "firecrawl_keyless": lambda c, _k, q: _search_firecrawl(c, None, q),
+              "tavily_keyless": lambda c, _k, q: _search_tavily(c, None, q)}
     EXTRACT = {"firecrawl": _extract_firecrawl, "tavily": _extract_tavily,
                "firecrawl_keyless": lambda c, _k, u: _extract_firecrawl(c, None, u),
                "tavily_keyless": lambda c, _k, u: _extract_tavily(c, None, u)}
@@ -264,106 +267,82 @@ def register(woof):
             return "invalid", now + 86400 * 365
         return None
 
-    async def _run(kind: str, arg, fmt=None) -> str:
-        table = SEARCH if kind == "search" else EXTRACT
-        tried = []
+    async def _search(query: str) -> str | None:
+        """依 order 逐家試，key 用完、限流、出錯都自動換下一家／下一把；全部不行回 None。"""
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             for name in providers():
-                fn = table.get(name)
+                fn = SEARCH.get(name)
                 if fn is None:
-                    tried.append(f"{name}：不支援")
                     continue
                 if name.endswith("_keyless"):
-                    who = name[:-len("_keyless")]
-                    wait = _COOL.get((name, kind), 0) - time.time()
-                    if wait > 0:
-                        tried.append(f"{name}：限流中，約 {int(wait)} 秒後恢復")
+                    if _COOL.get((name, "search"), 0) > time.time():
                         continue
                     try:
-                        result = await fn(client, None, arg)
+                        return await fn(client, None, query)
                     except httpx.HTTPStatusError as e:
-                        sec = _retry_after(e.response)
-                        _COOL[(name, kind)] = time.time() + sec
-                        tried.append(f"{name}：HTTP {e.response.status_code}（免 key 限流，暫停 {int(sec)} 秒）")
-                        continue
-                    except httpx.HTTPError as e:
-                        tried.append(f"{name}：{type(e).__name__}")
-                        continue
-                    if kind == "search":
-                        return f"（{who} 免 key）\n" + result
-                    return f"（{who} 免 key）\n" + fmt(result)
+                        _COOL[(name, "search")] = time.time() + _retry_after(e.response)
+                    except httpx.HTTPError:
+                        pass
+                    continue
                 pool = woof.keys(name)
-                while True:
-                    entry = pool.get()
-                    if entry is None:
-                        tried.append(f"{name}：沒有可用的 key")
-                        break
+                while (entry := pool.get()) is not None:
                     try:
-                        result = await fn(client, entry.key, arg)
+                        return await fn(client, entry.key, query)
                     except httpx.HTTPStatusError as e:
                         st = _status_for(e.response.status_code, name)
-                        if st:
-                            pool.mark(entry, st[0], st[1], f"HTTP {e.response.status_code}")
-                            tried.append(f"{name}/{entry.label}：HTTP {e.response.status_code}，已換下一把")
-                            continue
-                        return f"{name} 回傳 HTTP {e.response.status_code}：{e.response.text[:300]}"
-                    except httpx.HTTPError as e:
-                        return f"{name} 連線失敗：{type(e).__name__}: {e}"
-                    head = f"（{name} / {entry.label}）\n" if tried else ""
-                    if kind == "search":
-                        return head + result
-                    return head + fmt(result)
-        return "所有搜尋服務都無法使用：\n" + "\n".join(f"- {t}" for t in tried) + "\n請到「額度」面板查看各 key 狀態，或在 keys.toml 加 key。"
+                        if not st:
+                            break   # 這家這次出錯，換下一家
+                        pool.mark(entry, st[0], st[1], f"HTTP {e.response.status_code}")
+                    except httpx.HTTPError:
+                        break
+        return None
 
     async def _extract_all(urls: list[str]) -> tuple[dict, dict]:
-        """依 order 逐家試；某家抓不到的網址交給下一家。回傳（成功的網址→內容, 失敗的網址→每家原因）。"""
+        """依 order 逐家試。限流、額度用完：換同家下一把 key 或下一家，不算這頁失敗；
+        某家判定這頁不行（被擋、逾時）：這頁之後只給別家試，不再用同一家的其他 key 浪費時間和額度。"""
         got, why = {}, {u: [] for u in urls}
+        dead: dict[str, set] = {u: set() for u in urls}   # 這頁已被哪幾家判定不行
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             for name in providers():
-                left = [u for u in urls if u not in got]
                 fn = EXTRACT.get(name)
-                if not left:
-                    break
-                if fn is None:
+                vendor = name.replace("_keyless", "")
+                left = [u for u in urls if u not in got and vendor not in dead[u]]
+                if not left or fn is None:
                     continue
-                label = name.replace("_keyless", " 免 key")
+
+                def take(ok, bad):
+                    got.update(ok)
+                    for u, w in bad.items():
+                        why[u].append(w)
+                        dead[u].add(vendor)
+
                 if name.endswith("_keyless"):
-                    wait = _COOL.get((name, "extract"), 0) - time.time()
-                    if wait > 0:
-                        for u in left:
-                            why[u].append(f"{label}：限流中，約 {int(wait)} 秒後恢復")
+                    if _COOL.get((name, "extract"), 0) > time.time():
                         continue
                     ok, bad, stop = await fn(client, None, left)
                     if stop is not None:
-                        sec = _retry_after(stop)
-                        _COOL[(name, "extract")] = time.time() + sec
-                        bad = {u: f"HTTP {stop.status_code}，限流，暫停 {int(sec)} 秒" for u in left if u not in ok}
-                    got.update(ok)
-                    for u, w in bad.items():
-                        why.setdefault(u, []).append(f"{label}：{w}")
+                        _COOL[(name, "extract")] = time.time() + _retry_after(stop)
+                    take(ok, bad)
                     continue
                 pool = woof.keys(name)
-                while left:
-                    entry = pool.get()
-                    if entry is None:
-                        break   # 沒填 key 的服務不列進原因
+                while left and (entry := pool.get()) is not None:
                     ok, bad, stop = await fn(client, entry.key, left)
-                    got.update(ok)
-                    for u, w in bad.items():
-                        why.setdefault(u, []).append(f"{label}：{w}")
+                    take(ok, bad)
                     if stop is None:
                         break
                     st = _status_for(stop.status_code, name)
-                    if st:
-                        pool.mark(entry, st[0], st[1], f"HTTP {stop.status_code}")
-                    left = [u for u in left if u not in got and u not in bad]
+                    pool.mark(entry, *(st or ("rate_limited", time.time() + 60)), f"HTTP {stop.status_code}")
+                    left = [u for u in left if u not in got and vendor not in dead[u]]
         return got, why
 
     async def web_search(args: dict, ctx) -> dict:
         q = (args.get("query") or "").strip()
         if not q:
             return {"output": "query 不能是空的", "is_error": True}
-        return {"output": await _run("search", q)}
+        res = await _search(q)
+        if res is None:
+            return {"output": "這次搜尋沒有結果回來（服務暫時忙），稍後再搜一次或換個關鍵字。"}
+        return {"output": res}
 
     async def web_extract(args: dict, ctx) -> dict:
         urls = [u.strip() for u in (args.get("urls") or []) if isinstance(u, str) and u.strip()][:5]
@@ -386,11 +365,19 @@ def register(woof):
                 done[u] = cache_put(u, md, title, desc)
 
         def fail(u):
-            rs = why.get(u) or ["沒有可用的擷取服務"]
-            return f"## {u}\n\n抓不到這頁：\n" + "\n".join(f"- {r}" for r in rs) + \
-                "\n可以用 web_search 搜這頁的標題或網址，看搜尋摘要。"
+            # 只講這一頁的狀況；服務限流、換 key 這些內部輪換不給模型看，免得誤會整個工具不能用
+            rs = " ".join(why.get(u) or [])
+            if "封鎖" in rs or "擋爬蟲" in rs:
+                cause = "這個網站不讓擷取"
+            elif "逾時" in rs or "Failed to fetch" in rs or "連線失敗" in rs:
+                cause = "這個網站回應太慢或連不上"
+            elif "空白" in rs:
+                cause = "頁面內容要登入或靠 JS 才顯示"
+            else:
+                cause = "這次沒抓到，稍後同網址可以再試"
+            return f"## {u}\n\n這頁沒抓到：{cause}。其他網址不受影響；要這頁的內容，可以用 web_search 搜它的標題看摘要。"
         blocks = [render(done[u], keys, full) if u in done else fail(u) for u in urls]
-        return {"output": "\n\n".join(blocks), "is_error": not done}
+        return {"output": "\n\n".join(blocks)}
 
     woof.add_tool("web_search", "搜尋網路，回傳標題、網址和摘要。需要網頁全文時再用 web_extract。",
                   {"type": "object", "properties": {"query": {"type": "string", "description": "搜尋關鍵字"}},
