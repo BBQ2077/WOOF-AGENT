@@ -96,8 +96,10 @@ def build(REG, run_message):
         return {"ok": True, "mode": mode}
 
     @mcp.tool()
-    def set_compress(method: str = "", ratio: int = 0, parallel: int = 0, keep: int = 0) -> dict:
-        """調整壓縮：method＝單次／多工；ratio 5 到 60；parallel 1 到 8；keep 2 以上。沒填的不改。"""
+    def set_compress(method: str = "", ratio: int = 0, parallel: int = 0, tail_tokens: int = 0,
+                     summary_tokens: int = 0, quote_count: int = -1, quote_tokens: int = -1) -> dict:
+        """調整壓縮：method＝單次／多工；ratio 5 到 60；parallel 1 到 8；tail_tokens 原樣保留多少 token（1000 到 200000）；
+        summary_tokens 摘要上限（1000 到 30000）；quote_count 附幾則原話（0 到 20）；quote_tokens 原話上限（0 到 20000）。沒填的不改。"""
         from woof import store as st
 
         s = {}
@@ -109,9 +111,16 @@ def build(REG, run_message):
             s["ratio"] = max(5, min(int(ratio), 60))
         if parallel:
             s["parallel"] = max(1, min(int(parallel), 8))
-        if keep:
-            s["keep"] = max(2, int(keep))
-        st.set_plugin_state("context", settings=s)
+        if tail_tokens:
+            s["tail_tokens"] = max(1000, min(int(tail_tokens), 200000))
+        if summary_tokens:
+            s["summary_tokens"] = max(1000, min(int(summary_tokens), 30000))
+        if quote_count >= 0:
+            s["quote_count"] = min(int(quote_count), 20)
+        if quote_tokens >= 0:
+            s["quote_tokens"] = min(int(quote_tokens), 20000)
+        old = (st.get_plugin_state("context") or {}).get("settings") or {}
+        st.set_plugin_state("context", settings={**old, **s})   # 只改有填的，其餘設定照舊
         REG.load_all()
         return {"ok": True, "applied": s}
 

@@ -95,25 +95,57 @@ def used_of(usage: dict | None) -> int:
     return int(usage.get("input_tokens") or 0) + int(usage.get("output_tokens") or 0)
 
 
-def reestimate(session_id: str, window: int | None = None) -> dict:
-    """壓縮、清空、回溯之後，舊的回報不再準：改成整段估計（系統提示詞快照＋工具＋實際會送出的訊息），
-    標成 estimated，下一次模型回報再換成實際數字。"""
+def _estimate_all(session_id: str, es: dict, upto: int = 0) -> int:
+    """整段估計：系統提示詞快照＋工具＋實際會送出的訊息（摘要、附的原話、到 upto 為止的歷史；之後不送的思考不算）。"""
     from woof import store
     from woof.agent.loop import active_tool_specs, history
 
-    st = store.get_session(session_id) or {}
-    es = dict(st.get("engine_state") or {})
     hist = history(session_id)
+    if upto:
+        hist = [m for m in hist if int(m.get("id") or 0) <= upto]
     summ = es.get("summary") or {}
     n = 0
     if summ.get("text"):
         through = int(summ.get("through") or 0)
         hist = [m for m in hist if int(m.get("id") or 0) > through]
-        n += estimate_text(summ["text"]) + 30
+        n += estimate_text(summ["text"]) + estimate_text(summ.get("quotes") or "") + 300
+    cut = int(es.get("think_cut") or 0)
+    hist = [{**m, "content": [b for b in m.get("content") or [] if b.get("type") not in ("thinking", "redacted_thinking")]}
+            if m.get("role") == "assistant" and int(m.get("id") or 0) <= cut else m for m in hist]
     n += estimate_messages(apply_prune(hist, es))
     snap = store.get_prompt_snapshot(session_id)
     n += estimate_text(snap["text"]) if snap else 0
     n += estimate_tools([t for t in active_tool_specs() if not getattr(store_tools().get(t["name"]), "bridge", False)])
+    return n
+
+
+def calib(session_id: str) -> float:
+    """估計值跟這個模型實際算法差多少（實際 ÷ 估計，0.8 到 2.5）：拿模型上次實際回報的輸入量，跟同一段內容的估計比。
+    中文在 Claude 常常差到 1.5 倍。沒有實際回報時用上次算出來的，再沒有就是 1。"""
+    from woof import store
+
+    es = (store.get_session(session_id) or {}).get("engine_state") or {}
+    usage = es.get("usage") or {}
+    real = int(usage.get("input_tokens") or 0)
+    if usage.get("estimated") or not real:
+        return float(es.get("tok_k") or 1.0)
+    try:
+        est = _estimate_all(session_id, es, int(usage.get("through") or 0))
+    except Exception:
+        return float(es.get("tok_k") or 1.0)
+    return max(0.8, min(2.5, real / est)) if est else 1.0
+
+
+def reestimate(session_id: str, window: int | None = None) -> dict:
+    """壓縮、清空、回溯之後，舊的回報不再準：改成整段估計（照 calib 校正過），
+    標成 estimated，下一次模型回報再換成實際數字。"""
+    from woof import store
+    from woof.agent.loop import history
+
+    st = store.get_session(session_id) or {}
+    es = dict(st.get("engine_state") or {})
+    hist = history(session_id)
+    n = int(_estimate_all(session_id, es) * float(es.get("tok_k") or 1.0))
     old = es.get("usage") or {}
     usage = {"input_tokens": n, "output_tokens": 0, "cache_read": None, "cache_write": None,
              "context_window": window or old.get("context_window"), "context_used": n,
@@ -172,5 +204,5 @@ def current(session_id: str) -> dict:
         return {"used": 0, "anchor": 0, "delta": 0, "estimated": True}
     through = int(usage.get("through") or 0)
     newer = store.get_messages(session_id, after=through)
-    delta = estimate_messages(newer)
+    delta = int(estimate_messages(newer) * float(es.get("tok_k") or 1.0))
     return {"used": anchor + delta, "anchor": anchor, "delta": delta, "estimated": bool(usage.get("estimated"))}

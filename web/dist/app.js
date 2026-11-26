@@ -5849,11 +5849,13 @@ const SET_Q = {
   compress: [
     ['c-window', '上下文大小', 'context window token 上限 多少'],
     ['c-trigger', '壓縮門檻', '門檻 百分比 觸發 何時壓縮'],
-    ['c-keep', '保留最近幾輪', '保留 輪 最近'],
+    ['c-tail', '原樣保留多少', '保留 尾段 最近 token'],
+    ['c-sum', '摘要上限', '摘要 上限 長度 token'],
+    ['c-quote', '附幾則原話', '原話 使用者 引用 則數'],
+    ['c-quotetok', '原話上限', '原話 上限 token'],
     ['c-ratio', '摘要幅度', '摘要 比例 長度'],
     ['c-method', '壓縮方式', '單次 多工 一次摘要'],
     ['c-parallel', '同時跑幾段', '多工 平行 段數'],
-    ['c-tail', '原樣保留上限', '保留 尾段 百分比'],
     ['c-imgtok', '每張圖最多幾 token', '圖片 token 縮圖 上限 截圖'],
     ['c-imgpx', '圖最長邊', '圖片 像素 解析度 縮圖'],
     ['c-imgkeep', '壓縮後保留幾張工具圖', '圖片 保留 張數'],
@@ -6293,7 +6295,7 @@ async function pfSave(auto) {
   } catch (e) { const d = $('#pfDirty'); if (d) d.innerHTML = `<span class="qerr">沒存到：${esc(e.message)}</span>`; }
 }
 // ---- 壓縮（設定存在 context 插件，儲存後插件會重新載入）
-const CMP_KEYS = ['window', 'method', 'parallel', 'ratio', 'trigger', 'keep'];
+const CMP_KEYS = ['window', 'method', 'parallel', 'ratio', 'trigger', 'tail_tokens', 'summary_tokens', 'quote_count', 'quote_tokens'];
 // 壓縮用的上下文大小（設定頁填的）；0＝照模型。用量圈、上下文面板都用它算百分比
 async function loadCtxCap() {
   try { const p = (await api('GET', '/api/plugins')).find((r) => r.name === 'context'); S.ctxOn = !!(p && p.enabled); S.ctxCap = p && p.enabled ? Number((p.settings || {}).window) || 0 : 0; }
@@ -6328,7 +6330,7 @@ async function renderCompressSec(box) {
   const capNow = cm && cm.context_window ? `<br>目前的模型 ${esc(cm.label)}：${Number(cm.context_window).toLocaleString()} token。` : '';
   box.innerHTML = `
     <div class="card cmp">
-      <div class="cmp-sum">目前：上下文 <b>${Number(val('window')) ? Number(val('window')).toLocaleString() + ' token' : '照模型'}</b>・用到 <b>${esc(String(val('trigger')))}%</b> 壓縮・保留最近 <b>${esc(String(val('keep')))} 輪</b>・<b>${method}</b>${method === '多工' ? `（一次 ${esc(String(val('parallel')))} 段）` : ''}・摘要約原文的 <b>${esc(String(val('ratio')))}%</b></div>
+      <div class="cmp-sum">目前：上下文 <b>${Number(val('window')) ? Number(val('window')).toLocaleString() + ' token' : '照模型'}</b>・用到 <b>${esc(String(val('trigger')))}%</b> 壓縮・原樣保留 <b>${Number(val('tail_tokens')).toLocaleString()} token</b>・摘要上限 <b>${Number(val('summary_tokens')).toLocaleString()} token</b>・附原話 <b>${esc(String(val('quote_count')))} 則</b>・<b>${method}</b>${method === '多工' ? `（一次 ${esc(String(val('parallel')))} 段）` : ''}</div>
     </div>
     <div class="cmp-h">什麼時候壓縮</div>
     <div class="card cmp">
@@ -6337,11 +6339,13 @@ async function renderCompressSec(box) {
     </div>
     <div class="cmp-h">怎麼壓縮</div>
     <div class="card cmp">
-      ${row('c-keep', '保留最近幾輪', '你的一則加上模型的回覆（含中間的工具呼叫）算一輪。最近這幾輪原樣保留，不壓縮。', num('keep', 1, 30, '輪'))}
-      ${row('c-ratio', '摘要幅度', '摘要長度佔原文的百分比，5 到 60。建議 10 到 30。', num('ratio', 5, 60, '%'))}
+      ${row('c-tail', '原樣保留多少', '壓縮後最近的訊息原樣保留多少 token（1000 到 200000），照模型實際算法校正過，最多上下文的 25%。至少留最後一步，不拆開工具呼叫和結果。', num('tail_tokens', 1000, 200000, 'token', 'wide'))}
+      ${row('c-sum', '摘要上限', '摘要最多幾 token（1000 到 30000），最多上下文的 10%。再壓縮時模型只改有變的行，沒變的程式原樣保留；超過上限才刪掉最舊、最不需要的細節。', num('summary_tokens', 1000, 30000, 'token', 'wide'))}
+      ${row('c-quote', '附幾則原話', '摘要後面照抄你最近幾則原話（0 到 20，0＝不附）。更早的寫進摘要，原文用 session_search 查得到。', num('quote_count', 0, 20, '則'))}
+      ${row('c-quotetok', '原話上限', '附的原話合計最多幾 token（0 到 20000）。', num('quote_tokens', 0, 20000, 'token', 'wide'))}
+      ${row('c-ratio', '摘要幅度', '第一次寫摘要時，長度佔原文的百分比，5 到 60，建議 10 到 30；不超過摘要上限。', num('ratio', 5, 60, '%'))}
       ${row('c-method', '壓縮方式', '單次＝整段一次摘要。多工＝依字數分段，同時摘要後合併，長對話比較快。', seg('method', ['單次', '多工']))}
       ${row('c-parallel', '同時跑幾段', '只在多工時生效，1 到 8。', num('parallel', 1, 8, '段'))}
-      ${row('c-tail', '原樣保留上限', '壓縮後原樣保留的最近訊息，最多佔上下文幾 %（5 到 50）。超過時只留最新放得下的部分，其餘寫進摘要。', num('tail_max', 5, 50, '%'))}
     </div>
     <div class="cmp-h">圖片</div>
     <div class="card cmp">

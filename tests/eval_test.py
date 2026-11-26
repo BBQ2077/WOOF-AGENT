@@ -596,7 +596,7 @@ async def run_one(task: Task, fake: FakeModel | None, base: Path, timeout: int =
     if info is not None:
         info.settings["window"] = task.window or 0
         info.settings["trigger"] = 50
-        info.settings["keep"] = 1
+        info.settings["tail_tokens"] = 1000
         info.settings["mid_turn"] = True
 
     sid = store.create_session(MODEL_ID, None, f"[{task.id}] {task.title}")["id"]
