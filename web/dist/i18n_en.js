@@ -1072,7 +1072,7 @@ window.WOOF_EN = {
 "擷取網頁：清掉雜訊後不到這個字數就直接給全文，超過才給預覽": "Web extract: pages shorter than this (after removing menus and other clutter) are returned in full; longer pages get a preview",
 "擷取網頁的預覽：關鍵字命中段落（含前後文）最多幾字": "Web extract preview: max chars of keyword-matched passages (with surrounding text)",
 "擷取網頁的預覽：開頭給幾字（沒有給關鍵字時再加上命中段落的字數）": "Web extract preview: chars from the start of the page (plus the passage budget when no keywords are given)",
-"擷取網頁的預覽：H1–H3 目錄最多幾字（太長時只列 H1、H2）": "Web extract preview: max chars of the H1–H3 outline (only H1 and H2 when too long)",
+"擷取網頁的預覽：標題目錄最多幾字（太長時只列上兩層）": "Web extract preview: max chars of the heading outline (only the top two levels when too long)",
 "收到訊息": "Message received",
 "收合": "Collapse",
 "改了就自動儲存": "Auto-save changes",

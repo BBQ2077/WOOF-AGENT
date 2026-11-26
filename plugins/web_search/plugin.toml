@@ -43,4 +43,4 @@ label = "擷取網頁的預覽：開頭給幾字（沒有給關鍵字時再加�
 [settings.outline_chars]
 type = "number"
 default = 600
-label = "擷取網頁的預覽：H1–H3 目錄最多幾字（太長時只列 H1、H2）"
+label = "擷取網頁的預覽：標題目錄最多幾字（太長時只列上兩層）"

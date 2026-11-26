@@ -31,6 +31,10 @@ _spec.loader.exec_module(page)
 
 _TIMEOUT = httpx.Timeout(30.0, read=90.0)
 CACHE_TTL = 3600   # 同一網址一小時內再擷取直接讀存檔
+# Firecrawl 抓取時先排除的頁面外框：導覽、側欄、最外層頁首頁尾、維基導覽框與語言清單、Sphinx 側欄
+_EXCLUDE = ["nav", "aside", "body > header", "body > footer", "[role=navigation]", "[role=banner]",
+            "[role=contentinfo]", ".navbox", ".vertical-navbox", ".sphinxsidebar", ".related",
+            ".mw-jump-link", "#p-lang", "#siteNotice", ".toc", "#toc", ".ambox", ".mbox-small"]
 _COOL: dict[tuple[str, str], float] = {}   # (免 key 服務, search/extract) → 暫停到幾點
 
 
@@ -116,30 +120,9 @@ def register(woof):
         return {"url": url, "text": text, "title": title, "desc": desc, "path": str(p), "raw": len(md or "")}
 
     def render(d: dict, keys: list[str], full: bool) -> str:
-        text, heads = d["text"], page.outline(d["text"])
-        title = d["title"] or next((t for lv, t, _n in heads if lv == 1), "") or "（無標題）"
-        lines = len(text.split("\n"))
-        out = [f"## {title}", d["url"]]
-        if d["desc"]:
-            out.append(f"摘要：{d['desc'].strip()[:300]}")
-        out.append(f"全文 {len(text)} 字、{lines} 行（已去掉選單、圖片碼等雜訊），存檔：{d['path']}")
-        if full or len(text) <= num("preview_chars", 4000, 1000):
-            return "\n".join(out) + "\n\n" + (text or "（沒有內容）")
-        toc = page.outline_text(heads, num("outline_chars", 600, 200))
-        if toc:
-            out += ["", "### 目錄（H1–H3，括號是存檔行號）", toc]
-        hit_n, lead_n = num("hit_chars", 3000, 500), num("lead_chars", 500, 100)
-        body, nhit, nshow = page.find(text, keys, hit_n) if keys else ("", 0, 0)
-        out += ["", "### 開頭", page.lead(text, lead_n if body else lead_n + hit_n)]
-        if keys:
-            kw = "、".join(f"「{k}」" for k in keys)
-            if body:
-                out += ["", f"### 關鍵字 {kw}：{nhit} 段命中，列出最相關的 {nshow} 處", body]
-            else:
-                out += ["", f"### 關鍵字 {kw}：全文沒有找到"]
-        out += ["", f"（這是預覽。整篇：同網址加 full=true；某一節：read_file path=\"{d['path']}\" offset=目錄行號；"
-                    f"換關鍵字：同網址改 find，讀存檔不重抓）"]
-        return "\n".join(out)
+        return page.preview(d, keys, full, {
+            "preview": num("preview_chars", 4000, 1000), "hit": num("hit_chars", 3000, 500),
+            "lead": num("lead_chars", 500, 100), "outline": num("outline_chars", 600, 200)})
 
     async def _post(client: httpx.AsyncClient, url: str, key: str, body: dict) -> dict:
         if key:
@@ -178,7 +161,8 @@ def register(woof):
         out = []
         for url in urls:
             data = await _post(client, "https://api.firecrawl.dev/v2/scrape", key,
-                               {"url": url, "formats": ["markdown"]})
+                               {"url": url, "formats": ["markdown"], "onlyMainContent": True,
+                                "removeBase64Images": True, "excludeTags": _EXCLUDE})
             d = data.get("data") or {}
             m = d.get("metadata") or {}
             out.append((url, d.get("markdown") or d.get("content") or "", m.get("title") or "", m.get("description") or ""))
@@ -294,7 +278,7 @@ def register(woof):
     woof.add_tool("web_search", "搜尋網路，回傳標題、網址和摘要。需要網頁全文時再用 web_extract。",
                   {"type": "object", "properties": {"query": {"type": "string", "description": "搜尋關鍵字"}},
                    "required": ["query"]}, web_search)
-    woof.add_tool("web_extract", "擷取最多 5 個網頁。短的直接給全文；長的先給預覽：標題、摘要、H1–H3 目錄（附存檔行號）、開頭，"
+    woof.add_tool("web_extract", "擷取最多 5 個網頁。短的直接給全文；長的先給預覽：標題、摘要、標題目錄（附存檔行號）、開頭，"
                   "以及 find 關鍵字命中的段落和前後文。全文都會存檔：要整篇設 full=true，要某一節用 read_file 加目錄行號；"
                   "同網址換 find 或改 full 會讀存檔，不重抓。",
                   {"type": "object", "properties": {

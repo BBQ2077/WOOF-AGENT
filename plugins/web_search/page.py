@@ -1,16 +1,44 @@
-"""網頁內容整理：清雜訊、H1–H3 目錄、關鍵字段落、預覽（純文字比對，不叫模型）。"""
+"""網頁內容整理：清雜訊、標題目錄、關鍵字段落、預覽（純文字比對，不叫模型）。
+
+存檔是 clean() 的結果（保留連結）；給模型看的預覽與全文再經 plain() 拿掉站內連結網址、表格格線。
+"""
 from __future__ import annotations
 
 import re
+from pathlib import Path
+from urllib.parse import urlparse
 
-_IMG_B64 = re.compile(r"!\[[^\]]*\]\(data:[^)]*\)")
-_IMG = re.compile(r"!\[([^\]]*)\]\([^)]*\)")
-_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
-_HEAD = re.compile(r"^(#{1,3})\s+(.+?)\s*#*\s*$")
-_JUNK = re.compile(r"[\s*\-+|•·>#:：,，.。/\\()（）\[\]_`'\"!?！？\u200b]+")
-
-
+_IMG = re.compile(r"!\[[^\]]*\]\((?:[^()\s]|\([^()\s]*\))*(?:\s+\"[^\"]*\")?\)")
+_LINK = re.compile(r"\[([^\]]*)\]\(((?:[^()\s]|\([^()\s]*\))*)(?:\s+\"[^\"]*\")?\)")
+_HEAD = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
+_HEAD6 = re.compile(r"^#{1,6}\s+\S")
+_ESC = re.compile(r"\\([\\`*_{}\[\]()#+\-.!|>~])")
+_JUNK = re.compile(r"[\s*\-+|•·>#:：,，.。/\\()（）\[\]_`'\"!?！？¶»«\u200b]+")
 _SYM = re.compile(r'[{}\[\]":,\\<>=;]')
+_CITE = re.compile(r"\[\[[^\]]{1,12}\]\]\((?:[^()\s]|\([^()\s]*\))*(?:\s+\"[^\"]*\")?\)|\[\d{1,3}\]")
+_TABSEP = re.compile(r"^\s*\|?[\s:|-]+\|?\s*$")
+_SENT = re.compile(r"(?<=[。！？；])|(?<=[.!?;])\s+|\s+\|\s+|<br>")
+# 只是網站外框、不是內文的固定行（編輯鈕、跳到內容、錨點、登入提示）
+_EDIT = re.compile(r"^\s*(\[?\s*(编辑|編輯|edit|编辑源代码)\s*\]?|permalink:.*|skip to (main )?content|跳转到内容|跳至內容|跳到主要內容|"
+                   r"dismiss alert|\{\{ message \}\}|you (signed in|signed out|switched accounts) .*refresh your session\..*)\s*$", re.I)
+
+# 繁→簡單字表（OpenCC），比對關鍵字時兩邊都轉成簡體再比，字數不變、位置對得上
+_TS = {}
+try:
+    for _ln in Path(__file__).with_name("ts_chars.txt").read_text(encoding="utf-8").splitlines():
+        if _ln and not _ln.startswith("#"):
+            for _i in range(0, len(_ln) - 1, 2):
+                _TS[ord(_ln[_i])] = _ln[_i + 1]
+except OSError:
+    pass
+
+
+def fold(s: str) -> str:
+    return s.lower().translate(_TS)
+
+
+def _is_fence(s: str) -> bool:
+    return s.lstrip().startswith("```")
 
 
 def _machine(s: str) -> bool:
@@ -18,199 +46,382 @@ def _machine(s: str) -> bool:
     return len(s) > 1500 and len(_SYM.findall(s)) / len(s) > 0.12
 
 
+def _link_texts(s: str) -> list[str]:
+    return [m.group(1) for m in _LINK.finditer(s)]
+
+
+def _meaningful(t: str) -> bool:
+    return bool(_JUNK.sub("", t))
+
+
 def _nav_line(s: str) -> bool:
     """幾乎整行都是連結（選單、導覽、頁尾）。"""
-    links = _LINK.findall(s)
-    if not links:
+    if not _LINK.search(s):
         return False
-    if not _JUNK.sub("", _LINK.sub("", s)) and not any(_JUNK.sub("", t) for t in links):
-        return True   # 只有空錨點連結（例如 [​](#xxx)）
-    rest = _JUNK.sub("", _LINK.sub("", s))
-    return len(rest) <= 3
+    return len(_JUNK.sub("", _LINK.sub("", s))) <= 3
+
+
+def _line_clean(s: str) -> str:
+    s = _IMG.sub("", s)
+    s = _LINK.sub(lambda m: m.group(0) if _meaningful(m.group(1)) else "", s)   # 空連結、只有 ¶ 之類符號的錨點
+    if not s.lstrip().startswith("|"):
+        s = _ESC.sub(r"\1", s)
+    return s.rstrip()
+
+
+def _split_blocks(lines: list[str]) -> list[list[int]]:
+    """依空行分段，程式碼區塊整段算一段；回傳每段的行索引。"""
+    out, cur, fence = [], [], False
+    for i, s in enumerate(lines):
+        if _is_fence(s):
+            fence = not fence
+            cur.append(i)
+            if not fence:
+                out.append(cur)
+                cur = []
+            continue
+        if fence:
+            cur.append(i)
+            continue
+        if not s.strip() or _HEAD6.match(s):
+            if cur:
+                out.append(cur)
+            cur = []
+            if s.strip():
+                out.append([i])
+            continue
+        cur.append(i)
+    if cur:
+        out.append(cur)
+    return out
 
 
 def clean(md: str) -> str:
-    """去掉 base64 圖、純圖片行、連續的選單連結行；多個空行合成一個。程式碼區塊原樣保留。"""
-    md = _IMG_B64.sub("", (md or "").replace("\r\n", "\n").replace("\r", "\n"))
-    lines, out, fence = md.split("\n"), [], False
+    """去掉圖片、空連結、選單連結行、機器資料、頭尾重複的側欄、沒有內文的空標題；多個空行合成一個。"""
+    lines = (md or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    fence, kept = False, []
     nav = [False] * len(lines)
     for i, s in enumerate(lines):
-        if s.lstrip().startswith("```"):
+        if _is_fence(s):
             fence = not fence
         elif not fence:
             nav[i] = _nav_line(s)
     fence = False
     for i, s in enumerate(lines):
-        if s.lstrip().startswith("```"):
-            fence = not fence
-            out.append(s.rstrip())
-            continue
-        if fence:
-            out.append(s.rstrip())
+        if _is_fence(s) or fence:
+            if _is_fence(s):
+                fence = not fence
+            kept.append(s.rstrip())
             continue
         if _machine(s):
-            out.append(f"[省略一段 {len(s)} 字的程式資料]")
             continue
         if nav[i]:
-            # 單獨一行連結（例如內文裡的「參考：某某」）保留；連續好幾行或一行好幾個連結才當選單
-            run = 1
-            for j in (i - 1, i + 1):
-                if 0 <= j < len(lines) and nav[j]:
-                    run += 1
-            if run > 1 or len(_LINK.findall(s)) >= 3 or not any(_JUNK.sub("", t) for t in _LINK.findall(s)):
+            run = sum(1 for j in (i - 1, i + 1) if 0 <= j < len(lines) and nav[j]) + 1
+            if run > 1 or len(_link_texts(s)) >= 3 or _HEAD6.match(s):
                 continue
-        s = _IMG.sub(lambda m: f"[圖：{m.group(1)}]" if m.group(1).strip() else "", s).rstrip()
-        if not s.strip() and s != "":
+        s = _line_clean(s)
+        if _HEAD6.match(s) and not _meaningful(re.sub(r"^#+", "", _LINK.sub("", s))) and _LINK.search(s):
+            continue   # 標題整個就是一個連結（側欄的「目錄」之類）
+        if not _meaningful(s) and not _TABSEP.match(s or "x"):
             s = ""
-        out.append(s)
-    text = re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip("\n")
-    return text
+        kept.append(s)
+    lines = kept
+
+    # 頭尾重複的區塊（側欄、頁首頁尾印兩次）整個拿掉；中段重複且夠長的只留第一次
+    blocks = _split_blocks(lines)
+    seen: dict[str, list[int]] = {}
+    for bi, idx in enumerate(blocks):
+        key = re.sub(r"\s+", " ", "\n".join(lines[i] for i in idx)).strip()
+        if key and not _is_fence(lines[idx[0]]):
+            seen.setdefault(key, []).append(bi)
+    drop = set()
+    nb = len(blocks)
+    for key, bis in seen.items():
+        if len(bis) < 2:
+            continue
+        if bis[0] < nb * 0.25 and bis[-1] >= nb * 0.75 and not _HEAD.match(key):
+            drop.update(bis)
+        elif len(key) >= 40:
+            drop.update(bis[1:])
+    # 段落後面把文中的 `程式碼` 再一行一個列一次（擷取服務的副產品）：整段都是單獨的 `…` 就拿掉
+    span = re.compile(r"^\s*`[^`]{1,80}`\s*$")
+    for bi, idx in enumerate(blocks):
+        ls = [lines[i] for i in idx if lines[i].strip()]
+        if ls and all(span.match(x) for x in ls):
+            prev = "\n".join(lines[i] for i in blocks[bi - 1]) if bi else ""
+            if len(ls) >= 2 or ls[0].strip() in prev:
+                drop.add(bi)
+    gone = {i for bi in drop for i in blocks[bi]}
+    lines = ["" if i in gone else s for i, s in enumerate(lines)]
+
+    # 沒有內文的標題（底下到下一個同級或更高的標題之間沒有字），反覆做到沒有為止
+    while True:
+        heads = [(i, len(s) - len(s.lstrip("#"))) for i, s in enumerate(lines) if _HEAD6.match(s)]
+        empty = []
+        for k, (i, lv) in enumerate(heads):
+            end = next((j for j, l2 in heads[k + 1:] if l2 <= lv), len(lines))
+            has = any(lines[j].strip() and not _HEAD6.match(lines[j]) for j in range(i + 1, end))
+            if not has:
+                empty.append(i)
+        if not empty:
+            break
+        for i in empty:
+            lines[i] = ""
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip("\n")
+
+
+def plain(s: str, host: str = "") -> str:
+    """給模型看的版本：站內、相對連結只留文字，外站連結保留；拿掉註腳號、表格格線與空欄。"""
+    def link(m):
+        t, u = m.group(1), m.group(2)
+        h = urlparse(u).hostname or ""
+        if u.startswith("http") and h and host and h != host and not h.endswith("." + host) and not host.endswith("." + h):
+            return f"[{t}]({u})"
+        return t
+    s = _LINK.sub(link, _CITE.sub("", s))
+    out = []
+    for ln in s.split("\n"):
+        if ln.lstrip().startswith("|"):
+            if _TABSEP.match(ln):
+                continue
+            cells = [c.strip() for c in re.split(r"(?<!\\)\|", ln.strip().strip("|"))]
+            cells = [c.replace("\\|", "|") for c in cells if c]
+            if not cells:
+                continue
+            ln = " | ".join(cells)
+        if _EDIT.match(ln):
+            continue
+        if ln.endswith("\\") and not ln.endswith("\\\\"):
+            ln = ln[:-1]   # Markdown 強制換行的反斜線
+        out.append(re.sub(r"[ \t]{2,}", " ", ln).strip() if not ln.startswith("    ") else ln.rstrip())
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip("\n")
+
+
+def _title(raw: str) -> str:
+    return plain(raw).replace("\u200b", "").strip(" ¶\\")
 
 
 def outline(text: str) -> list[tuple[int, str, int]]:
-    """H1–H3：(層級, 標題, 行號)，行號從 1 起，對應存檔。"""
+    """頁面上最上面三層標題（通常是 H1–H3；只有 H4 以下的頁面就往下取）：(層級, 標題, 行號)，行號對應存檔。"""
     res, fence = [], False
     for n, s in enumerate(text.split("\n"), 1):
-        if s.lstrip().startswith("```"):
+        if _is_fence(s):
             fence = not fence
             continue
         if not fence:
             m = _HEAD.match(s)
             if m:
-                t = _LINK.sub(r"\1", m.group(2)).replace("\u200b", "").strip()
+                t = _title(m.group(2))
                 if t:
                     res.append((len(m.group(1)), t, n))
-    return res
+    top = sorted({lv for lv, _t, _n in res})[:3]
+    return [h for h in res if h[0] in top]
 
 
 def outline_text(heads: list[tuple[int, str, int]], budget: int) -> str:
     def render(hs):
-        return "\n".join(f"{'  ' * (lv - 1)}{t}（第 {n} 行）" for lv, t, n in hs)
+        top = min(h[0] for h in hs)
+        return "\n".join(f"{'  ' * (lv - top)}{t[:80]}（{n}）" for lv, t, n in hs)
     if not heads:
         return ""
-    for top in (3, 2, 1):
+    lvs = sorted({h[0] for h in heads})
+    for top in reversed(lvs):
         hs = [h for h in heads if h[0] <= top]
+        if not hs:
+            continue
         s = render(hs)
         if len(s) <= budget:
-            return s + (f"\n（另有 {len(heads) - len(hs)} 個較小的標題沒列）" if len(hs) < len(heads) else "")
+            return s + (f"\n（另有 {len(heads) - len(hs)} 個較小的標題）" if len(hs) < len(heads) else "")
+    lv0 = min(h[0] for h in heads)
     keep, used = [], 0
-    for h in [h for h in heads if h[0] == 1] or heads:
+    for h in [h for h in heads if h[0] == lv0]:
         line = render([h])
         if used + len(line) > budget:
             break
         keep.append(h)
         used += len(line) + 1
-    return render(keep) + f"\n（另有 {len(heads) - len(keep)} 個標題沒列）"
+    return render(keep) + f"\n（另有 {len(heads) - len(keep)} 個標題）"
 
 
-def _blocks(text: str) -> list[dict]:
-    """依空行分段（程式碼區塊算一段），每段記行號範圍和所屬標題。"""
+def _blocks(text: str, host: str = "") -> list[dict]:
+    """分段（程式碼區塊算一段；太長的段按句子或「|」切成約 500 字），記行號範圍、所屬標題、是否像導覽。
+    text 是給模型看的 plain() 版本。"""
     lines = text.split("\n")
-    blocks, cur, start, fence, path = [], [], 0, False, {}
-
-    def flush(end):
-        if cur:
-            blocks.append({"a": start + 1, "b": end, "text": "\n".join(cur),
-                           "sec": " > ".join(path[k] for k in sorted(path)),
-                           "head": len(cur) == 1 and bool(_HEAD.match(cur[0]))})
-
-    for i, s in enumerate(lines):
-        if s.lstrip().startswith("```"):
-            if not fence and cur:
-                flush(i)
-                cur, start = [], i
-            if not cur:
-                start = i
-            cur.append(s)
-            fence = not fence
-            if not fence:
-                flush(i + 1)
-                cur = []
-            continue
-        if fence:
-            cur.append(s)
-            continue
-        m = _HEAD.match(s)
+    out, path = [], {}
+    for idx in _split_blocks(lines):
+        a, b = idx[0] + 1, idx[-1] + 1
+        body = "\n".join(lines[i] for i in idx)
+        m = _HEAD.match(body) if len(idx) == 1 else None
         if m:
-            flush(i)
             lv = len(m.group(1))
             for k in [k for k in path if k >= lv]:
                 del path[k]
-            path[lv] = _LINK.sub(r"\1", m.group(2)).replace("\u200b", "").strip()
-            cur, start = [s], i
-            flush(i + 1)
-            cur = []
+            path[lv] = _title(m.group(2))
+        sec = " > ".join(path[k] for k in sorted(path))
+        vis = len(_JUNK.sub("", _LINK.sub(r"\1", body))) or 1
+        ltxt = sum(len(_JUNK.sub("", t)) for t in _link_texts(body))
+        navy = len(_link_texts(body)) >= 3 and ltxt / vis > 0.6
+        rows = [x for x in body.split("\n") if x.strip()]
+        if len(rows) >= 8 and sum(len(_JUNK.sub("", x)) for x in rows) / len(rows) < 18:
+            navy = True   # 一長串短行（語言清單、標籤雲）
+        table = body.lstrip().startswith("|")
+        body = plain(body, host)
+        if not body.strip():
             continue
-        if not s.strip():
-            flush(i)
-            cur = []
-            continue
-        if not cur:
-            start = i
-        cur.append(s)
-    flush(len(lines))
-    return blocks
+        pieces = [body]
+        if not m and not _is_fence(body) and len(body) > 800:
+            pieces, cur = [], ""
+            for part in (body.split("\n") if "\n" in body else [body]):
+                for seg in (_SENT.split(part) if len(part) > 500 else [part]):
+                    if cur and len(cur) + len(seg) > 500:
+                        pieces.append(cur)
+                        cur = ""
+                    if seg.strip():
+                        cur = cur + ("\n" if cur and seg is part else " " if cur else "") + seg.strip()
+            if cur:
+                pieces.append(cur)
+        for p in pieces:
+            out.append({"a": a, "b": b, "text": p, "sec": sec, "head": bool(m), "lv": len(m.group(1)) if m else 9,
+                        "nav": navy, "table": table})
+    return out
 
 
-def _clip_around(text: str, keys: list[str], n: int) -> str:
-    if len(text) <= n:
-        return text
-    low = text.lower()
-    pos = min([p for p in (low.find(k) for k in keys) if p >= 0] or [0])
-    a = max(0, min(pos - n // 3, len(text) - n))
-    return ("…" if a else "") + text[a:a + n] + ("…" if a + n < len(text) else "")
+def find(text: str, keys: list[str], budget: int, host: str = "", each: int = 900,
+         skip: set | None = None) -> tuple[str, int, int]:
+    """關鍵字命中的段落加前後文。回傳（內容, 命中段數, 列出處數）。
 
-
-def find(text: str, keys: list[str], budget: int) -> tuple[str, int, int]:
-    """關鍵字命中的段落加前後各一段。回傳（內容, 命中段數, 列出段數）。"""
-    keys = [k.lower() for k in keys if k.strip()]
-    bl = _blocks(text)
+    排序：命中小標題最優先，再看命中幾種關鍵字、次數；像導覽的連結清單、符號很密的資料排最後。
+    每處最多 each 字，讓預算裡能放好幾處，不被一個大表格吃光。
+    """
+    keys = [fold(k) for k in keys if k.strip()]
+    bl = _blocks(text, host)
+    skip = skip or set()
+    h1 = [b for b in bl if b["head"] and b["text"].startswith("# ")]
+    strip = (h1[0]["sec"] + " > ") if len(h1) == 1 else ""
     scored = []
     for i, b in enumerate(bl):
-        low = b["text"].lower()
+        if b["text"] in skip:
+            continue
+        low = fold(b["text"])
         hit = [k for k in keys if k in low]
-        if hit:
-            score = len(hit) * 10 + min(sum(low.count(k) for k in hit), 9) + (15 if b["head"] else 0)
-            if len(low) > 400 and len(_SYM.findall(low)) / len(low) > 0.12:
-                score -= 30   # 符號很密的段落（資料、設定）排在一般內文後面
-            scored.append((score, i))
+        if not hit:
+            continue
+        score = len(hit) * 10 + min(sum(low.count(k) for k in hit), 5)
+        if any(low.lstrip("#*_`>- ").startswith(k) for k in hit):
+            score += 8   # 以關鍵字開頭的段落，多半是那個參數、函式的定義
+        if b["head"]:
+            score += 40
+        if _is_fence(b["text"]):
+            score -= 5   # 同分時說明文字排在範例程式前面
+        if b["nav"]:
+            score -= 25
+        if len(low) > 400 and len(_SYM.findall(low)) / len(low) > 0.12:
+            score -= 30
+        scored.append((score, i))
     if not scored:
         return "", 0, 0
     scored.sort(key=lambda x: (-x[0], x[1]))
+    real = sum(1 for _s, i in scored if not bl[i]["nav"])
     taken, out, used = set(), [], 0
     for _score, i in scored:
         if i in taken:
             continue
-        lo = i if bl[i]["head"] else max(0, i - 1)   # 命中小標題就從標題開始
-        hi = min(len(bl) - 1, i + (2 if bl[i]["head"] else 1))
-        # 段落切得很碎時（API 文件常見），往後延伸到約 600 字或下一個標題
-        while hi + 1 < len(bl) and not bl[hi + 1]["head"] and sum(len(bl[j]["text"]) for j in range(i, hi + 1)) < 600:
-            hi += 1
-        idx = [j for j in range(lo, hi + 1) if j not in taken]
-        if not idx:
+        b = bl[i]
+        if b["nav"] and (real >= 2 or any(bl[k]["nav"] for k in taken)):
+            continue   # 導覽清單：有正文命中就不列，最多列一處
+        idx = [i]
+        if b["head"]:
+            # 命中標題：給這一節（含底下的子標題），到同級或更高的下一個標題為止
+            j = i + 1
+            while j < len(bl) and not (bl[j]["head"] and bl[j]["lv"] <= b["lv"]) \
+                    and sum(len(bl[k]["text"]) for k in idx) < each:
+                idx.append(j)
+                j += 1
+        else:
+            if i > 0 and not bl[i - 1]["head"] and not bl[i - 1]["nav"] and len(bl[i - 1]["text"]) < each // 3:
+                idx.insert(0, i - 1)
+            j = i + 1
+            while j < len(bl) and not bl[j]["head"] and sum(len(bl[k]["text"]) for k in idx) < each // 2:
+                idx.append(j)
+                j += 1
+        idx = [k for k in idx if k not in taken and bl[k]["text"] not in skip]
+        if not idx or (b["head"] and len(idx) == 1):
             continue
-        piece = "\n\n".join(_clip_around(bl[j]["text"], keys, 1500) for j in idx)
-        sec = bl[i]["sec"] or "（開頭）"
-        block = f"§ {sec}（第 {bl[idx[0]]['a']}–{bl[idx[-1]]['b']} 行）\n{piece}"
-        if used + len(block) > budget:
-            room = budget - used
-            if out and room < 300:
-                break
-            block = block[:max(room, 300)] + "…"
-        out.append(block)
-        used += len(block)
-        taken.update(idx)
-        if used >= budget:
+        piece = "\n\n".join(bl[k]["text"] for k in idx)
+        cap = min(300 if b["nav"] else each, budget - used)
+        if cap < 200:
             break
+        if len(piece) > cap:
+            low = fold(piece)
+            pos = min([p for p in (low.find(k) for k in keys) if p >= 0] or [0])
+            st = max(0, min(pos - cap // 4, len(piece) - cap))
+            piece = ("…" if st else "") + piece[st:st + cap] + ("…" if st + cap < len(piece) else "")
+        sec = (b["sec"] + " > ").removeprefix(strip).removesuffix(" > ") if strip else b["sec"]
+        sec = sec or "開頭"
+        blk = f"§ {sec}（{bl[idx[0]]['a']}–{bl[idx[-1]]['b']} 行）\n{piece}"
+        out.append(blk)
+        used += len(blk)
+        taken.update(idx)
     return "\n\n".join(out), len(scored), len(out)
 
 
-def lead(text: str, n: int) -> str:
-    """開頭：從第一個 H1 之後的內文起（沒有 H1 就從頭），跳過標題行，切在換行處。"""
+def lead(text: str, n: int, host: str = "", picked: set | None = None) -> str:
+    """開頭：第一個 H1 之後（沒有 H1 就從頭）的內文段落，跳過標題、導覽清單、表格；不夠再補。"""
+    bl = _blocks(text, host)
     lines = text.split("\n")
-    start = next((i + 1 for i, s in enumerate(lines) if s.startswith("# ")), 0)
-    body = "\n".join(s for s in lines[start:] if not _HEAD.match(s)).strip()
-    if len(body) <= n:
-        return body
-    cut = body.rfind("\n", 0, n)
-    return body[:cut if cut > n // 2 else n] + "…"
+    h1 = next((i + 1 for i, s in enumerate(lines) if s.startswith("# ")), 0)
+    body = [b for b in bl if b["a"] > h1 and not b["head"]] or [b for b in bl if not b["head"]]
+    prose = [b for b in body if not b["nav"] and not b["table"]]
+    pick, used = [], 0
+    # 很短又沒有句末標點的（「跳到內容」「某某百科，自由的百科全書」）多半是網站外框，先不取
+    sent = [b for b in prose if len(b["text"]) >= 25 or b["text"].rstrip("*_ ").endswith(("。", "！", "？", ".", "!", "?", "：", ":"))]
+    for group in (sent, prose, body):
+        for b in group:
+            if b in pick:
+                continue
+            t = b["text"]
+            pick.append(b)
+            used += len(t) + 2
+            if used >= n:
+                break
+        if used >= n * 0.6:
+            break
+    pick.sort(key=lambda b: bl.index(b))
+    if picked is not None:
+        picked.update(b["text"] for b in pick)
+    s = "\n\n".join(b["text"] for b in pick)
+    if len(s) <= n:
+        return s
+    cut = s.rfind("\n", 0, n)
+    return s[:cut if cut > n // 2 else n] + "…"
+
+
+def preview(d: dict, keys: list[str], full: bool, cfg: dict) -> str:
+    """d：url、text（存檔內容）、title、desc、path。cfg：preview、hit、lead、outline 四個字數。"""
+    text, url = d["text"], d["url"]
+    host = urlparse(url).hostname or ""
+    heads = outline(text)
+    title = (d.get("title") or "").strip() or next((t for lv, t, _n in heads if lv == 1), "") or "（無標題）"
+    out = [f"## {title}", url]
+    if (d.get("desc") or "").strip():
+        out.append(f"摘要：{d['desc'].strip()[:200]}")
+    shown = plain(text, host)
+    out.append(f"清理後 {len(shown)} 字；存檔（含連結網址）：{d['path']}")
+    if full or len(shown) <= cfg["preview"]:
+        return "\n".join(out) + "\n\n" + (shown or "（沒有內容）")
+    toc = outline_text(heads, cfg["outline"])
+    if toc:
+        out += ["", "### 目錄（括號是存檔行號）", toc]
+    shown_lead: set = set()
+    ld = lead(text, cfg["lead"] if keys else cfg["lead"] + cfg["hit"], host, shown_lead)
+    body, nhit, nshow = find(text, keys, cfg["hit"], host, skip=shown_lead) if keys else ("", 0, 0)
+    if keys and not body:
+        ld = lead(text, cfg["lead"] + cfg["hit"], host)
+    if ld:
+        out += ["", "### 開頭", ld]
+    if keys:
+        kw = "、".join(keys)
+        out += ["", f"### 「{kw}」{nhit} 段命中，列出 {nshow} 處" if body else f"### 「{kw}」沒有找到", body] if body \
+            else ["", f"### 「{kw}」沒有找到"]
+    out += ["", "（預覽。整篇：同網址 full=true；某一節：read_file 存檔 offset=行號；換字：同網址改 find，讀存檔不重抓）"]
+    return "\n".join(x for x in out if x is not None)
