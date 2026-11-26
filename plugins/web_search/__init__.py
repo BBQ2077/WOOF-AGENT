@@ -136,7 +136,8 @@ def register(woof):
     def render(d: dict, keys: list[str], full: bool, pages: int = 1) -> str:
         """一次讀好幾頁時共用 total_chars：每頁分到的量（至少 1500、最多 preview_chars）照比例縮開頭、命中、目錄。"""
         pv = num("preview_chars", 4000, 1000)
-        share = max(1500, min(pv, num("total_chars", 6000, 1500) // max(1, pages)))
+        # 每頁另有標題、網址、存檔路徑等約 250 字，先扣掉，合計才落在 total_chars 附近、不碰工具輸出上限
+        share = max(1500, min(pv, num("total_chars", 10000, 1500) // max(1, pages) - (250 if pages > 1 else 0)))
         f = share / pv
         hit = max(500, int(num("hit_chars", 3000, 500) * f))
         return page.preview(d, keys, full, {
@@ -392,7 +393,8 @@ def register(woof):
                   {"type": "object", "properties": {"query": {"type": "string", "description": "搜尋關鍵字"}},
                    "required": ["query"]}, web_search)
     woof.add_tool("web_extract", "擷取最多 5 個網頁。短的直接給全文；長的先給預覽：標題、摘要、標題目錄（附存檔行號）、開頭，"
-                  "以及 find 關鍵字命中的段落和前後文。全文都會存檔：要整篇設 full=true，要某一節用 read_file 加目錄行號；"
+                  "以及 find 關鍵字命中的段落和前後文。一次讀越多頁，每頁預覽越短；要細節就挑一頁用 find 或 full。"
+                  "全文都會存檔：要整篇設 full=true，要某一節用 read_file 加目錄行號；"
                   "同網址換 find 或改 full 會讀存檔，不重抓。",
                   {"type": "object", "properties": {
                       "urls": {"type": "array", "items": {"type": "string"}, "description": "網址，最多 5 個"},

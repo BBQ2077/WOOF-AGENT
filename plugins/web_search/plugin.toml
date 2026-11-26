@@ -32,7 +32,7 @@ label = "搜尋結果每筆附幾字摘錄"
 
 [settings.total_chars]
 type = "number"
-default = 6000
+default = 10000
 label = "擷取網頁：一次讀好幾頁時，全部預覽合計最多幾字（平均分給每頁，每頁至少 1500、最多照下面的字數）"
 
 [settings.preview_chars]
