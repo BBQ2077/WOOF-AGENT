@@ -12,6 +12,7 @@
   tail_tokens   壓縮後原樣保留的最近訊息（token，照模型實際算法校正過）；至少留最後一步
   quote_count   摘要後面附上被壓縮那段裡使用者最近幾則原話
   quote_tokens  附的原話合計最多幾 token
+  quote_reply_chars 每則原話前面附它回應的助手那則開頭幾字
   summary_tokens 摘要最多幾 token；更新時只輸出要改的行（行號編輯指令），沒變的由程式原樣保留
   ratio     第一次寫摘要時，長度佔原文的百分比（壓縮幅度）
   method    壓縮方式：單次（預設，一次摘要）／多工（依字數分段同時摘要，最後合併）
@@ -39,7 +40,7 @@ CHARS_PER_TOK = 1.5
 TAIL_TOK_DEFAULT, TAIL_WIN = 10000, 0.25
 # 摘要後面附上被壓縮那段裡使用者最近幾則原話（新的在前）：則數、合計 token（設定 quote_count、quote_tokens）、單則上限（字）
 QUOTE_N_DEFAULT, QUOTE_TOK_DEFAULT, USER_MAX = 3, 1500, 1500
-REPLY_MAX, SHORT_REPLY = 200, 30   # 原話很短（「好」「照這樣」）時才附它回應的助手那則結尾，看得出認可了什麼
+REPLY_HEAD_DEFAULT = 250   # 每則原話前面附上它回應的助手那則的開頭（先講結論，開頭就是重點），看得出回的是什麼
 # 沿用主對話快取寫摘要時，上一步要在這段時間內（Claude 的快取放 5 分鐘；其他家多半更久）
 CACHE_TTL_ANTHROPIC, CACHE_TTL_OTHER = 270, 600
 WHO = {"user": "使用者", "assistant": "助手", "tool": "工具"}
@@ -85,8 +86,9 @@ def _elide(text: str, cap: int) -> str:
 
 
 def _users_section(messages: list[dict], through: int, n: int = QUOTE_N_DEFAULT,
-                   budget: int = int(QUOTE_TOK_DEFAULT * CHARS_PER_TOK)) -> str:
-    """被壓縮那段（id ≤ through）裡使用者最近 n 則親口講的話，新的在前，合計不超過 budget 字。內部訊息（接續、回報…）不算。"""
+                   budget: int = int(QUOTE_TOK_DEFAULT * CHARS_PER_TOK), head: int = REPLY_HEAD_DEFAULT) -> str:
+    """被壓縮那段（id ≤ through）裡使用者最近 n 則親口講的話，新的在前，合計不超過 budget 字；
+    每則前面附它回應的助手那則開頭 head 字。內部訊息（接續、回報…）不算。"""
     if n <= 0 or budget <= 0:
         return ""
 
@@ -110,13 +112,12 @@ def _users_section(messages: list[dict], through: int, n: int = QUOTE_N_DEFAULT,
         if len(picked) >= n or room < 60:
             break
         text = _elide(text, min(USER_MAX, room))
-        reply = reply[-REPLY_MAX:] if reply and len(text) <= SHORT_REPLY else ""
-        if len(reply) == REPLY_MAX:
-            reply = "…" + reply
+        cap = min(head, room - len(text))
+        reply = (reply[:cap] + "…" if len(reply) > cap else reply) if reply and cap >= 40 else ""
         when = time.strftime("%m-%d %H:%M", time.localtime(m["created"])) if m.get("created") else ""
         block = f"（{when}）\n" if when else ""
         if reply:
-            block += "助手前一則（結尾）：" + reply.replace("\n", " ") + "\n"
+            block += "助手前一則（開頭）：" + " ".join(reply.split()) + "\n"
         block += "使用者：" + text
         picked.append("> " + block.replace("\n", "\n> "))
         used += len(text) + len(reply)
@@ -268,6 +269,9 @@ def register(woof):
 
     def _quote_n() -> int:
         return _int("quote_count", QUOTE_N_DEFAULT, 0, 20)
+
+    def _reply_head() -> int:
+        return _int("quote_reply_chars", REPLY_HEAD_DEFAULT, 0, 2000)
 
     def _quote_chars() -> int:
         return int(_int("quote_tokens", QUOTE_TOK_DEFAULT, 0, 20000) * CHARS_PER_TOK)
@@ -655,7 +659,7 @@ def register(woof):
             if add:   # 已經正式加入了：之後同一個工具再「先用 tool_call」加一次，要再告訴模型
                 cur["told"] = {k: v for k, v in (cur.get("told") or {}).items() if k != "tools_add"}
         # 附的原話在這裡算好存起來：之後每次送出都一樣，不重算、快取不斷
-        quotes = _users_section(msgs, older[-1]["id"], _quote_n(), _quote_chars())
+        quotes = _users_section(msgs, older[-1]["id"], _quote_n(), _quote_chars(), _reply_head())
         cur["summary"] = {"through": older[-1]["id"], "text": text, "quotes": quotes, "at": time.time(),
                           "kept": sorted(recent_ids), "mode": mode, "method": method, "parts": parts,
                           "inflight": inflight, **({"how": how} if how else {})}
@@ -695,7 +699,7 @@ def register(woof):
         kept = tokens.apply_prune(kept, st.get("engine_state"))
         body = _prompt_get("compact_head", summary=summary["text"])
         # 使用者的原話照抄在摘要後面（不經摘要模型），跟摘要有出入以原話為準；同一份摘要每次都一樣，快取不斷
-        users = summary["quotes"] if "quotes" in summary else _users_section(messages, through, _quote_n(), _quote_chars())
+        users = summary["quotes"] if "quotes" in summary else _users_section(messages, through, _quote_n(), _quote_chars(), _reply_head())
         if users:
             body += _prompt_get("compact_users", users=users)
         if "session_search" in getattr(getattr(ctx, "registry", None), "tools", {}):

@@ -80,6 +80,9 @@ def register(woof):
     def limit() -> int:
         return max(1, min(int(woof.settings.get("results") or 5), 10))
 
+    def snip() -> int:
+        return num("snippet_chars", 200, 50)
+
     def num(key: str, dflt: int, lo: int) -> int:
         try:
             return max(lo, int(woof.settings.get(key) or dflt))
@@ -130,10 +133,16 @@ def register(woof):
                 pass
         return {"url": url, "text": text, "title": title, "desc": desc, "path": str(p), "raw": len(md or "")}
 
-    def render(d: dict, keys: list[str], full: bool) -> str:
+    def render(d: dict, keys: list[str], full: bool, pages: int = 1) -> str:
+        """一次讀好幾頁時共用 total_chars：每頁分到的量（至少 1500、最多 preview_chars）照比例縮開頭、命中、目錄。"""
+        pv = num("preview_chars", 4000, 1000)
+        share = max(1500, min(pv, num("total_chars", 6000, 1500) // max(1, pages)))
+        f = share / pv
+        hit = max(500, int(num("hit_chars", 3000, 500) * f))
         return page.preview(d, keys, full, {
-            "preview": num("preview_chars", 4000, 1000), "hit": num("hit_chars", 3000, 500),
-            "lead": num("lead_chars", 500, 100), "outline": num("outline_chars", 600, 200)})
+            "preview": share, "hit": hit, "each": max(300, min(900, hit // 2)),
+            "lead": max(150, int(num("lead_chars", 500, 100) * f)),
+            "outline": max(200, int(num("outline_chars", 600, 200) * f))})
 
     async def _post(client: httpx.AsyncClient, url: str, key: str, body: dict) -> dict:
         if key:
@@ -153,7 +162,7 @@ def register(woof):
             return "沒有找到結果。"
         out = []
         for i, it in enumerate(rows, 1):
-            out.append(f"{i}. {it.get('title') or '（無標題）'}\n   {it.get('url', '')}\n   {_clip(it.get('description') or '', 400)}")
+            out.append(f"{i}. {it.get('title') or '（無標題）'}\n   {it.get('url', '')}\n   {_clip(it.get('description') or '', snip())}")
         return "\n\n".join(out)
 
     async def _search_tavily(client, key: str, query: str) -> str:
@@ -164,7 +173,7 @@ def register(woof):
             return "沒有找到結果。"
         out = []
         for i, it in enumerate(rows, 1):
-            out.append(f"{i}. {it.get('title') or '（無標題）'}\n   {it.get('url', '')}\n   {_clip(it.get('content') or '', 400)}")
+            out.append(f"{i}. {it.get('title') or '（無標題）'}\n   {it.get('url', '')}\n   {_clip(it.get('content') or '', snip())}")
         return "\n\n".join(out)
 
     def _why(r: httpx.Response) -> str:
@@ -376,7 +385,7 @@ def register(woof):
             else:
                 cause = "這次沒抓到，稍後同網址可以再試"
             return f"## {u}\n\n這頁沒抓到：{cause}。其他網址不受影響；要這頁的內容，可以用 web_search 搜它的標題看摘要。"
-        blocks = [render(done[u], keys, full) if u in done else fail(u) for u in urls]
+        blocks = [render(done[u], keys, full, len(done)) if u in done else fail(u) for u in urls]
         return {"output": "\n\n".join(blocks)}
 
     woof.add_tool("web_search", "搜尋網路，回傳標題、網址和摘要。需要網頁全文時再用 web_extract。",

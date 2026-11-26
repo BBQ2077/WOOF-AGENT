@@ -461,7 +461,7 @@ def lead(text: str, n: int, host: str = "", picked: set | None = None) -> str:
 
 
 def preview(d: dict, keys: list[str], full: bool, cfg: dict) -> str:
-    """d：url、text（存檔內容）、title、desc、path。cfg：preview、hit、lead、outline 四個字數。"""
+    """d：url、text（存檔內容）、title、desc、path。cfg：preview、hit、lead、outline 四個字數，each＝每處命中最多幾字。"""
     text, url = d["text"], d["url"]
     host = urlparse(url).hostname or ""
     heads = outline(text)
@@ -478,7 +478,7 @@ def preview(d: dict, keys: list[str], full: bool, cfg: dict) -> str:
         out += ["", "### 目錄（括號是存檔行號）", toc]
     shown_lead: set = set()
     ld = lead(text, cfg["lead"] if keys else cfg["lead"] + cfg["hit"], host, shown_lead)
-    body, nhit, nshow = find(text, keys, cfg["hit"], host, skip=shown_lead) if keys else ("", 0, 0)
+    body, nhit, nshow = find(text, keys, cfg["hit"], host, each=cfg.get("each", 900), skip=shown_lead) if keys else ("", 0, 0)
     if keys and not body:
         ld = lead(text, cfg["lead"] + cfg["hit"], host)
     if ld:

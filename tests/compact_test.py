@@ -70,8 +70,12 @@ class Quotes(unittest.TestCase):
         self.assertEqual(s.count("使用者："), 3)
         self.assertIn("最後的要求", s)
         self.assertNotIn("第一個要求", s)
-        self.assertEqual(s.count("助手前一則"), 2)        # 短回覆（「照這樣」「第三個要求」）才附它回應的那則，長的不附
-        self.assertLessEqual(len(C._users_section(self.msgs(), 99, 20, 300)), 600)
+        self.assertEqual(s.count("助手前一則（開頭）：提議"), 3)   # 每則都附它回應的那則開頭
+        self.assertNotIn("提議1", s)
+        self.assertIn("內容" * 50, s)
+        self.assertNotIn("內容" * 200, s)                       # 只附開頭 250 字
+        self.assertNotIn("助手前一則", C._users_section(self.msgs(), 99, 3, 2000, 0))
+        self.assertLessEqual(len(C._users_section(self.msgs(), 99, 20, 300)), 900)
         self.assertEqual(C._users_section(self.msgs(), 99, 0, 2000), "")
 
 

@@ -138,6 +138,27 @@ class Extract(unittest.TestCase):
         self.assertLessEqual(bodies[0]["timeout"], 15000)
         self.assertLessEqual(mod._TIMEOUT.read, 20)
 
+    def test_several_pages_share_total_budget(self):
+        long = "# 長頁\n\n" + "\n\n".join(f"## 第{i}節\n\n" + "".join(f"第{i}節第{j}句，說明關鍵字的不同細節。" for j in range(30))
+                                          for i in range(20))
+
+        def h(req):
+            return httpx.Response(200, json={"data": {"markdown": long, "metadata": {"title": "T"}}})
+        mod, run = load("firecrawl_keyless", h)
+        one = run({"urls": ["https://one.example/a"], "find": ["關鍵字"]})["output"]
+        five = run({"urls": [f"https://five{i}.example/a" for i in range(5)], "find": ["關鍵字"]})["output"]
+        self.assertGreater(len(one), 3000)
+        self.assertLess(len(five), 11000)          # 合計 6000 平分，不會頂到工具輸出上限被截
+        self.assertEqual(five.count("### 開頭"), 5)
+
+    def test_search_snippet_short(self):
+        def h(req):
+            return httpx.Response(200, json={"data": {"web": [{"title": f"t{i}", "url": f"https://s{i}.example/",
+                                                                "description": "摘" * 500} for i in range(5)]}})
+        mod, run = load("firecrawl_keyless", h)
+        out = run({"_tool": "web_search", "query": "q"})["output"]
+        self.assertLess(len(out), 1400)
+
     def test_cache_recleaned_when_cleaner_changes(self):
         n = []
 

@@ -25,10 +25,20 @@ type = "number"
 default = 5
 label = "搜尋結果數量（1–10）"
 
+[settings.snippet_chars]
+type = "number"
+default = 200
+label = "搜尋結果每筆附幾字摘錄"
+
+[settings.total_chars]
+type = "number"
+default = 6000
+label = "擷取網頁：一次讀好幾頁時，全部預覽合計最多幾字（平均分給每頁，每頁至少 1500、最多照下面的字數）"
+
 [settings.preview_chars]
 type = "number"
 default = 4000
-label = "擷取網頁：清掉雜訊後不到這個字數就直接給全文，超過才給預覽"
+label = "擷取網頁：清掉雜訊後不到這個字數就直接給全文，超過才給預覽（只讀一頁時；讀好幾頁時照合計上限平分）"
 
 [settings.hit_chars]
 type = "number"

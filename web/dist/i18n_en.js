@@ -2146,4 +2146,11 @@ window.WOOF_EN = {
 "已經有摘要時，舊摘要附行號交給模型，它只輸出編輯指令，程式套用；{n}＝舊摘要字數，{cap}＝上限字數": "When a summary exists, the old summary is given to the model with line numbers; it outputs only edit commands and the program applies them; {n} = old summary length, {cap} = cap in characters",
 "壓縮後，被摘要那段裡使用者最近幾則原話照抄在摘要後面（新的在前）": "After compaction, the user's latest few messages from the compacted part are quoted after the summary (newest first)",
 "摘要的編輯指令看不懂，這次改成整份重寫": "Could not parse the summary edit commands; rewriting the whole summary this time",
+"附助手開頭幾字": "Assistant reply head",
+"原話 助手 開頭 結論": "quote assistant head conclusion",
+"每則原話前面附它回應的助手那則開頭幾字（0 到 2000，0＝不附）。先講結論的回覆，開頭就看得出你回的是什麼。": "How many characters from the start of the assistant reply each quoted message answers (0 to 2000, 0 = none). Replies that lead with the conclusion show what you were answering.",
+"每則原話前面附它回應的助手那則開頭幾字（0＝不附）；先講結論的回覆，開頭就看得出你回的是什麼": "Characters from the start of the assistant reply each quoted message answers (0 = none); replies that lead with the conclusion show what you were answering",
+"搜尋結果每筆附幾字摘錄": "Snippet length per search result (characters)",
+"擷取網頁：一次讀好幾頁時，全部預覽合計最多幾字（平均分給每頁，每頁至少 1500、最多照下面的字數）": "Page extraction: total preview characters when reading several pages at once (split evenly, at least 1500 and at most the size below per page)",
+"擷取網頁：清掉雜訊後不到這個字數就直接給全文，超過才給預覽（只讀一頁時；讀好幾頁時照合計上限平分）": "Page extraction: pages shorter than this after cleanup are returned in full, longer ones as a preview (single page; with several pages the total cap is split)",
 };

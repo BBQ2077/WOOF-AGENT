@@ -5853,6 +5853,7 @@ const SET_Q = {
     ['c-sum', '摘要上限', '摘要 上限 長度 token'],
     ['c-quote', '附幾則原話', '原話 使用者 引用 則數'],
     ['c-quotetok', '原話上限', '原話 上限 token'],
+    ['c-quotehead', '附助手開頭幾字', '原話 助手 開頭 結論'],
     ['c-ratio', '摘要幅度', '摘要 比例 長度'],
     ['c-method', '壓縮方式', '單次 多工 一次摘要'],
     ['c-parallel', '同時跑幾段', '多工 平行 段數'],
@@ -6295,7 +6296,7 @@ async function pfSave(auto) {
   } catch (e) { const d = $('#pfDirty'); if (d) d.innerHTML = `<span class="qerr">沒存到：${esc(e.message)}</span>`; }
 }
 // ---- 壓縮（設定存在 context 插件，儲存後插件會重新載入）
-const CMP_KEYS = ['window', 'method', 'parallel', 'ratio', 'trigger', 'tail_tokens', 'summary_tokens', 'quote_count', 'quote_tokens'];
+const CMP_KEYS = ['window', 'method', 'parallel', 'ratio', 'trigger', 'tail_tokens', 'summary_tokens', 'quote_count', 'quote_tokens', 'quote_reply_chars'];
 // 壓縮用的上下文大小（設定頁填的）；0＝照模型。用量圈、上下文面板都用它算百分比
 async function loadCtxCap() {
   try { const p = (await api('GET', '/api/plugins')).find((r) => r.name === 'context'); S.ctxOn = !!(p && p.enabled); S.ctxCap = p && p.enabled ? Number((p.settings || {}).window) || 0 : 0; }
@@ -6343,6 +6344,7 @@ async function renderCompressSec(box) {
       ${row('c-sum', '摘要上限', '摘要最多幾 token（1000 到 30000），最多上下文的 10%。再壓縮時模型只改有變的行，沒變的程式原樣保留；超過上限才刪掉最舊、最不需要的細節。', num('summary_tokens', 1000, 30000, 'token', 'wide'))}
       ${row('c-quote', '附幾則原話', '摘要後面照抄你最近幾則原話（0 到 20，0＝不附）。更早的寫進摘要，原文用 session_search 查得到。', num('quote_count', 0, 20, '則'))}
       ${row('c-quotetok', '原話上限', '附的原話合計最多幾 token（0 到 20000）。', num('quote_tokens', 0, 20000, 'token', 'wide'))}
+      ${row('c-quotehead', '附助手開頭幾字', '每則原話前面附它回應的助手那則開頭幾字（0 到 2000，0＝不附）。先講結論的回覆，開頭就看得出你回的是什麼。', num('quote_reply_chars', 0, 2000, '字'))}
       ${row('c-ratio', '摘要幅度', '第一次寫摘要時，長度佔原文的百分比，5 到 60，建議 10 到 30；不超過摘要上限。', num('ratio', 5, 60, '%'))}
       ${row('c-method', '壓縮方式', '單次＝整段一次摘要。多工＝依字數分段，同時摘要後合併，長對話比較快。', seg('method', ['單次', '多工']))}
       ${row('c-parallel', '同時跑幾段', '只在多工時生效，1 到 8。', num('parallel', 1, 8, '段'))}
