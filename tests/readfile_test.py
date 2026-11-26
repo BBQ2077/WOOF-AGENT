@@ -342,14 +342,14 @@ class Upload(unittest.TestCase):
 
     def test_upload_then_reference(self):
         raw = os.urandom(3 * 1024 * 1024)
-        r = self.c.post("/api/files?name=05-115學測社會試卷.docx", content=raw, headers=self.h)
+        r = self.c.post("/api/files?name=試卷.docx", content=raw, headers=self.h)
         self.assertEqual(r.status_code, 200, r.text)
         j = r.json()
         self.assertEqual(j["bytes"], len(raw))
         self.assertTrue(j["path"].endswith(".docx"))
         self.assertEqual(Path(j["path"]).read_bytes(), raw)
         b = self.srv._save_files([{"name": j["name"], "path": j["path"]}])
-        self.assertEqual([(x["name"], x["bytes"]) for x in b], [("05-115學測社會試卷.docx", len(raw))])
+        self.assertEqual([(x["name"], x["bytes"]) for x in b], [("試卷.docx", len(raw))])
 
     def test_path_outside_files_ignored(self):
         outside = Path(tempfile.mkdtemp()) / "secret.txt"
