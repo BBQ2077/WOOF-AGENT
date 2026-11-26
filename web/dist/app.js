@@ -5089,6 +5089,119 @@ async function copyImageSrc(src, name) {
   } catch (e) { notify('error', '複製失敗', e.message); }
 }
 // 對話區右鍵：有選字＝複製選取；在連結上＝開啟／複製連結；在圖片上＝複製圖片；其他＝複製整則
+// ---- 離線英翻中（Firefox 的 Bergamot 模型，只用 CPU）：第一次用才下載、載入；閒置自動卸載
+const TR_KINDS = ['wasm', 'model', 'lex', 'srcvocab', 'trgvocab'];
+const TR = { w: null, st: 'off', ready: null, idle: 0, seq: 0, wait: {}, ms: 0, err: '' };
+const TR_DEF = { on: true, preload: false, idle: 5 };
+function trPrefs() { try { return { ...TR_DEF, ...JSON.parse(localStorage.getItem('woof.translate') || '{}') }; } catch { return { ...TR_DEF }; } }
+function trSavePrefs(p) { localStorage.setItem('woof.translate', JSON.stringify({ ...trPrefs(), ...p })); }
+function trRender() { const box = $('#trSec'); if (box) renderTranslateSec(box.parentElement); }
+async function trFiles() {
+  let s = await api('GET', '/api/translate');
+  if (!s.ready) {
+    s = await api('POST', '/api/translate/download');
+    TR.st = 'download'; trRender();
+    while (!s.ready) {
+      await new Promise((r) => setTimeout(r, 800));
+      s = await api('GET', '/api/translate');
+      if (s.job.state === 'error') throw new Error(s.job.error || '下載失敗');
+      TR.dl = s.job.total ? s.job.done / s.job.total : 0; trRender();
+    }
+    TR.st = 'loading'; trRender();
+  }
+  const files = {};
+  await Promise.all(TR_KINDS.map(async (k) => {
+    const r = await fetch(`${BASE}/api/translate/file/${k}`, { headers: { 'x-woof-token': TOKEN } });
+    if (!r.ok) throw new Error('讀不到模型檔');
+    files[k] = await r.arrayBuffer();
+  }));
+  return files;
+}
+function trLoad() {
+  if (TR.ready) return TR.ready;
+  TR.st = 'loading'; TR.err = ''; trRender();
+  TR.ready = (async () => {
+    const [glue, wsrc, files] = await Promise.all([
+      fetch('vendor/bergamot/bergamot-translator.js').then((r) => r.text()),
+      fetch('translate-worker.js').then((r) => r.text()), trFiles()]);
+    const url = URL.createObjectURL(new Blob([glue, '\n', wsrc], { type: 'text/javascript' }));
+    const w = new Worker(url);
+    URL.revokeObjectURL(url);
+    await new Promise((resolve, reject) => {
+      w.onmessage = (e) => {
+        const d = e.data || {};
+        if (d.type === 'ready') { TR.ms = d.ms; resolve(); }
+        else if (d.type === 'error') reject(new Error(d.error));
+        else if (d.id && TR.wait[d.id]) { const p = TR.wait[d.id]; delete TR.wait[d.id]; d.type === 'done' ? p.res(d.text) : p.rej(new Error(d.error)); }
+      };
+      w.onerror = (e) => reject(new Error(e.message || '翻譯引擎出錯'));
+      w.postMessage({ type: 'init', files }, Object.values(files));
+    });
+    TR.w = w; TR.st = 'ready'; trTouch(); trRender();
+  })().catch((e) => { trUnload(); TR.err = e.message; trRender(); throw e; });
+  return TR.ready;
+}
+function trUnload() {
+  if (TR.w) TR.w.terminate();
+  for (const p of Object.values(TR.wait)) p.rej(new Error('翻譯已卸載'));
+  Object.assign(TR, { w: null, ready: null, st: 'off', wait: {} });
+  clearTimeout(TR.idle); trRender();
+}
+function trTouch() { clearTimeout(TR.idle); const m = Number(trPrefs().idle) || 0; if (m > 0 && TR.w) TR.idle = setTimeout(trUnload, m * 60000); }
+async function trText(text) {
+  await trLoad();
+  const id = ++TR.seq;
+  try { return await new Promise((res, rej) => { TR.wait[id] = { res, rej }; TR.w.postMessage({ type: 'tr', id, text }); }); }
+  finally { trTouch(); }
+}
+function trShow(text, title = '翻譯') {
+  let out = '';
+  modal({
+    title, wide: true, ok: '複製翻譯', cancel: '關閉',
+    body: `<div class="tr-out md muted">${TR.w ? '翻譯中…' : '載入翻譯模型中…（第一次要下載約 55 MB）'}</div>`,
+    onOpen: async (m) => {
+      const box = $('.tr-out', m);
+      try { out = await trText(text); box.classList.remove('muted'); box.replaceChildren(md(out)); }
+      catch (e) { box.textContent = '翻譯失敗：' + e.message; }
+    },
+    onOk: () => { if (out) copyText(out); return !!out; },
+  });
+}
+setTimeout(() => { const p = trPrefs(); if (p.on && p.preload) trLoad().catch(() => {}); }, 3000);
+async function renderTranslateSec(box) {
+  const p = trPrefs();
+  let s = {};
+  try { s = await api('GET', '/api/translate'); } catch (e) { s = { ready: false, bytes: 0, job: {} }; }
+  const st = { off: '沒有載入', loading: '載入中…', download: `下載中… ${Math.round((TR.dl || 0) * 100)}%`, ready: `已載入（約 350 MB 記憶體）${TR.ms ? `，載入花 ${(TR.ms / 1000).toFixed(1)} 秒` : ''}` }[TR.st];
+  const seg = (k, opts) => `<div class="seg" data-trseg="${k}">${opts.map(([v, n]) => `<b data-v="${v}" class="${p[k] === v ? 'on' : ''}">${n}</b>`).join('')}</div>`;
+  const row = (t, h, ctl) => `<div class="frow"><div><b>${t}</b><small>${h}</small></div><div class="fctl">${ctl}</div></div>`;
+  box.innerHTML = `<div class="card" id="trSec" data-f="trSec">
+      ${row('右鍵翻譯', '在對話裡選取文字或在思考區塊上按右鍵，會出現「翻譯成中文」。關掉後選單不顯示，也不會載入模型。', seg('on', [[true, '開'], [false, '關']]))}
+      ${row('目前狀態', `${esc(st)}${TR.err ? `<br><span class="t-rl">${esc(TR.err)}</span>` : ''}`, `<span class="btn" data-trload>${TR.st === 'ready' ? '已載入' : '現在載入'}</span><span class="btn" data-trunload>現在卸載</span>`)}
+      ${row('WOOF 開啟時就載入', '開了之後每次開 WOOF 就先載入，第一次翻譯不用等；但會一直佔記憶體（除非閒置卸載）。', seg('preload', [[true, '開'], [false, '關']]))}
+      ${row('閒置幾分鐘自動卸載', '這麼久沒翻譯就卸載，把記憶體還給系統；0＝不自動卸載。再翻譯時重新載入（約 1 秒）。', `<label class="cin"><input type="number" data-tridle min="0" max="1440" value="${Number(p.idle) || 0}"><span>分鐘</span></label>`)}
+      ${row('模型檔', s.ready ? `已下載 ${fmtBytes(s.bytes)}（Mozilla Firefox 的英翻繁中模型 ${esc(s.version)} 版），放在 data/translate/` : '還沒下載。第一次載入時自動下載約 55 MB，逐一核對檔案。', s.ready ? '<span class="btn" data-trdel>刪除模型檔</span>' : '')}
+      <div class="cmp-foot"><span class="muted">翻譯在這台電腦上跑，只用 CPU，不連網、不送給模型、不存進對話。品質夠看懂大意，專有名詞偶爾會翻錯。</span></div>
+    </div>`;
+  box.onclick = async (e) => {
+    const sb = e.target.closest('[data-trseg] b');
+    if (sb) {
+      const k = sb.closest('[data-trseg]').dataset.trseg; trSavePrefs({ [k]: sb.dataset.v === 'true' });
+      if (k === 'on' && sb.dataset.v !== 'true') trUnload();
+      return renderTranslateSec(box);
+    }
+    if (e.target.closest('[data-trload]')) { trLoad().catch((err) => notify('error', '載入失敗', err.message)); return; }
+    if (e.target.closest('[data-trunload]')) { trUnload(); return; }
+    if (e.target.closest('[data-trdel]')) {
+      if (!await confirmBox('刪除翻譯模型檔？', '會先卸載，之後要翻譯時重新下載約 55 MB。', { danger: true, ok: '刪除' })) return;
+      trUnload(); await api('DELETE', '/api/translate'); renderTranslateSec(box);
+    }
+  };
+  box.onchange = (e) => {
+    const i = e.target.closest('[data-tridle]');
+    if (i) { trSavePrefs({ idle: Math.max(0, Math.min(1440, Number(i.value) || 0)) }); trTouch(); }
+  };
+}
 function chatCtxItems(e) {
   const items = [];
   const sel = String(window.getSelection() || '');
@@ -5125,7 +5238,11 @@ function chatCtxItems(e) {
   const th = e.target.closest('#chat details.think');
   if (th && !th.classList.contains('hidden')) {
     const t = th._th != null ? th._th : (th.dataset.sk === 'live-think' ? ((S.live[S.sid] || {}).thinking || '') : (($('.tx', th) || {}).textContent || ''));
-    if (t.trim()) { if (items.length) items.push('-'); items.push({ icon: 'copy', label: `複製思考過程（${t.length} 字）`, run: () => copyText(t) }); }
+    if (t.trim()) {
+      if (items.length) items.push('-');
+      items.push({ icon: 'copy', label: `複製思考過程（${t.length} 字）`, run: () => copyText(t) });
+      if (trPrefs().on && !sel.trim()) items.push({ label: '翻譯思考過程成中文', run: () => trShow(t, '思考過程（翻譯）') });
+    }
   }
   const msg = inBox && e.target.closest('#chat .msg');
   if (msg && !im) {
@@ -5136,6 +5253,7 @@ function chatCtxItems(e) {
   const pr = e.target.closest('pre');
   if (pr && !sel.trim()) items.push({ icon: 'copy', label: '複製程式碼', run: () => copyText((pr.querySelector('code') || pr).innerText) });
   if (sel.trim() && e.target.closest('#chat') && $('#input')) items.push({ label: '引用到輸入框', run: () => insertToInput(sel.split('\n').map((l) => '> ' + l).join('\n') + '\n') });
+  if (sel.trim() && trPrefs().on) items.push({ label: '翻譯選取的文字成中文', run: () => trShow(sel) });
   return items;
 }
 document.addEventListener('contextmenu', (e) => {
@@ -5586,6 +5704,7 @@ const SECTIONS = [
   ['skills', 'Skills', '有哪些 skill 文件、從哪些資料夾讀、勾選哪些（預設全部關閉）。讀寫的開關在「工具」。'],
   ['presets', '模式預設組', '把「哪些插件可用」和「工具權限」打包成一個模式，一鍵套用。'],
   ['general', '一般', '工作目錄、API 重試、指令逾時、終端機、可預覽的資料夾，以及執行中按 Enter 的行為。'],
+  ['translate', '翻譯', '右鍵把英文的思考過程或選取的文字翻成中文。用 Firefox 的離線模型在這台電腦上跑，只用 CPU。'],
   ['appearance', '外觀', '顏色、縮放與字級。只存在這台電腦，拉了立即生效。'],
   ['mcp', 'MCP 伺服器', 'WOOF 對外提供 MCP 工具，也可以連外部的 MCP 伺服器。'],
   ['snapshots', '檔案還原', '模型改檔前先存一份原檔，之後可以在對話的「檔案」分頁還原。'],
@@ -5598,7 +5717,7 @@ const SET_GROUPS = [
   ['對話', ['prompts', 'flow', 'styles', 'compress']],
   ['寵物', ['pet']],
   ['能力', ['perms', 'presets', 'tools', 'skills']],
-  ['環境', ['general', 'appearance', 'remote']],
+  ['環境', ['general', 'translate', 'appearance', 'remote']],
   ['進階', ['mcp', 'snapshots', 'about']],
 ];
 async function renderMcpSec(box) {
@@ -5846,6 +5965,7 @@ const SET_Q = {
     ['pfBox', '設定檔・人物檔・使用者檔・記憶檔', 'instructions SOUL USER MEMORY 記憶 人格'],
   ],
   styles: [['styList', '輸出風格', '風格 語氣 內建 自訂 置頂 新增']],
+  translate: [['trSec', '翻譯', '翻譯 英翻中 思考 右鍵 載入 卸載 模型 記憶體']],
   compress: [
     ['c-window', '上下文大小', 'context window token 上限 多少'],
     ['c-trigger', '壓縮門檻', '門檻 百分比 觸發 何時壓縮'],
@@ -6019,7 +6139,7 @@ function renderSettings() {
   const box = $('#setList');
   box.onclick = null;
   box.className = 'sec-' + sec[0];
-  ({ mcp: renderMcpSec, aux: renderAux, compress: renderCompressSec, prompts: renderPromptsSec, flow: renderFlowSec, vendors: renderVendors, keys: renderKeyEditor, appearance: renderAppearance, general: renderGeneral, perms: renderPermsSec, presets: renderPresetsSec, remote: renderRemoteSec, about: renderAbout, styles: renderStylesSec, pet: renderPetSec, snapshots: renderSnapshotsSec, tools: renderToolsSet, skills: renderSkillsSet })[sec[0]](box);}
+  ({ mcp: renderMcpSec, aux: renderAux, compress: renderCompressSec, prompts: renderPromptsSec, flow: renderFlowSec, vendors: renderVendors, keys: renderKeyEditor, appearance: renderAppearance, general: renderGeneral, translate: renderTranslateSec, perms: renderPermsSec, presets: renderPresetsSec, remote: renderRemoteSec, about: renderAbout, styles: renderStylesSec, pet: renderPetSec, snapshots: renderSnapshotsSec, tools: renderToolsSet, skills: renderSkillsSet })[sec[0]](box);}
 $('#setNav').onclick = (e) => { const d = e.target.closest('[data-sec]'); if (!d) return; setFindClear(); S.setSec = d.dataset.sec; localStorage.setItem('woof.setSec', S.setSec); renderSettings(); };
 $('#setQ').oninput = (e) => { S.setQ = e.target.value; renderSettings(); };
 $('#setQ').onkeydown = (e) => {

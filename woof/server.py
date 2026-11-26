@@ -569,6 +569,41 @@ async def session_snapshot_restore(sid: str, body: dict):
     return r
 
 
+@app.get("/api/translate")
+async def translate_status():
+    """離線英翻中的模型：下載了沒、多大、下載進度。"""
+    from . import translate
+
+    return translate.status()
+
+
+@app.post("/api/translate/download")
+async def translate_download():
+    """在背景下載模型（已有且核對正確的不重抓）；進度用 GET /api/translate 看。"""
+    from . import translate
+
+    asyncio.get_running_loop().run_in_executor(None, translate.download)
+    return translate.status()
+
+
+@app.delete("/api/translate")
+async def translate_remove():
+    from . import translate
+
+    await asyncio.to_thread(translate.remove)
+    return translate.status()
+
+
+@app.get("/api/translate/file/{kind}")
+async def translate_file(kind: str):
+    from . import translate
+
+    p = translate.path_of(kind)
+    if not p:
+        raise HTTPException(404, "模型還沒下載")
+    return FileResponse(str(p), media_type="application/wasm" if kind == "wasm" else "application/octet-stream")
+
+
 @app.get("/api/snapshots")
 async def snapshots_usage():
     """檔案快照佔多少空間、保留規則。"""

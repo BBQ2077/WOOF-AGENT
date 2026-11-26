@@ -25,7 +25,7 @@
   window.WOOF_CONN = conn;
 
   var SHARED = ['woof.theme', 'woof.look', 'woof.model', 'woof.pins', 'woof.mgrpOpen', 'woof.effortWant',
-    'woof.effortLastOn', 'woof.busy', 'woof.lang', 'woof.perm', 'woof.gate'];
+    'woof.effortLastOn', 'woof.busy', 'woof.lang', 'woof.perm', 'woof.gate', 'woof.translate'];
   var isShared = function (k) { return SHARED.indexOf(k) >= 0; };
   var ls = window.localStorage;
   var proto = Storage.prototype;
