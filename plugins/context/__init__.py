@@ -8,7 +8,8 @@
 
 設定（插件 context）：
   window    壓縮用的上下文大小（token）；0＝照模型的 context_window
-  trigger   用量達到上下文大小的幾 % 就壓縮：回合結束後在背景做；回合進行中、送出前超過也會先壓縮
+  trigger   用量達到上下文大小的幾 % 就在背景壓縮（回合結束後、回合進行中都是），對話照常進行，寫好後下一次送出開始用
+  wait_at   用量到上下文大小的幾 % 時背景那份還沒好，才停下來等它（或當場壓縮）
   tail_tokens   壓縮後原樣保留的最近訊息（token，照模型實際算法校正過）；至少留最後一步
   quote_count   摘要後面附上被壓縮那段裡使用者最近幾則原話
   quote_tokens  附的原話合計最多幾 token
@@ -399,8 +400,26 @@ def register(woof):
         return (await loop.complete(model, snap["system"], msgs, tools=snap["specs"], effort=snap["effort"],
                                     session_id=sid, kind="compact")).strip()
 
-    async def _precompact(session_id: str, model: dict, registry, emit) -> None:
-        job = SimpleNamespace(session_id=session_id, model_cfg=model, registry=registry, emit=emit,
+    def _wait_at() -> float:
+        return max(0.1, min(0.99, float(woof.settings.get("wait_at", 90) or 90) / 100.0))
+
+    def _used_ratio(sid: str, model: dict) -> float:
+        from woof import tokens
+
+        window = tokens.window_of(model, sid)
+        return tokens.current(sid)["used"] / window if window else 0.0
+
+    def _start_bg(ctx) -> None:
+        """在背景壓縮；同一個對話已經有一個在跑就不再開"""
+        sid = ctx.session_id
+        t = _bg.get(sid)
+        if t and not t.done():
+            return
+        _bg[sid] = asyncio.create_task(_precompact(sid, ctx.model_cfg, ctx.registry, ctx.emit,
+                                                   mid=bool(getattr(ctx, "mid_turn", False))))
+
+    async def _precompact(session_id: str, model: dict, registry, emit, mid: bool = False) -> None:
+        job = SimpleNamespace(session_id=session_id, model_cfg=model, registry=registry, emit=emit, mid_turn=mid,
                               force_compact=False, is_bg=True, threshold=_trigger(), compact_reason="", compact_count=0)
         try:
             await prepare_turn(job)
@@ -411,8 +430,6 @@ def register(woof):
                 pass
 
     async def after_turn(ctx):
-        from woof import store
-
         from woof import tokens
 
         window = tokens.window_of(ctx.model_cfg, ctx.session_id)
@@ -422,9 +439,7 @@ def register(woof):
         used = tokens.current(ctx.session_id)["used"]
         if used / window < _trigger():
             return
-        if ctx.session_id in _bg and not _bg[ctx.session_id].done():
-            return
-        _bg[ctx.session_id] = asyncio.create_task(_precompact(ctx.session_id, ctx.model_cfg, ctx.registry, ctx.emit))
+        _start_bg(ctx)
 
     # 同一個對話一次只壓一個：手動、回合中、背景共用一把鎖。
     # 鎖用 async with，成功、失敗、被叫停都會放掉；手動和背景另有時間上限，卡住也不會永遠鎖死
@@ -450,9 +465,25 @@ def register(woof):
 
         sid = ctx.session_id
         pending_bg = _bg.get(sid)
-        if pending_bg and not pending_bg.done() and not getattr(ctx, "force_compact", False) and not getattr(ctx, "is_bg", False):
-            await pending_bg  # 背景摘要還在跑，等它完成，下一回合直接用結果
+        running = bool(pending_bg and not pending_bg.done())
+        force = bool(getattr(ctx, "force_compact", False))
         manual = bool(getattr(ctx, "manual", False))
+        if not force and not manual and not getattr(ctx, "is_bg", False):
+            # 回合開始、回合中每一步：超過門檻就交給背景寫摘要，這一步照常送（不等）；
+            # 背景寫好後，下一次送出自動換成「摘要＋最近幾則」。用量到等待線還沒好，才停下來等
+            r = _used_ratio(sid, ctx.model_cfg)
+            if r < _trigger():
+                return None
+            if r < _wait_at():
+                _start_bg(ctx)
+                return None
+            if running:
+                await pending_bg
+                if _used_ratio(sid, ctx.model_cfg) < _wait_at():
+                    return True
+        elif force and not manual and running:
+            await pending_bg   # 上下文已經爆了，背景那份正在寫：等它好就用，不重複壓縮
+            return True
         if manual and sid in COMPACTING:
             ctx.compact_reason = "這個對話正在壓縮，等這次做完；不會重複壓縮"
             return
@@ -605,6 +636,8 @@ def register(woof):
         why = (getattr(ctx, "compact_reason", "") or "手動壓縮") if force else f"上下文已用 {used / window:.0%}"
         if mid:
             why = "回合進行中，" + why
+        if getattr(ctx, "is_bg", False):
+            why += "，在背景寫摘要（對話照常進行，寫好後下一次送出開始用）"
         ctx.compact_count = len(older)
         await _compact_state(ctx, True)
         await ctx.emit({"type": "notice", "session_id": ctx.session_id,

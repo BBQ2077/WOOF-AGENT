@@ -344,9 +344,13 @@ class PruneBeforeSummary(unittest.TestCase):
 
         ctx = types.SimpleNamespace(session_id=sid, model_cfg={"id": "m", "provider": "p", "context_window": 100000},
                                     registry=types.SimpleNamespace(providers={"p": object()}), emit=emit)
-        r = asyncio.run(hooks["prepare_turn"](ctx))
+        async def turn():
+            r = await hooks["prepare_turn"](ctx)   # 超過門檻：交給背景，回合不等
+            await mod._bg[sid]
+            return r
+        r = asyncio.run(turn())
         es = store.get_session(sid)["engine_state"]
-        self.assertTrue(r)
+        self.assertFalse(r)
         self.assertIn("prune", es)
         self.assertNotIn("summary", es)
         self.assertTrue(any("先清掉 1 個" in (e.get("text") or "") for e in events))

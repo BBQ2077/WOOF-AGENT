@@ -1230,6 +1230,7 @@ async def run_model_loop(ctx: TurnContext) -> None:
             # 快到步數上限：先提醒模型收尾，不要做到一半被硬切
             await _add_internal(ctx, "steps_low", _P("steps_low", left=5, total=max_steps))
         system = await system_for(ctx)
+        sig0 = req_sig(ctx.session_id)
         hist = history(ctx.session_id)
         through = hist[-1]["id"] if hist else 0
         messages = await REG.events.pipe("before_request", hist, ctx)
@@ -1298,11 +1299,13 @@ async def run_model_loop(ctx: TurnContext) -> None:
                         # input_tokens 已含快取讀寫；上下文用量＝輸入＋輸出。through＝這次請求包含到哪一則（用量錨點）
                         usage["context_used"] = int(usage.get("input_tokens") or 0) + int(usage.get("output_tokens") or 0)
                         usage["through"] = through
-                        await ctx.emit({"type": "usage", "session_id": ctx.session_id, **usage})
-                        st = store.get_session(ctx.session_id) or {}
-                        es = st.get("engine_state") or {}
-                        es["usage"] = usage
-                        store.update_session(ctx.session_id, engine_state=es)
+                        # 送出後背景剛好壓縮完：這份是壓縮前的用量，不拿來當錨點（否則會以為又該壓縮）
+                        if req_sig(ctx.session_id) == sig0:
+                            await ctx.emit({"type": "usage", "session_id": ctx.session_id, **usage})
+                            st = store.get_session(ctx.session_id) or {}
+                            es = st.get("engine_state") or {}
+                            es["usage"] = usage
+                            store.update_session(ctx.session_id, engine_state=es)
                         store.log_usage(ctx.session_id, ctx.model_cfg.get("id"), usage)
                         cachediag.finish(ctx.session_id, in_tok, cache_tok)
                     elif t == "notice":

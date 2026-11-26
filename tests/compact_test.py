@@ -188,5 +188,88 @@ class Flow(unittest.TestCase):
         self.assertIn("2. 跑測試全過", summ["text"])
 
 
+class Background(unittest.TestCase):
+    """超過門檻：交給背景寫摘要，對話不等；到等待線才等"""
+
+    def setUp(self):
+        Flow.setUp(self)
+        self.ctx.force_compact, self.ctx.manual, self.ctx.mid_turn = False, False, True
+        C._bg.clear()
+
+    def set_used(self, n):
+        es = dict(store.get_session(self.sid)["engine_state"])
+        es["usage"] = dict(es["usage"], context_used=n, input_tokens=n)
+        store.update_session(self.sid, engine_state=es)
+
+    def run_bg(self, used, wait_at=None):
+        if wait_at is not None:
+            self.fake.settings["wait_at"] = wait_at
+        self.set_used(used)
+        gate, out = asyncio.Event(), {}
+
+        async def complete(model, system, messages, *a, **k):
+            await gate.wait()
+            return "@@ 插 5\n3. 背景寫的摘要"
+
+        async def main():
+            with unittest.mock.patch.object(loop, "complete", complete), \
+                    unittest.mock.patch.object(loop, "aux_model", lambda task, fb: None):
+                step = asyncio.create_task(self.hooks["mid_turn"](self.ctx))
+                await asyncio.sleep(0.05)
+                out["returned_before_summary"] = step.done()
+                out["bg_running"] = bool(C._bg.get(self.sid)) and not C._bg[self.sid].done()
+                gate.set()
+                out["result"] = await step
+                if C._bg.get(self.sid):
+                    await C._bg[self.sid]
+        asyncio.run(main())
+        return out
+
+    def test_over_trigger_runs_in_background(self):
+        out = self.run_bg(60000)
+        self.assertTrue(out["returned_before_summary"])      # 這一步照常送，不等摘要
+        self.assertTrue(out["bg_running"])
+        self.assertFalse(out["result"])
+        summ = store.get_session(self.sid)["engine_state"]["summary"]
+        self.assertIn("背景寫的摘要", summ["text"])           # 寫好後存起來，下一次送出就用
+        self.assertTrue(any("在背景寫摘要" in (e.get("text") or "") for e in self.events))
+
+    def test_over_wait_line_waits(self):
+        out = self.run_bg(95000)
+        self.assertFalse(out["returned_before_summary"])     # 快爆了：停下來等
+        self.assertTrue(out["result"])
+        self.assertIn("背景寫的摘要", store.get_session(self.sid)["engine_state"]["summary"]["text"])
+
+    def test_overflow_while_background_running_uses_it(self):
+        self.set_used(60000)
+        gate, n = asyncio.Event(), []
+
+        async def complete(model, system, messages, *a, **k):
+            n.append(1)
+            await gate.wait()
+            return "@@ 插 5\n3. 背景寫的摘要"
+
+        async def main():
+            with unittest.mock.patch.object(loop, "complete", complete), \
+                    unittest.mock.patch.object(loop, "aux_model", lambda task, fb: None):
+                await self.hooks["mid_turn"](self.ctx)           # 開始背景壓縮
+                await asyncio.sleep(0.05)
+                self.ctx.force_compact = True                     # 這時模型回報上下文爆了
+                forced = asyncio.create_task(self.hooks["mid_turn"](self.ctx))
+                await asyncio.sleep(0.05)
+                self.assertFalse(forced.done())                   # 等背景那份
+                gate.set()
+                return await forced
+        self.assertTrue(asyncio.run(main()))
+        self.assertEqual(len(n), 1)                               # 只寫一次摘要
+        self.assertEqual(store.get_session(self.sid)["engine_state"]["compress_count"], 1)
+
+    def test_under_trigger_nothing(self):
+        out = self.run_bg(30000)
+        self.assertFalse(out["result"])
+        self.assertFalse(out["bg_running"])
+        self.assertIn("做 A", store.get_session(self.sid)["engine_state"]["summary"]["text"])
+
+
 if __name__ == "__main__":
     unittest.main()

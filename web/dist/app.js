@@ -5968,7 +5968,8 @@ const SET_Q = {
   translate: [['trSec', '翻譯', '翻譯 英翻中 思考 右鍵 載入 卸載 模型 記憶體']],
   compress: [
     ['c-window', '上下文大小', 'context window token 上限 多少'],
-    ['c-trigger', '壓縮門檻', '門檻 百分比 觸發 何時壓縮'],
+    ['c-trigger', '壓縮門檻', '門檻 百分比 觸發 何時壓縮 背景'],
+    ['c-wait', '等待線', '等待 等 背景 爆掉 上限'],
     ['c-tail', '原樣保留多少', '保留 尾段 最近 token'],
     ['c-sum', '摘要上限', '摘要 上限 長度 token'],
     ['c-quote', '附幾則原話', '原話 使用者 引用 則數'],
@@ -6416,7 +6417,7 @@ async function pfSave(auto) {
   } catch (e) { const d = $('#pfDirty'); if (d) d.innerHTML = `<span class="qerr">沒存到：${esc(e.message)}</span>`; }
 }
 // ---- 壓縮（設定存在 context 插件，儲存後插件會重新載入）
-const CMP_KEYS = ['window', 'method', 'parallel', 'ratio', 'trigger', 'tail_tokens', 'summary_tokens', 'quote_count', 'quote_tokens', 'quote_reply_chars'];
+const CMP_KEYS = ['window', 'method', 'parallel', 'ratio', 'trigger', 'wait_at', 'tail_tokens', 'summary_tokens', 'quote_count', 'quote_tokens', 'quote_reply_chars'];
 // 壓縮用的上下文大小（設定頁填的）；0＝照模型。用量圈、上下文面板都用它算百分比
 async function loadCtxCap() {
   try { const p = (await api('GET', '/api/plugins')).find((r) => r.name === 'context'); S.ctxOn = !!(p && p.enabled); S.ctxCap = p && p.enabled ? Number((p.settings || {}).window) || 0 : 0; }
@@ -6451,12 +6452,13 @@ async function renderCompressSec(box) {
   const capNow = cm && cm.context_window ? `<br>目前的模型 ${esc(cm.label)}：${Number(cm.context_window).toLocaleString()} token。` : '';
   box.innerHTML = `
     <div class="card cmp">
-      <div class="cmp-sum">目前：上下文 <b>${Number(val('window')) ? Number(val('window')).toLocaleString() + ' token' : '照模型'}</b>・用到 <b>${esc(String(val('trigger')))}%</b> 壓縮・原樣保留 <b>${Number(val('tail_tokens')).toLocaleString()} token</b>・摘要上限 <b>${Number(val('summary_tokens')).toLocaleString()} token</b>・附原話 <b>${esc(String(val('quote_count')))} 則</b>・<b>${method}</b>${method === '多工' ? `（一次 ${esc(String(val('parallel')))} 段）` : ''}</div>
+      <div class="cmp-sum">目前：上下文 <b>${Number(val('window')) ? Number(val('window')).toLocaleString() + ' token' : '照模型'}</b>・用到 <b>${esc(String(val('trigger')))}%</b> 背景壓縮、<b>${esc(String(val('wait_at')))}%</b> 才等・原樣保留 <b>${Number(val('tail_tokens')).toLocaleString()} token</b>・摘要上限 <b>${Number(val('summary_tokens')).toLocaleString()} token</b>・附原話 <b>${esc(String(val('quote_count')))} 則</b>・<b>${method}</b>${method === '多工' ? `（一次 ${esc(String(val('parallel')))} 段）` : ''}</div>
     </div>
     <div class="cmp-h">什麼時候壓縮</div>
     <div class="card cmp">
       ${row('c-window', '上下文大小', `0＝照模型本身的上下文窗口。填 100000 就當作只有 10 萬：壓縮門檻和對話框的用量圈都用它算。比模型本身大時以模型為準。${capNow}`, num('window', 0, 10000000, 'token', 'wide'))}
-      ${row('c-trigger', '壓縮門檻', '用量達到上下文大小的這個百分比，就把較早的對話摘要起來。平常是回合結束後在背景做，你看回覆時就壓好了；同一回合工具結果疊太多、超過門檻時，會先壓縮再繼續。', num('trigger', 10, 95, '%'))}
+      ${row('c-trigger', '壓縮門檻', '用量達到上下文大小的這個百分比，就在背景把較早的對話寫成摘要。回合結束後、回合進行中都一樣：對話照常往下跑，不用等；寫好後下一次送出開始用「摘要＋最近幾則」。', num('trigger', 10, 95, '%'))}
+      ${row('c-wait', '等待線', '用量到這個百分比時，背景的摘要還沒寫好，才停下來等它（沒在寫就當場壓縮），免得上下文爆掉。比壓縮門檻低或一樣＝每次都等。', num('wait_at', 10, 99, '%'))}
     </div>
     <div class="cmp-h">怎麼壓縮</div>
     <div class="card cmp">
