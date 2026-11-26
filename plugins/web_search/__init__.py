@@ -15,11 +15,22 @@ tavily_keyless 是 Tavily 官方免 key 端點（/search、/extract，帶 X-Tavi
 from __future__ import annotations
 
 import calendar
+import hashlib
+import importlib.util
+import json
 import time
+from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 
+# 同資料夾的 page.py（插件不是一般套件，用檔案路徑載入）
+_spec = importlib.util.spec_from_file_location(__name__ + "_page", Path(__file__).with_name("page.py"))
+page = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(page)
+
 _TIMEOUT = httpx.Timeout(30.0, read=90.0)
+CACHE_TTL = 3600   # 同一網址一小時內再擷取直接讀存檔
 _COOL: dict[tuple[str, str], float] = {}   # (免 key 服務, search/extract) → 暫停到幾點
 
 
@@ -61,8 +72,74 @@ def register(woof):
     def limit() -> int:
         return max(1, min(int(woof.settings.get("results") or 5), 10))
 
-    def chars() -> int:
-        return max(2000, int(woof.settings.get("extract_chars") or 12000))
+    def num(key: str, dflt: int, lo: int) -> int:
+        try:
+            return max(lo, int(woof.settings.get(key) or dflt))
+        except (TypeError, ValueError):
+            return dflt
+
+    def cache_dir():
+        from woof.config import DATA
+        d = DATA / "web"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def cache_path(url: str):
+        host = (urlparse(url).hostname or "page").replace(":", "_")
+        return cache_dir() / f"{host}-{hashlib.sha1(url.encode()).hexdigest()[:10]}.md"
+
+    def cache_get(url: str) -> dict | None:
+        p = cache_path(url)
+        meta = p.with_suffix(".json")
+        if not p.exists() or not meta.exists() or time.time() - p.stat().st_mtime > CACHE_TTL:
+            return None
+        try:
+            m = json.loads(meta.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return {"url": url, "text": p.read_text(encoding="utf-8"), "title": m.get("title", ""),
+                "desc": m.get("desc", ""), "path": str(p), "raw": m.get("raw", 0)}
+
+    def cache_put(url: str, md: str, title: str, desc: str) -> dict:
+        text = page.clean(md)
+        p = cache_path(url)
+        p.write_text(text, encoding="utf-8")
+        p.with_suffix(".json").write_text(json.dumps({"url": url, "title": title, "desc": desc, "raw": len(md or "")},
+                                                     ensure_ascii=False), encoding="utf-8")
+        old = time.time() - 7 * 86400   # 存檔留 7 天
+        for f in cache_dir().iterdir():
+            try:
+                if f.stat().st_mtime < old:
+                    f.unlink()
+            except OSError:
+                pass
+        return {"url": url, "text": text, "title": title, "desc": desc, "path": str(p), "raw": len(md or "")}
+
+    def render(d: dict, keys: list[str], full: bool) -> str:
+        text, heads = d["text"], page.outline(d["text"])
+        title = d["title"] or next((t for lv, t, _n in heads if lv == 1), "") or "（無標題）"
+        lines = len(text.split("\n"))
+        out = [f"## {title}", d["url"]]
+        if d["desc"]:
+            out.append(f"摘要：{d['desc'].strip()[:300]}")
+        out.append(f"全文 {len(text)} 字、{lines} 行（已去掉選單、圖片碼等雜訊），存檔：{d['path']}")
+        if full or len(text) <= num("preview_chars", 4000, 1000):
+            return "\n".join(out) + "\n\n" + (text or "（沒有內容）")
+        toc = page.outline_text(heads, num("outline_chars", 600, 200))
+        if toc:
+            out += ["", "### 目錄（H1–H3，括號是存檔行號）", toc]
+        hit_n, lead_n = num("hit_chars", 3000, 500), num("lead_chars", 500, 100)
+        body, nhit, nshow = page.find(text, keys, hit_n) if keys else ("", 0, 0)
+        out += ["", "### 開頭", page.lead(text, lead_n if body else lead_n + hit_n)]
+        if keys:
+            kw = "、".join(f"「{k}」" for k in keys)
+            if body:
+                out += ["", f"### 關鍵字 {kw}：{nhit} 段命中，列出最相關的 {nshow} 處", body]
+            else:
+                out += ["", f"### 關鍵字 {kw}：全文沒有找到"]
+        out += ["", f"（這是預覽。整篇：同網址加 full=true；某一節：read_file path=\"{d['path']}\" offset=目錄行號；"
+                    f"換關鍵字：同網址改 find，讀存檔不重抓）"]
+        return "\n".join(out)
 
     async def _post(client: httpx.AsyncClient, url: str, key: str, body: dict) -> dict:
         if key:
@@ -103,12 +180,14 @@ def register(woof):
             data = await _post(client, "https://api.firecrawl.dev/v2/scrape", key,
                                {"url": url, "formats": ["markdown"]})
             d = data.get("data") or {}
-            out.append((url, d.get("markdown") or d.get("content") or "（沒有內容）"))
+            m = d.get("metadata") or {}
+            out.append((url, d.get("markdown") or d.get("content") or "", m.get("title") or "", m.get("description") or ""))
         return out
 
     async def _extract_tavily(client, key: str, urls: list[str]) -> list[tuple[str, str]]:
-        data = await _post(client, "https://api.tavily.com/extract", key, {"urls": urls})
-        return [(it.get("url", ""), it.get("raw_content") or "（沒有內容）") for it in (data.get("results") or [])]
+        data = await _post(client, "https://api.tavily.com/extract", key, {"urls": urls, "format": "markdown"})
+        return [(it.get("url", ""), it.get("raw_content") or "", it.get("title") or "", "")
+                for it in (data.get("results") or [])]
 
     SEARCH = {"firecrawl": _search_firecrawl, "tavily": _search_tavily,
               "firecrawl_keyless": lambda c, _k, q: _search_firecrawl(c, None, q),
@@ -130,7 +209,7 @@ def register(woof):
             return "invalid", now + 86400 * 365
         return None
 
-    async def _run(kind: str, arg) -> str:
+    async def _run(kind: str, arg, fmt=None) -> str:
         table = SEARCH if kind == "search" else EXTRACT
         tried = []
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
@@ -157,8 +236,7 @@ def register(woof):
                         continue
                     if kind == "search":
                         return f"（{who} 免 key）\n" + result
-                    blocks = [f"## {u}\n\n{_clip(body, chars())}" for u, body in result]
-                    return f"（{who} 免 key）\n" + ("\n\n".join(blocks) or "沒有擷取到內容。")
+                    return f"（{who} 免 key）\n" + fmt(result)
                 pool = woof.keys(name)
                 while True:
                     entry = pool.get()
@@ -179,8 +257,7 @@ def register(woof):
                     head = f"（{name} / {entry.label}）\n" if tried else ""
                     if kind == "search":
                         return head + result
-                    blocks = [f"## {u}\n\n{_clip(body, chars())}" for u, body in result]
-                    return head + ("\n\n".join(blocks) or "沒有擷取到內容。")
+                    return head + fmt(result)
         return "所有搜尋服務都無法使用：\n" + "\n".join(f"- {t}" for t in tried) + "\n請到「額度」面板查看各 key 狀態，或在 keys.toml 加 key。"
 
     async def web_search(args: dict, ctx) -> dict:
@@ -196,12 +273,33 @@ def register(woof):
         bad = [u for u in urls if not u.startswith(("http://", "https://"))]
         if bad:
             return {"output": "網址必須以 http:// 或 https:// 開頭：" + ", ".join(bad), "is_error": True}
-        return {"output": await _run("extract", urls)}
+        raw_find = args.get("find") or []
+        if isinstance(raw_find, str):
+            raw_find = raw_find.replace("，", ",").split(",")
+        keys = [k.strip() for k in raw_find if isinstance(k, str) and k.strip()][:8]
+        full = bool(args.get("full"))
+        done = {u: c for u in urls if (c := cache_get(u))}
+        miss = [u for u in urls if u not in done]
+        note = ""
+        if miss:
+            def fmt(result):
+                for u, md, title, desc in result:
+                    if md:
+                        done[u] = cache_put(u, md, title, desc)
+                return ""
+            note = await _run("extract", miss, fmt)
+        blocks = [render(done[u], keys, full) if u in done else f"## {u}\n\n沒有擷取到內容。" for u in urls]
+        return {"output": (note + "\n" if note.strip() else "") + "\n\n".join(blocks)}
 
     woof.add_tool("web_search", "搜尋網路，回傳標題、網址和摘要。需要網頁全文時再用 web_extract。",
                   {"type": "object", "properties": {"query": {"type": "string", "description": "搜尋關鍵字"}},
                    "required": ["query"]}, web_search)
-    woof.add_tool("web_extract", "擷取最多 5 個網頁的全文（Markdown）。",
+    woof.add_tool("web_extract", "擷取最多 5 個網頁。短的直接給全文；長的先給預覽：標題、摘要、H1–H3 目錄（附存檔行號）、開頭，"
+                  "以及 find 關鍵字命中的段落和前後文。全文都會存檔：要整篇設 full=true，要某一節用 read_file 加目錄行號；"
+                  "同網址換 find 或改 full 會讀存檔，不重抓。",
                   {"type": "object", "properties": {
-                      "urls": {"type": "array", "items": {"type": "string"}, "description": "網址，最多 5 個"}},
+                      "urls": {"type": "array", "items": {"type": "string"}, "description": "網址，最多 5 個"},
+                      "find": {"type": "array", "items": {"type": "string"},
+                               "description": "想在頁面裡找的字詞，可以多個；不確定找什麼就不填"},
+                      "full": {"type": "boolean", "description": "true＝直接給整篇全文"}},
                    "required": ["urls"]}, web_extract)

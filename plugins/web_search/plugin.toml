@@ -25,7 +25,22 @@ type = "number"
 default = 5
 label = "搜尋結果數量（1–10）"
 
-[settings.extract_chars]
+[settings.preview_chars]
 type = "number"
-default = 12000
-label = "擷取網頁時每頁最多字數"
+default = 4000
+label = "擷取網頁：清掉雜訊後不到這個字數就直接給全文，超過才給預覽"
+
+[settings.hit_chars]
+type = "number"
+default = 3000
+label = "擷取網頁的預覽：關鍵字命中段落（含前後文）最多幾字"
+
+[settings.lead_chars]
+type = "number"
+default = 500
+label = "擷取網頁的預覽：開頭給幾字（沒有給關鍵字時再加上命中段落的字數）"
+
+[settings.outline_chars]
+type = "number"
+default = 600
+label = "擷取網頁的預覽：H1–H3 目錄最多幾字（太長時只列 H1、H2）"
