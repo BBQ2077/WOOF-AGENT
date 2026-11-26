@@ -115,5 +115,54 @@ class Preview(unittest.TestCase):
         self.assertTrue(P.lead(P.clean(md), 300).startswith("**圍棋**"))
 
 
+class Pages(unittest.TestCase):
+    """仿常見網站結構的清理規則。"""
+
+    def test_anchor_headings_kept(self):
+        md = "## [What Is Ownership?](#what-is-ownership)\n\n" + para("a") + "\n\n### [語法](https://x.org/map#語法)\n\n" + para("b")
+        self.assertEqual([t for _l, t, _n in P.outline(P.clean(md))], ["What Is Ownership?", "語法"])
+
+    def test_list_item_headings(self):
+        md = "1. ## [Actual curl rewrites](https://daniel.example/a)\n\n   via dasm\n\n01. [41](/login)\n\n    ## [Slow response times](https://ow.example/b)\n\n    via hanno"
+        t = P.clean(md)
+        self.assertEqual([x for _l, x, _n in P.outline(t)], ["Actual curl rewrites", "Slow response times"])
+        self.assertIn("41", P.plain(t, "lobste.rs"))
+
+    def test_news_list_keeps_links(self):
+        items = "\n".join(f"- [![圖{i}](https://img.example/{i}.jpg)\\\\\n\\\\\n**第{i}則新聞的標題寫得夠長才像新聞** 2026/11/26 07:2{i}](https://www.cna.com.tw/news/{i}.aspx)"
+                          for i in range(6))
+        menu = "\n".join(f"- [選單{i}](https://www.cna.com.tw/m{i})" for i in range(6))
+        s = P.plain(P.clean(f"{menu}\n\n# 國際\n\n{items}"), "www.cna.com.tw")
+        self.assertIn("[**第3則新聞的標題寫得夠長才像新聞** 2026/11/26 07:23](https://www.cna.com.tw/news/3.aspx)", s)
+        self.assertNotIn("選單", s)
+        self.assertNotIn("img.example", s)
+
+    def test_ui_residue(self):
+        md = ("# A\n\n{{ item.subject }}\n\nLoading...\n\nUh oh!\n\nThere was a problem hiding this comment.\n\n"
+              "Bibliographic Explorer Toggle\n\n真的內文。\n\nopened on Oct 13, 2015on Oct 13, 2015\n\n"
+              "Jon 28.1k2222 gold badges124124 silver badges159159 bronze badges\n\n"
+              "via jon | [Archive.org](https://web.archive.org/web/3/x)\n\n參考 [外站](https://other.example/) 的說明。")
+        s = P.plain(P.clean(md), "a.example")
+        for junk in ("{{", "Loading", "Uh oh", "hiding this", "Toggle", "web.archive.org"):
+            self.assertNotIn(junk, s)
+        self.assertIn("真的內文", s)
+        self.assertIn("opened on Oct 13, 2015\n", s + "\n")
+        self.assertIn("28.1k 22 gold badges 124 silver badges 159 bronze badges", s)
+        self.assertIn("[外站](https://other.example/)", s)
+
+    def test_outline_skips_counts_and_duplicates(self):
+        md = "# Q\n\n" + "\n\n".join(f"## 51 Answers\n\n{para(f'x{k}', 2)}\n\n## 方法\n\n{para(f'y{k}', 2)}\n\n## 13 Comments\n\n留言{k}。" for k in range(3))
+        self.assertEqual([t for _l, t, _n in P.outline(P.clean(md))], ["Q", "方法"])
+
+    def test_section_of_links_under_heading_dropped(self):
+        md = "# 專案\n\n" + para("a") + "\n\n## Latest commit\n\n[v0.4](https://g.example/c/1) [5a5dd58](https://g.example/c/1)\n\n## 安裝\n\n先下載。\n\n## 规则\n\n主条目：[围棋规则](https://w.example/r)\n\n### 基本规则\n\n" + para("b")
+        self.assertEqual([t for _l, t, _n in P.outline(P.clean(md))], ["專案", "安裝", "规则", "基本规则"])
+
+    def test_list_page_lead_has_titles(self):
+        md = "\n\n".join(f"## [第{i}篇文章的標題](https://ext{i}.example/)\n\nexample.com\n\nvia user {i} hours ago" for i in range(40))
+        ld = P.lead(P.clean(md), 500, "lobste.rs")
+        self.assertIn("第0篇文章的標題", ld)
+
+
 if __name__ == "__main__":
     unittest.main()
