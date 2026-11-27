@@ -1588,16 +1588,28 @@ async def _close_ptys():
 
 @app.on_event("startup")
 async def _start_mcp():
-    from . import mcp_server
-
     mc = load_config().get("mcp") or {}
     if mc.get("enabled") is False:
         _MCP["error"] = "已在 config.toml 關閉 MCP"
         return
-    port = int(mc.get("port") or mcp_server.DEFAULT_PORT)
-    _MCP["port"] = port
-    app_mcp = mcp_server.asgi_app(REG, _mcp_run)
-    asyncio.create_task(mcp_server.serve(app_mcp, port, _MCP))
+    from . import mcp_server   # 這個檔很輕；重的 mcp 套件在 _serve_mcp 裡背景匯入
+
+    _MCP["port"] = int(mc.get("port") or mcp_server.DEFAULT_PORT)
+    asyncio.create_task(_serve_mcp(_MCP["port"]))
+
+
+async def _serve_mcp(port: int) -> None:
+    """MCP 套件有兩百多個模組，剛開機硬碟還冷時匯入要很久；放背景匯入，主程式先回報啟動完成。"""
+    import importlib
+
+    try:
+        await asyncio.to_thread(importlib.import_module, "mcp.server")   # 慢的是這個；匯入完再在主執行緒建
+        from . import mcp_server
+
+        await mcp_server.serve(mcp_server.asgi_app(REG, _mcp_run), port, _MCP)
+    except Exception as e:
+        _MCP.update(running=False, error=f"MCP 伺服器沒有啟動：{type(e).__name__}: {e}")
+        logging.getLogger("woof").exception("MCP 伺服器沒有啟動")
 
 
 @app.get("/api/mcp/info")

@@ -63,11 +63,16 @@ def main() -> None:
             stream.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
         except Exception:
             pass
+    for name in ("woof.log", "desktop.log"):
+        _rotate_log(DATA / name)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         handlers=[logging.FileHandler(DATA / "woof.log", encoding="utf-8"), logging.StreamHandler(sys.stderr)],
     )
+    # 每呼叫一次 API 就記一行 INFO，佔紀錄檔八成以上；只留警告和錯誤
+    for name in ("httpx", "httpx2", "httpcore", "openai._base_client", "anthropic._base_client"):
+        logging.getLogger(name).setLevel(logging.WARNING)
 
     st = remote.configure(https_cert=a.cert, https_key=a.key)
     if a.host:
@@ -110,6 +115,19 @@ def main() -> None:
         await task
 
     asyncio.run(run())
+
+
+LOG_MAX = 5 * 1024 * 1024
+
+
+def _rotate_log(p) -> None:
+    """紀錄檔超過 LOG_MAX 就改名成 *.old.log（蓋掉上一份），每種最多留兩份。
+    只在開程式時做：Windows 上別的程序開著檔案時不能改名，執行中輪替會一直失敗；改不了就下次再說。"""
+    try:
+        if p.stat().st_size > LOG_MAX:
+            os.replace(p, p.with_name(p.stem + ".old.log"))
+    except OSError:
+        pass
 
 
 def set_password() -> None:
