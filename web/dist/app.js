@@ -5752,9 +5752,11 @@ async function renderMcpSec(box) {
   box.innerHTML = '<div class="blank">讀取中…</div>';
   let info;
   try { info = await api('GET', '/api/mcp/info'); } catch (e) { box.innerHTML = `<div class="errbox">讀取失敗：${esc(e.message)}</div>`; return; }
-  const st = info.running ? '<span class="tag t-ok">執行中</span>' : `<span class="tag t-ex">未啟動</span> ${esc(info.error || '')}`;
+  const st = info.running ? '<span class="tag t-ok">執行中</span>'
+    : info.enabled ? `<span class="tag t-ex">${info.error ? '未啟動' : '啟動中…'}</span> ${esc(info.error || '')}` : '<span class="tag">已關閉</span>';
   const tools = ['list_sessions', 'get_session', 'list_models', 'list_vendors', 'get_config', 'get_prompts_mode', 'send_message', 'set_prompts_mode', 'set_compress'];
   box.innerHTML = `<div class="mcpst" data-f="mcpInfo">
+      <div class="frow"><div><b>對外提供 MCP</b><small>讓其他程式（例如 Claude Code）用 MCP 操作 WOOF；不用就關著，開程式比較快</small></div><div><span class="sw${info.enabled ? ' on' : ''}" id="mcpOn"></span></div></div>
       <div class="frow"><div><b>狀態</b></div><div>${st}</div></div>
       <div class="frow"><div><b>網址</b></div><div><code>${esc(info.url)}</code></div></div>
       <div class="frow"><div><b>權杖</b><small>外部模型連線時放在 Authorization: Bearer 後面</small></div><div class="mcp-tok"><code id="mcpTok">${esc(info.token)}</code><span class="btn" id="mcpCopy">複製</span></div></div>
@@ -5764,6 +5766,16 @@ async function renderMcpSec(box) {
     <div class="sec-h">外部 MCP 伺服器（WOOF 當 client 去連）</div>
     <div id="extMcp" data-f="mcpExt"></div>`;
   $('#mcpCopy').onclick = () => { navigator.clipboard.writeText(info.token); notify('ok', '已複製權杖'); };
+  $('#mcpOn').onclick = async (e) => {
+    const sw = e.currentTarget;
+    if (sw.classList.contains('dis')) return;
+    sw.classList.add('dis');
+    try {
+      const r = await api('PUT', '/api/mcp/enabled', { enabled: !info.enabled });
+      notify(r.error ? 'err' : 'ok', r.enabled ? (r.running ? 'MCP 伺服器已啟動' : r.error || 'MCP 伺服器啟動中') : 'MCP 伺服器已關閉');
+    } catch (err) { notify('err', err.message); }
+    renderMcpSec(box);
+  };
   renderExternalMcpSec($('#extMcp'));
 }
 // ---- 排程工作（側欄「排程工作」→ 獨立頁）：左邊清單、右邊詳情與執行記錄

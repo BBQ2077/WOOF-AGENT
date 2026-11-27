@@ -1561,7 +1561,7 @@ async def _discover_all(force: bool) -> None:
     await broadcast({"type": "state_changed"})
 
 
-_MCP: dict = {"running": False, "error": "", "port": 0}
+_MCP: dict = {"running": False, "error": "", "port": 0, "enabled": False}
 
 
 async def _mcp_run(sid: str, text: str) -> str:
@@ -1586,16 +1586,19 @@ async def _close_ptys():
     pty.close_all()
 
 
+def _mcp_port(mc: dict) -> int:
+    from . import mcp_server   # 這個檔很輕；重的 mcp 套件在 _serve_mcp 裡背景匯入
+
+    return int(mc.get("port") or mcp_server.DEFAULT_PORT)
+
+
 @app.on_event("startup")
 async def _start_mcp():
     mc = load_config().get("mcp") or {}
-    if mc.get("enabled") is False:
-        _MCP["error"] = "已在 config.toml 關閉 MCP"
-        return
-    from . import mcp_server   # 這個檔很輕；重的 mcp 套件在 _serve_mcp 裡背景匯入
-
-    _MCP["port"] = int(mc.get("port") or mcp_server.DEFAULT_PORT)
-    asyncio.create_task(_serve_mcp(_MCP["port"]))
+    _MCP["port"] = _mcp_port(mc)
+    _MCP["enabled"] = mc.get("enabled") is True   # 預設關閉
+    if _MCP["enabled"]:
+        _MCP["task"] = asyncio.create_task(_serve_mcp(_MCP["port"]))
 
 
 async def _serve_mcp(port: int) -> None:
@@ -1617,7 +1620,37 @@ async def mcp_info():
     from . import mcp_server
 
     return {"url": f"http://127.0.0.1:{_MCP['port']}/mcp", "token": mcp_server.token(),
-            "running": bool(_MCP.get("running")), "error": _MCP.get("error") or ""}
+            "enabled": bool(_MCP.get("enabled")), "running": bool(_MCP.get("running")),
+            "error": _MCP.get("error") or ""}
+
+
+@app.put("/api/mcp/enabled")
+async def mcp_enabled(body: dict):
+    """設定裡的開關：寫進 config.toml，當場啟動或停掉，不用重開程式。"""
+    on = bool(body.get("enabled"))
+    cfg = load_config()
+    mc = {**(cfg.get("mcp") or {}), "enabled": on}
+    cfg["mcp"] = mc
+    save_config(cfg)
+    _MCP.update(enabled=on, error="", port=_mcp_port(mc))
+    task = _MCP.get("task")
+    if on and not (task and not task.done()):
+        _MCP["task"] = asyncio.create_task(_serve_mcp(_MCP["port"]))
+        for _ in range(100):                      # 等到起來或失敗（最多約 10 秒），畫面直接顯示結果
+            if _MCP.get("running") or _MCP.get("error") or _MCP["task"].done():
+                break
+            await asyncio.sleep(0.1)
+    elif not on and task and not task.done():
+        srv = _MCP.get("srv")
+        if srv is not None:
+            srv.should_exit = True
+            try:
+                await asyncio.wait_for(asyncio.shield(task), 10)
+            except asyncio.TimeoutError:
+                task.cancel()
+        else:
+            task.cancel()                         # 還在匯入套件：直接取消
+    return await mcp_info()
 
 
 @app.on_event("startup")

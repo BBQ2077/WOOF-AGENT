@@ -1,5 +1,12 @@
 // 介面英文對照：key 是介面上的中文原文（{0} {1} 是會變動的部分），value 是英文
 window.WOOF_EN = {
+  '對外提供 MCP': 'Serve MCP',
+  '讓其他程式（例如 Claude Code）用 MCP 操作 WOOF；不用就關著，開程式比較快': 'Let other programs (e.g. Claude Code) control WOOF over MCP; leave off if unused for faster startup',
+  '已關閉': 'Off',
+  '啟動中…': 'Starting…',
+  'MCP 伺服器已啟動': 'MCP server started',
+  'MCP 伺服器啟動中': 'MCP server starting',
+  'MCP 伺服器已關閉': 'MCP server stopped',
   '讓模型自己寫記憶': 'Let the model write memory',
   '套用': 'Apply',
   '寫入位置': 'Write location',

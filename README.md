@@ -371,7 +371,9 @@ tests/         測試腳本（`.venv/Scripts/python tests/unit_test.py` 跑單�
 | `gomoku` | 跟寵物下五子棋，從寵物 ⋯ 打開成一個分頁；棋和台詞都由寵物的模型、用他平常的記憶決定，說的話在寵物欄 | 難度在棋盤下方、先手和預先思考在齒輪裡，記在這台電腦 |
 | `mcp_client` | 連接 MCP 伺服器，對方的工具以 `mcp_<名稱>_<工具>` 提供 | 設定每行一個：`名稱 \| command 參數` 或 `名稱 \| http://位址` |
 
-MCP 連線在第一次對話時建立，插件重載或後端結束時關閉。stdio 子程序由 SDK 放進 Job Object，後端被殺會一起結束。
+MCP 連線在第一次對話時建立，插件重載或後端結束時關閉。
+
+WOOF 也能當 MCP 伺服器，讓其他程式（例如 Claude Code）用 MCP 操作 WOOF：列對話、讀對話、送訊息、改提示模式和壓縮設定。預設關閉，在「設定 → 進階 → MCP 伺服器」打開，當場啟動、不用重開；只聽本機 `127.0.0.1:6990/mcp`（`config.toml` 的 `[mcp] port` 可改），每個請求要帶 `data/mcp_token` 的權杖，API 金鑰不經過 MCP。關著時不載入 MCP 套件，開程式比較快。stdio 子程序由 SDK 放進 Job Object，後端被殺會一起結束。
 
 ## 授權
 

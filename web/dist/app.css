@@ -851,6 +851,7 @@ details.internal .ifirst{flex:1 1 0;min-width:0}
 .mcpst{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:var(--r);overflow:hidden;background:var(--panel)}
 .mcpst .frow{border-bottom:1px solid var(--line);margin:0;padding:10px 14px;border-radius:0}
 .mcpst .frow:last-child{border-bottom:0}
+.mcpst .sw{display:inline-block;vertical-align:middle}
 .mcp-tok{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .mcp-tools{display:flex;flex-wrap:wrap;gap:6px}
 .mcp-tools code{font-size:12px;padding:2px 7px;border:1px solid var(--line);border-radius:6px}

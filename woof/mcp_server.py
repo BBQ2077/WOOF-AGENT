@@ -1,5 +1,8 @@
 """WOOF 當 MCP 伺服器：讓其他模型或工具用 MCP 操作 WOOF。
 
+- 預設關閉：「設定 → 進階 → MCP 伺服器」打開才啟動（config.toml 的 [mcp] enabled = true）；
+  關著時連 mcp 套件都不載入。
+
 - 路徑：/mcp（streamable HTTP），只接受本機來源。
 - 權杖：data/mcp_token（第一次啟動自動產生）。每個請求都要帶 Authorization: Bearer <權杖>。
   這個權杖和桌面程式用的隨機 TOKEN 不同，桌面程式每次啟動都會換。
@@ -180,8 +183,8 @@ async def serve(app, port: int, state: dict) -> None:
             yield
 
     srv = _Srv(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", lifespan="on"))
-    state.update(running=True, error="")
+    state.update(running=True, error="", srv=srv)   # 設定裡關掉時用 srv.should_exit 停
     try:
         await srv.serve()
     finally:
-        state["running"] = False
+        state.update(running=False, srv=None)
