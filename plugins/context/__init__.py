@@ -17,7 +17,6 @@
   quote_each_chars 單則原話最多幾字，超過只附開頭和結尾（例如直接貼文件），註明用 session_search 查全文
   quote_reply_chars 每則原話前面附它回應的助手那則開頭幾字
   summary_tokens 摘要最多幾 token；更新時只輸出要改的行（行號編輯指令），沒變的由程式原樣保留
-  ratio     第一次寫摘要時，長度佔原文的百分比（壓縮幅度）
   mid_turn  回合進行中也檢查用量，超過就先壓縮再送；上下文爆掉時壓縮後重送
 
 寫摘要只有一種做法：送出「下一步本來就要送的內容」（系統提示詞、工具清單、思考強度、歷史跟主對話一字不差），
@@ -42,7 +41,8 @@ _override: dict[str, dict] = {}   # 重組請求時改用的摘要（重寫：�
 REDO_MAX, REDO_DELAY, REDO_GAP = 2, 15, 60
 
 # 摘要長度（token）：第一次照「被摘要內容 × 摘要比例」，至少 1500；不超過設定的上限（summary_tokens）和上下文的 10%
-SUM_MIN_TOK, SUM_TOK_DEFAULT, SUM_WIN = 1500, 8000, 0.10
+# 摘要上限照設定 summary_tokens；只有摘要加原樣保留超過上下文的 SUM_GUARD 時才壓低（防爆，會通知）
+SUM_MIN_TOK, SUM_TOK_DEFAULT, SUM_GUARD = 1500, 8000, 0.50
 CHARS_PER_TOK = 1.5
 # 原樣保留的最近訊息（實際 token，設定 tail_tokens）；最多佔上下文的 25%，小模型才不會整段都是保留區
 TAIL_TOK_DEFAULT, TAIL_WIN = 10000, 0.25
@@ -378,9 +378,6 @@ def register(woof):
     def _mode() -> str:
         return "常規"  # 摘要固定用結構化版本；提示詞模式只屬於「提示詞與記憶」
 
-    def _ratio() -> float:
-        return max(5, min(int(woof.settings.get("ratio") or 20), 60)) / 100
-
     def _keep_images() -> int:
         try:
             return max(0, min(int(woof.settings.get("keep_images") if woof.settings.get("keep_images") not in (None, "") else 1), 50))
@@ -494,7 +491,7 @@ def register(woof):
                       + "（【之後新增的對話】＝最前面那則【上下文摘要】後面到範圍結束為止的對話）"
                       + f"\n\n【先前摘要】（每行前面是行號，指令裡的行號照這個）\n{_numbered(prev)}")
         else:
-            rules += f"\n長度約 {target} 字以內；路徑、數字、名稱、決定、未完成事項寧可多留，不要為了縮短漏掉。"
+            rules += f"\n最多 {target} 字，該留的都留，不用刻意寫滿；路徑、數字、名稱、決定、未完成事項寧可多留，不要為了縮短漏掉。"
         head = "最前面的【上下文摘要】加上它後面的對話" if prev else "對話開頭"
         scope = (f"{head}，到{_marker(kept[0])}之前為止。從那則開始的最近 {len(kept)} 則訊息壓縮後會原樣保留，"
                  "不用寫進摘要（需要時可以參考，判斷哪些事已經做完）。")
@@ -591,7 +588,7 @@ def register(woof):
             raise _RedoTooBig("原本那段已經超過模型上限，送不出完整的內容")
         await ctx.emit({"type": "notice", "session_id": sid,
                         "text": f"{why}，正在壓縮較早的 {ctx.compact_count} 則訊息"
-                                f"（{'只寫要改的行，順便整份清理' if tidy else '只寫要改的行' if prev else f'目標約 {target} 字'}）…" + (f"（{req['note']}）" if req["note"] else "")})
+                                f"（{'只寫要改的行，順便整份清理' if tidy else '只寫要改的行' if prev else f'上限 {target} 字'}）…" + (f"（{req['note']}）" if req["note"] else "")})
         problem, stat = "", [0, 0]
         for attempt in range(2):
             msgs = req["messages"]
@@ -917,12 +914,19 @@ def register(woof):
                 return True
 
         prev = summary.get("text") or ""
-        # 第一次：長度照「被摘要的內容有多少 token」乘摘要比例（工具輸出全文也算）。更新：以上限為準，
-        # 沒變的行原樣保留，超過上限時模型順便刪掉過時、重複的行
+        # 上限只看設定的摘要上限（第一次、更新都一樣）；更新時沒變的行原樣保留，超過上限時模型順便刪掉過時、重複的行。
+        # 防爆：摘要加原樣保留超過上下文一半，才把摘要上限壓低到放得下，並通知
         src_tok = tokens.estimate_messages(older) * k
-        cap_tok = min(_sum_tok(), int(window * SUM_WIN)) if window else _sum_tok()
-        want = max(SUM_MIN_TOK, min(cap_tok, int(src_tok * _ratio())))
-        target = int((cap_tok if prev else want) * CHARS_PER_TOK)
+        cap_tok = _sum_tok()
+        tail_tok = int(sum(est(m) for m in pending[cut:]) * k)
+        if window and cap_tok + tail_tok > window * SUM_GUARD:
+            low = max(SUM_MIN_TOK, int(window * SUM_GUARD) - tail_tok)
+            if low < cap_tok:
+                await ctx.emit({"type": "notice", "session_id": ctx.session_id,
+                                "text": f"摘要上限 {cap_tok:,} token 加原樣保留約 {tail_tok:,} token 超過上下文 {window:,} 的一半，"
+                                        f"這次摘要上限壓低到 {low:,} token"})
+                cap_tok = low
+        target = int(cap_tok * CHARS_PER_TOK)
         mode = _mode()
 
         why = (getattr(ctx, "compact_reason", "") or "手動壓縮") if force else f"上下文已用 {used / window:.0%}"

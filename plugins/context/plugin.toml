@@ -32,7 +32,7 @@ label = "壓縮後原樣保留最近多少 token 的訊息（照模型實際算�
 in_settings = "compress"
 type = "number"
 default = 8000
-label = "摘要最多幾 token（最多上下文的 10%）。再壓縮時只改有變的行，超過上限才刪掉最舊、最不需要的細節"
+label = "摘要最多幾 token，第一次寫和之後更新都照這個。再壓縮時只改有變的行，超過上限才刪掉最舊、最不需要的細節；摘要加原樣保留超過上下文一半時，這次才自動壓低並通知"
 
 [settings.quote_count]
 in_settings = "compress"
@@ -63,12 +63,6 @@ in_settings = "compress"
 type = "number"
 default = 250
 label = "每則原話前面附它回應的助手那則開頭幾字（0＝不附）；先講結論的回覆，開頭就看得出你回的是什麼"
-
-[settings.ratio]
-in_settings = "compress"
-type = "number"
-default = 20
-label = "第一次寫摘要時，長度佔原文的百分之幾（壓縮幅度，建議 10 到 30）；不超過摘要上限"
 
 [settings.keep_images]
 in_settings = "compress"

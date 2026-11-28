@@ -99,15 +99,13 @@ def build(REG, run_message):
         return {"ok": True, "mode": mode}
 
     @mcp.tool()
-    def set_compress(ratio: int = 0, tail_tokens: int = 0,
+    def set_compress(tail_tokens: int = 0,
                      summary_tokens: int = 0, quote_count: int = -1, quote_tokens: int = -1) -> dict:
-        """調整壓縮：ratio 5 到 60；tail_tokens 原樣保留多少 token（1000 到 200000）；
+        """調整壓縮：tail_tokens 原樣保留多少 token（1000 到 200000）；
         summary_tokens 摘要上限（1000 到 30000）；quote_count 附幾則原話（0 到 20）；quote_tokens 原話上限（0 到 20000）。沒填的不改。"""
         from woof import store as st
 
         s = {}
-        if ratio:
-            s["ratio"] = max(5, min(int(ratio), 60))
         if tail_tokens:
             s["tail_tokens"] = max(1000, min(int(tail_tokens), 200000))
         if summary_tokens:
@@ -117,7 +115,7 @@ def build(REG, run_message):
         if quote_tokens >= 0:
             s["quote_tokens"] = min(int(quote_tokens), 20000)
         old = {k: v for k, v in ((st.get_plugin_state("context") or {}).get("settings") or {}).items()
-               if k not in ("method", "parallel")}   # 已拿掉的設定順手清掉
+               if k not in ("method", "parallel", "ratio")}   # 已拿掉的設定順手清掉
         st.set_plugin_state("context", settings={**old, **s})   # 只改有填的，其餘設定照舊
         REG.load_all()
         return {"ok": True, "applied": s}

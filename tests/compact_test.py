@@ -326,8 +326,17 @@ class Flow(unittest.TestCase):
         store.update_session(self.sid, engine_state=es)
         self.run_with([GOOD])
         self.assertNotIn("先前摘要", self.calls[0]["ask"])
-        self.assertIn("字以內", self.calls[0]["ask"])
+        self.assertIn("該留的都留，不用刻意寫滿", self.calls[0]["ask"])
+        self.assertIn("最多 12000 字", self.calls[0]["ask"])               # 只看摘要上限（8000 token），不看原文比例
         self.assertEqual(self.summ()["text"], GOOD.strip())
+
+    def test_summary_cap_lowered_only_past_half(self):
+        self.fake.settings["summary_tokens"] = 30000
+        self.ctx.model_cfg = dict(self.ctx.model_cfg, context_window=40000)
+        self.ctx.force_compact = True
+        self.run_with(["@@ 改 7\n- 在讀 f3\n@@ 完"])
+        self.assertIn("超過上下文 40,000 的一半", self.notices())          # 摘要加原樣保留超過一半才壓低，會通知
+        self.assertNotIn("上限 45000 字", self.calls[0]["ask"])
 
     def test_unreadable_edit_retried_as_edit_with_cache(self):
         self.run_with(["我把摘要整理如下：……", "@@ 改 7\n- 在讀 f3\n@@ 完"])
@@ -474,7 +483,7 @@ class Flow(unittest.TestCase):
         self.assertIn("照現在的狀態重組", self.notices())
 
     def test_overflow_drops_oldest_keeps_recent(self):
-        self.ctx.model_cfg = dict(self.ctx.model_cfg, context_window=9000)
+        self.ctx.model_cfg = dict(self.ctx.model_cfg, context_window=13000)
         self.ctx.force_compact = True
         self.run_with(["@@ 改 7\n- 在讀 f3"])
         msgs = self.calls[0]["messages"][:-1]

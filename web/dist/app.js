@@ -6012,7 +6012,6 @@ const SET_Q = {
     ['c-quote', '附幾則原話', '原話 使用者 引用 則數'],
     ['c-quotetok', '原話上限', '原話 上限 token'],
     ['c-quotehead', '附助手開頭幾字', '原話 助手 開頭 結論'],
-    ['c-ratio', '摘要幅度', '摘要 比例 長度'],
     ['c-imgtok', '每張圖最多幾 token', '圖片 token 縮圖 上限 截圖'],
     ['c-imgpx', '圖最長邊', '圖片 像素 解析度 縮圖'],
     ['c-imgkeep', '壓縮後保留幾張工具圖', '圖片 保留 張數'],
@@ -6452,7 +6451,7 @@ async function pfSave(auto) {
   } catch (e) { const d = $('#pfDirty'); if (d) d.innerHTML = `<span class="qerr">沒存到：${esc(e.message)}</span>`; }
 }
 // ---- 壓縮（設定存在 context 插件，儲存後插件會重新載入）
-const CMP_KEYS = ['window', 'ratio', 'trigger', 'wait_at', 'tail_tokens', 'summary_tokens', 'recap_chars', 'quote_count', 'quote_tokens', 'quote_each_chars', 'quote_reply_chars'];
+const CMP_KEYS = ['window', 'trigger', 'wait_at', 'tail_tokens', 'summary_tokens', 'recap_chars', 'quote_count', 'quote_tokens', 'quote_each_chars', 'quote_reply_chars'];
 // 壓縮用的上下文大小（設定頁填的）；0＝照模型。用量圈、上下文面板都用它算百分比
 async function loadCtxCap() {
   try { const p = (await api('GET', '/api/plugins')).find((r) => r.name === 'context'); S.ctxOn = !!(p && p.enabled); S.ctxCap = p && p.enabled ? Number((p.settings || {}).window) || 0 : 0; }
@@ -6496,13 +6495,12 @@ async function renderCompressSec(box) {
     <div class="cmp-h">怎麼壓縮</div>
     <div class="card cmp">
       ${row('c-tail', '原樣保留多少', '壓縮後最近的訊息原樣保留多少 token（1000 到 200000），照模型實際算法校正過，最多上下文的 25%。至少留最後一步，不拆開工具呼叫和結果。', num('tail_tokens', 1000, 200000, 'token', 'wide'))}
-      ${row('c-sum', '摘要上限', '摘要最多幾 token（1000 到 30000），最多上下文的 10%。再壓縮時模型只改有變的行，沒變的程式原樣保留；超過上限才刪掉最舊、最不需要的細節。', num('summary_tokens', 1000, 30000, 'token', 'wide'))}
+      ${row('c-sum', '摘要上限', '摘要最多幾 token（1000 到 30000），第一次寫和之後更新都照這個。再壓縮時模型只改有變的行，沒變的程式原樣保留；超過上限才刪掉最舊、最不需要的細節。摘要加原樣保留超過上下文一半時，這次才自動壓低並通知。', num('summary_tokens', 1000, 30000, 'token', 'wide'))}
       ${row('c-recap', '回顧上限', '摘要裡「回顧」段落最多幾字（200 到 10000）。較早做過的事一行一件：你要什麼 → 結果（完成、改成什麼、放棄和原因），相關的併成一行；超過時合併最舊的幾行，前面做過什麼不會整個忘掉。', num('recap_chars', 200, 10000, '字', 'wide'))}
       ${row('c-quote', '附幾則原話', '摘要後面照抄你最近幾則原話（0 到 20，0＝不附）。更早的寫進摘要，原文用 session_search 查得到。', num('quote_count', 0, 20, '則'))}
       ${row('c-quotetok', '原話上限', '附的原話合計最多幾 token（0 到 20000）。', num('quote_tokens', 0, 20000, 'token', 'wide'))}
       ${row('c-quoteeach', '單則原話上限', '單則原話最多幾字（100 到 20000）。超過只附開頭和結尾（例如直接貼文件），中間註明用 session_search 查全文。', num('quote_each_chars', 100, 20000, '字', 'wide'))}
       ${row('c-quotehead', '附助手開頭幾字', '每則原話前面附它回應的助手那則開頭幾字（0 到 2000，0＝不附）。先講結論的回覆，開頭就看得出你回的是什麼。', num('quote_reply_chars', 0, 2000, '字'))}
-      ${row('c-ratio', '摘要幅度', '第一次寫摘要時，長度佔原文的百分比，5 到 60，建議 10 到 30；不超過摘要上限。', num('ratio', 5, 60, '%'))}
     </div>
     <div class="cmp-h">圖片</div>
     <div class="card cmp">
