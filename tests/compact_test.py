@@ -37,7 +37,9 @@ FAKE = "<tool_call>\n[呼叫 terminal] cd C:/x && ls\n</tool_call>"
 
 
 def edit(prev, out):
-    return C._apply_edits(prev, out)[0]
+    text, flags, _ = C._apply_edits(prev, out)
+    assert not flags, flags
+    return text
 
 
 class Edits(unittest.TestCase):
@@ -56,10 +58,13 @@ class Edits(unittest.TestCase):
         out = edit(PREV, "@@ 插 5\n3. 改好 b.py\n@@ 完\n以上是這次的修改。")
         self.assertNotIn("以上", out)                                   # @@ 完 後面的都不算
 
-    def test_trailing_chatter_without_end_rejected(self):
-        text, why = C._apply_edits(PREV, "@@ 插 5\n3. 改好 b.py\n以上是這次的修改。")
-        self.assertIsNone(text)                                         # 分不出是內容還是說明：不採用，不會塞進摘要
-        self.assertIn("@@ 完", why)
+    def test_trailing_chatter_without_end_kept_and_flagged(self):
+        text, flags, _ = C._apply_edits(PREV, "@@ 插 5\n3. 改好 b.py\n以上是這次的修改。")
+        self.assertIn("3. 改好 b.py", text)                             # 內容一定收進去
+        self.assertEqual(len(flags), 1)                                 # 結尾那句交給模型補正
+        self.assertIn("@@ 完", flags[0]["why"])
+        self.assertEqual(flags[0]["lines"], [(6, 7)])
+        self.assertEqual(C._apply_edits(PREV, "@@ 插 5\n3. 改好 b.py\n- 在寫 c.py")[1], [])   # 條列結尾不算說明
 
     def test_insert_after_replaced_range(self):
         out = edit(PREV, "@@ 改 6-7\n## 壓縮當時進行中\n- 沒有\n@@ 插 7\n## 當時還沒做完的\n- 發版\n@@ 完")
@@ -70,25 +75,44 @@ class Edits(unittest.TestCase):
         self.assertTrue(out.startswith(PREV))                          # 原本的全部留著
         self.assertTrue(out.endswith("## 重要的檔案、指令與數據\n- plugins/context/__init__.py\n- 測試 317 個"))
 
-    def test_any_bad_op_rejects_whole(self):
-        for bad, hint in (("@@ 改 0\nx\n@@ 插 5\n3. 改好 b.py\n@@ 完", "只有 1 到 7 行"),
-                          ("@@ 改 9\nx\n@@ 完", "只有 1 到 7 行"),
-                          ("@@ 刪 2-4\n@@ 改 3\n重疊\n@@ 完", "重疊"),
-                          ("@@ 插 3\n@@ 完", "沒有內容"),
-                          ("@@ 改 2\n@@ 完", "沒有內容"),
-                          ("@@ 刪 2\n- 新的\n@@ 完", "@@ 改"),
-                          ("@@ 不變\n@@ 刪 2", "不變"),
-                          ("這是新的摘要全文", "沒有寫出")):
-            text, why = C._apply_edits(PREV, bad)
-            self.assertIsNone(text, bad)                                # 有一條不對整份不用：不存半套的摘要
-            self.assertIn(hint, why, bad)
+    def test_bad_ops_applied_without_losing_content(self):
+        cases = [
+            ("@@ 改 9\n- 新的\n@@ 完", "超過最後一行", PREV + "\n- 新的"),
+            ("@@ 插\n- 新的\n@@ 完", "沒寫行號", PREV + "\n- 新的"),
+            ("@@ 刪 2\n- 新的\n@@ 完", "當成改", PREV.replace("- 做 A", "- 新的")),
+            ("@@ 改 2\n@@ 完", "先留著", PREV),
+            ("@@ 改 2-3\n- 甲\n@@ 改 3\n- 乙\n@@ 完", "重疊",
+             PREV.replace("- 做 A\n## 已完成", "- 甲\n- 乙")),
+            ("@@ 改 7-12\n- 在寫 c.py\n@@ 完", "超出", PREV.replace("- 在改 b.py", "- 在寫 c.py")),
+        ]
+        for out, hint, want in cases:
+            text, flags, why = C._apply_edits(PREV, out)
+            self.assertEqual(text, want, out)                            # 照不掉內容的方式套上
+            self.assertTrue(flags and hint in flags[0]["why"], (out, flags))
+        self.assertEqual(C._apply_edits(PREV, "@@ 不變\n@@ 插 7\n- 新的\n@@ 完")[0], PREV + "\n- 新的")
+        self.assertEqual(C._apply_edits(PREV, "@@ 插 3\n@@ 完")[0], PREV)       # 沒附內容的插：本來就沒東西
+        text, _, why = C._apply_edits(PREV, "這是新的摘要全文")
+        self.assertIsNone(text)
+        self.assertIn("沒有寫出", why)
+
+    def test_big_delete_held_until_confirmed(self):
         long = "\n".join(f"{i}. 很長的一行內容，記錄做過的事情與結果，" * 3 for i in range(60))
-        self.assertIsNone(edit(long, "@@ 刪 1-50\n@@ 完"))             # 一次刪掉大半：多半是看錯行號
+        text, flags, _ = C._apply_edits(long, "@@ 刪 1-50\n@@ 完")
+        self.assertEqual(text, long)                                     # 先不刪
+        self.assertIn("一次刪掉大半", flags[0]["why"])
+        self.assertEqual(flags[0]["lines"], [(1, 50)])
+        self.assertEqual(len(C._apply_edits(long, "@@ 刪 1-50\n@@ 完", allow_big=True)[0].split("\n")), 10)
+
+    def test_fix_items_show_new_line_numbers(self):
+        text, flags, _ = C._apply_edits(PREV, "@@ 改 9\n- 新的\n@@ 完")
+        items = C._fix_items(text, flags)
+        self.assertIn("8| - 新的", items)
+        self.assertIn("超過最後一行（7）", items)
 
     def test_full_summary_instead_of_edits_accepted(self):
         full = PREV.replace("- 在改 b.py", "- 在寫 README") + "\n## 當時還沒做完的\n- 發版"
         self.assertEqual(edit(PREV, full), full)                       # 直接寫了整份（段落齊、長度夠）：照用
-        self.assertIsNone(edit(PREV, "## 已完成\n- 只有新的"))          # 只寫新的那一點：不採用（會丟掉舊的）
+        self.assertIsNone(C._apply_edits(PREV, "## 已完成\n- 只有新的")[0])   # 只寫新的那一點：不採用（會丟掉舊的）
 
 
 class Quotes(unittest.TestCase):
@@ -242,23 +266,33 @@ class Flow(unittest.TestCase):
         self.run_with(["我把摘要整理如下：……", "@@ 改 7\n- 在讀 f3\n@@ 完"])
         self.assertEqual(len(self.calls), 2)
         self.assertEqual(self.calls[1]["messages"][:-1], self.sent)    # 同一份請求，前面照樣吃快取
-        self.assertIn("整套 @@ 編輯指令", self.calls[1]["ask"])         # 還是只寫要改的行，不是整份重寫
+        self.assertIn("@@ 編輯指令（行號照", self.calls[1]["ask"])     # 還是只寫要改的行，不是整份重寫
         self.assertIn("2. 跑測試全過", self.summ()["text"])
         self.assertTrue(self.summ()["text"].endswith("- 在讀 f3"))
         self.assertIn("沒有寫出 @@ 編輯指令", self.notices())
 
-    def test_partly_bad_edit_not_stored_half(self):
-        self.run_with(["@@ 改 30\nx\n@@ 插 5\n3. 讀完 f0 到 f2\n@@ 完", "@@ 插 5\n3. 讀完 f0 到 f2\n- 在讀 f3\n@@ 完"])
-        self.assertEqual(len(self.calls), 2)                            # 有一條不對：整套重寫一次指令
-        self.assertIn("@@ 改 30：先前摘要只有 1 到 7 行", self.calls[1]["ask"])   # 告訴模型哪一條錯在哪
-        self.assertIn("3. 讀完 f0 到 f2", self.summ()["text"])
-        self.assertNotIn("x", self.summ()["text"].split("\n"))
+    def test_guessed_spots_fixed_by_follow_up(self):
+        first = "@@ 改 30\n- 在讀 f3\n@@ 插 5\n3. 讀完 f0 到 f2\n@@ 完"
+        self.run_with([first, "@@ 刪 8\n@@ 完"])
+        self.assertEqual(len(self.calls), 2)                            # 第一次的都套上，第二次只補正那一處
+        c = self.calls[1]
+        self.assertEqual(c["messages"][:len(self.sent)], self.sent)     # 接著同一份請求，前面吃快取
+        self.assertEqual(c["messages"][-2]["role"], "assistant")
+        self.assertEqual(c["messages"][-2]["content"][0]["text"], first)
+        self.assertIn("@@ 改 30 超過最後一行（7），內容接在最後面", c["ask"])
+        self.assertIn("9| - 在讀 f3", c["ask"])                         # 附上新行號
+        self.assertNotIn("先前摘要】", c["ask"])                         # 不是整份重來
+        text = self.summ()["text"]
+        self.assertIn("3. 讀完 f0 到 f2", text)
+        self.assertTrue(text.endswith("## 壓縮當時進行中\n- 在讀 f3"))
+        self.assertNotIn("- 在改 b.py", text)
 
-    def test_partly_bad_twice_stores_nothing(self):
-        self.ctx.manual, self.ctx.force_compact = False, True
-        with self.assertRaises(RuntimeError):
-            self.run_with(["@@ 改 30\nx\n@@ 插 5\n3. 讀完\n@@ 完", "@@ 改 31\nx\n@@ 完"])
-        self.assertEqual(self.summ()["text"], PREV)                     # 舊摘要原樣，不存半套
+    def test_bad_follow_up_keeps_first_result(self):
+        self.run_with(["@@ 改 30\n- 在讀 f3\n@@ 插 5\n3. 讀完\n@@ 完", "好的我看看"])
+        text = self.summ()["text"]                                       # 照樣存，內容都在
+        self.assertIn("3. 讀完", text)
+        self.assertTrue(text.endswith("- 在讀 f3"))
+        self.assertIn("用補正前的摘要", self.notices())
 
     def test_fake_call_rewritten_once_with_cache(self):
         self.run_with([FAKE, "@@ 改 7\n- 在讀 f3"])
@@ -266,28 +300,37 @@ class Flow(unittest.TestCase):
         self.assertEqual(self.calls[1]["messages"][:-1], self.sent)
         self.assertIn("寫成了工具呼叫", self.notices())
 
-    def test_two_bad_answers_store_nothing(self):
+    def test_no_summary_when_must_uses_fallback(self):
         es = dict(store.get_session(self.sid)["engine_state"])
         es.pop("summary")
         store.update_session(self.sid, engine_state=es)
-        self.ctx.manual, self.ctx.force_compact = False, True
+        self.ctx.manual, self.ctx.force_compact = False, True            # 上下文爆了：一定要壓下去
         C.SHORT_SRC_TOK = 200
-        with self.assertRaises(RuntimeError) as cm:
-            self.run_with([None, "好的，我來看看。"])                   # 去呼叫工具、太短
-        self.assertIn("只寫了", str(cm.exception))
+        self.assertTrue(self.run_with([None, "好的，我來看看。"]))       # 去呼叫工具、太短
         self.assertEqual(len(self.calls), 2)
-        self.assertIsNone(self.summ())
+        s = self.summ()
+        self.assertTrue(s["fallback"])
+        self.assertIn("使用者說過：", s["text"])                         # 程式整理：使用者的話、工具、檔案
+        self.assertIn("- 第 2 個追加要求", s["text"])
+        self.assertIn("read_file×", s["text"])
+        self.assertIn("f0", s["text"])
+        self.assertIn("改用程式整理的摘要", self.notices())
 
-    def test_later_compaction_checked_on_full_text(self):
+    def test_fallback_keeps_previous_summary(self):
+        self.ctx.manual = True
+        self.run_with(["我把摘要整理如下", FAKE])
+        s = self.summ()
+        self.assertTrue(s["text"].startswith(PREV))                      # 先前摘要原樣保留
+        self.assertIn("程式整理", s["text"])
+
+    def test_big_delete_confirmed_in_follow_up(self):
         long = "\n".join(f"{i}. 很長的一行內容，記錄做過的事情與結果，" * 3 for i in range(60))
         es = dict(store.get_session(self.sid)["engine_state"])
         es["summary"] = {"through": 0, "text": long}
         store.update_session(self.sid, engine_state=es)
-        self.ctx.manual, self.ctx.force_compact = False, True
-        with self.assertRaises(RuntimeError) as cm:
-            self.run_with(["@@ 刪 1-55", "@@ 刪 1-58"])
-        self.assertIn("一次刪掉大半", str(cm.exception))
-        self.assertEqual(self.summ()["text"], long)
+        self.run_with(["@@ 刪 1-55\n@@ 完", "@@ 刪 1-55\n@@ 完"])
+        self.assertIn("一次刪掉大半", self.calls[1]["ask"])
+        self.assertEqual(len(self.summ()["text"].split("\n")), 5)       # 模型確認了才刪
 
     def test_rebuilt_when_not_in_memory(self):
         loop.LAST_REQ.pop(self.sid)
@@ -321,19 +364,28 @@ class Flow(unittest.TestCase):
             self.run_with(["@@ 改 7\n- 在讀 f3"])
         self.assertIn("吃不到主對話的快取", self.notices())
 
-    def test_auto_stops_after_one_failure(self):
+    def test_auto_failure_retries_after_step_then_fallback(self):
         self.ctx.manual, self.ctx.is_bg = False, True
         with self.assertRaises(RuntimeError):
-            self.run_with([FAKE, FAKE], hook="prepare_turn")
-        self.assertEqual(len(self.calls), 2)                    # 一次壓縮最多送兩次
+            self.run_with([FAKE, FAKE], hook="prepare_turn")             # 背景、還沒到等待線：這次先不存
+        self.assertEqual(len(self.calls), 2)
         self.assertEqual(C._fails[self.sid], 1)
-        self.assertIn("先停止自動壓縮", self.notices())
-        self.ctx.is_bg = False
-        asyncio.run(self.hooks["after_turn"](self.ctx))
-        self.assertIsNone(C._bg.get(self.sid))                  # 不再開背景壓縮
-        self.assertIsNone(asyncio.run(self.hooks["prepare_turn"](self.ctx)))
-        self.ctx.manual = True
-        self.run_with(["@@ 改 7\n- 在讀 f3"])                   # 手動照樣能壓，成功就歸零
+        self.assertEqual(self.summ()["text"], PREV)
+        self.assertIn("這一步結束後再試一次", self.notices())
+        self.ctx.is_bg, self.ctx.mid_turn = False, True
+        self.assertIsNone(self.run_with([], hook="prepare_turn"))      # 回合中每一步不重試
+        self.assertIsNone(C._bg.get(self.sid))
+
+        async def after():
+            async def complete(*a, **k):
+                return FAKE
+            with unittest.mock.patch.object(loop, "complete", complete):
+                await self.hooks["after_turn"](self.ctx)                 # 這一步結束：再試一次
+                await C._bg[self.sid]
+        asyncio.run(after())
+        s = self.summ()
+        self.assertTrue(s["fallback"])                                   # 還是寫不出來：程式整理的摘要，上下文照樣降
+        self.assertTrue(s["text"].startswith(PREV))
         self.assertNotIn(self.sid, C._fails)
 
     def test_stored_fake_summary_ignored(self):

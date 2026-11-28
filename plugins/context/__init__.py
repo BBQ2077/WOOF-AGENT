@@ -29,10 +29,9 @@ import time
 from types import SimpleNamespace
 
 _bg: dict[str, asyncio.Task] = {}
-# 自動壓縮（背景、回合中）失敗一次就先停：不然每一步都再試一次，每次都要付寫摘要的錢。
-# 手動「立即壓縮」不受限，成功一次就恢復
+# 自動壓縮連續沒成功的次數：失敗過就不在回合中每一步重試（每次都要付錢），等這一步結束後再試一次；
+# 那一次模型還是寫不出來，就用程式整理的摘要（_fallback_text），上下文不會一直堆。成功就歸零
 _fails: dict[str, int] = {}
-AUTO_FAIL_MAX = 1
 
 # 摘要長度（token）：第一次照「被摘要內容 × 摘要比例」，至少 1500；不超過設定的上限（summary_tokens）和上下文的 10%
 SUM_MIN_TOK, SUM_TOK_DEFAULT, SUM_WIN = 1500, 8000, 0.10
@@ -106,13 +105,11 @@ def _numbered(text: str) -> str:
     return "\n".join(f"{i}| {ln}" for i, ln in enumerate(text.split("\n"), 1))
 
 
-def _apply_edits(prev: str, out: str) -> tuple[str | None, str]:
-    """把行號編輯指令套到舊摘要上，回傳 (新摘要, 不能用的原因)。全部指令都對才算數，有一條不對整份不用（不存半套的摘要）。
-    @@ 改 a-b ＋新內容：換掉第 a 到 b 行；@@ 刪 a-b；@@ 插 n ＋新內容：插在第 n 行後面（0＝最前面，超過最後一行＝接在最後）；
-    @@ 不變；最後一行 @@ 完，後面寫的都不算。第一個指令前面的說明、``` 、行號前綴都略過。
-    沒寫指令、但寫出了整份摘要（段落標題齊、長度跟舊的差不多）：直接當新摘要用，不用再寫一次。"""
-    lines = prev.split("\n")
-    total = len(lines)
+_CONTENT = re.compile(r"^\s*(?:[-#*|>]|\d+[.、)]|[（(]?\d)")
+
+
+def _parse_ops(out: str):
+    """抓出 @@ 指令：第一個指令前面的說明、``` 、行號前綴略過；@@ 完 後面的都不算。回傳 (指令, 有沒有寫 @@ 完)"""
     ops, cur, ended, fence = [], None, False, False
     for ln in out.strip("\n").split("\n"):
         if ln.strip().startswith("```"):
@@ -129,70 +126,205 @@ def _apply_edits(prev: str, out: str) -> tuple[str | None, str]:
             ops.append(cur)
         elif cur is not None:
             cur[3].append(_NUM.sub("", ln) if _NUM.match(ln) else ln)
+    for o in ops:
+        while o[3] and not o[3][-1].strip():
+            o[3].pop()
+        while o[3] and not o[3][0].strip():
+            o[3].pop(0)
+    return ops, ended
+
+
+def _apply_edits(prev: str, out: str, allow_big: bool = False) -> tuple[str | None, list[dict], str]:
+    """把行號編輯指令套到舊摘要上，回傳 (新摘要, 猜著套的地方, 完全沒有指令時的原因)。
+    @@ 改 a-b ＋新內容：換掉第 a 到 b 行；@@ 刪 a-b；@@ 插 n ＋新內容：插在第 n 行後面（0＝最前面，超過最後一行＝接在最後）；
+    @@ 不變；最後一行 @@ 完。
+    每一條都會套上、模型寫的內容一定收進去：照字面套不上的，用不會掉內容的方式處理（行號超出＝接在最後、
+    範圍重疊＝插在那段後面、刪的下面有內容＝當成改、改了沒附內容＝舊的留著、一次刪掉大半＝先不刪、
+    沒寫 @@ 完而結尾像說明＝先收進去），這些地方記在第二個回傳值（新摘要裡的行號範圍＋怎麼處理的），
+    交給模型補正一次。沒寫指令、但寫出了整份摘要（段落標題齊、長度跟舊的差不多）：直接當新摘要用。"""
+    lines = prev.split("\n")
+    total = len(lines)
+    ops, ended = _parse_ops(out)
     if not ops:
         body = out.strip()
         heads = [ln for ln in body.split("\n") if ln.startswith("## ")]
         if not ended and len(heads) >= 3 and len(body) >= len(prev) * 0.6:
-            return body, ""
-        return None, "沒有寫出 @@ 編輯指令"
-    if any(o[0] == "不變" for o in ops):
-        if len(ops) > 1:
-            return None, "寫了 @@ 不變 又寫了其他指令"
-        return prev, ""
-    if not ended and ops[-1][3] and not ops[-1][3][-1].strip().startswith(("-", "#", "*", "|")) \
-            and not re.match(r"^\s*\d+[.、)]", ops[-1][3][-1]):
-        # 沒寫 @@ 完：最後一條的最後一行看起來不像摘要內容（不是條列、標題），多半是收尾的說明
-        return None, f"最後沒有寫 @@ 完（最後一行「{ops[-1][3][-1].strip()[:30]}」分不出是內容還是說明）"
-    repl, ins, taken, bad = {}, {}, set(), []
-    for op, a, b, new in ops:
-        while new and not new[-1].strip():
-            new.pop()
-        while new and not new[0].strip():
-            new.pop(0)
-        label = f"@@ {op} {a if a is not None else ''}{f'-{b}' if b is not None else ''}".rstrip()
-        if a is None:
-            bad.append(f"{label}：沒寫行號")
-            continue
+            return body, [], ""
+        return None, [], "沒有寫出 @@ 編輯指令"
+    ops = [o for o in ops if o[0] != "不變"]
+    if not ops:
+        return prev, [], ""
+    why: dict[int, str] = {}          # 指令序號 → 怎麼處理的
+    loose: list[str] = []             # 沒有對應行的（例如沒寫行號的刪）
+    rep: dict[int, tuple[int, list[str], int]] = {}
+    dels: dict[int, int] = {}
+    ins: dict[int, list[tuple[list[str], int]]] = {}
+    keep: dict[int, int] = {}         # 照字面該刪或換、先留著的舊行 → 指令序號
+    taken: set[int] = set()
+
+    def label(op, a, b):
+        return f"@@ {op} {a if a is not None else ''}{f'-{b}' if b is not None else ''}".rstrip()
+
+    for idx, (op, a, b, new) in enumerate(ops):
+        lab = label(op, a, b)
         if op == "插":
             if not new:
-                bad.append(f"{label}：下面沒有內容")
-                continue
-            ins.setdefault(min(a, total), []).extend(new)
+                continue                              # 沒附內容的插：本來就沒東西
+            ins.setdefault(total if a is None else max(0, min(a, total)), []).append((new, idx))
+            if a is None:
+                why[idx] = f"{lab} 沒寫行號，接在最後面"
             continue
+        if a is None or a > total:
+            if new:
+                ins.setdefault(total, []).append((new, idx))
+                why[idx] = f"{lab} " + ("沒寫行號" if a is None else f"超過最後一行（{total}）") + "，內容接在最後面"
+            else:
+                loose.append(f"{lab} " + ("沒寫行號" if a is None else f"超過最後一行（{total}）") + "，沒有刪任何行")
+            continue
+        b = a if b is None else b
+        if a > b:
+            a, b = b, a
+        if a < 1 or b > total:
+            why[idx] = f"{lab} 超出 1 到 {total} 行，照 {max(a, 1)}-{min(b, total)} 處理"
+            a, b = max(a, 1), min(b, total)
         if op == "刪" and new:
-            bad.append(f"{label}：刪的下面又寫了內容（要換掉請用 @@ 改）")
-            continue
+            op = "改"
+            why[idx] = f"{lab} 下面寫了內容，當成改"
         if op == "改" and not new:
-            bad.append(f"{label}：下面沒有內容（要刪掉請用 @@ 刪）")
+            for j in range(a, b + 1):
+                if j not in taken:
+                    keep[j] = idx
+            why[idx] = f"{lab} 下面沒有內容，這幾行先留著（要刪請用 @@ 刪）"
             continue
-        b = b if b is not None else a
-        if not 1 <= a <= b <= total:
-            bad.append(f"{label}：先前摘要只有 1 到 {total} 行")
+        rng = set(range(a, b + 1))
+        if rng & taken:
+            if op == "刪":
+                for j in sorted(rng - taken):
+                    dels[j] = idx
+                taken |= rng
+            else:
+                ins.setdefault(b, []).append((new, idx))
+                why[idx] = f"{lab} 範圍跟前面的指令重疊，內容插在第 {b} 行後面"
             continue
-        if taken & set(range(a, b + 1)):
-            bad.append(f"{label}：範圍跟別的指令重疊")
-            continue
-        taken |= set(range(a, b + 1))
-        repl[a] = (b, new)
-    if bad:
-        return None, "編輯指令有錯：" + "；".join(bad[:6])
-    res = list(ins.get(0, []))
-    i = 1
-    while i <= total:
-        if i in repl:
-            end, new = repl[i]
-            res += new
-            for j in range(i, end + 1):
-                res += ins.get(j, [])
-            i = end + 1
-            continue
-        res.append(lines[i - 1])
-        res += ins.get(i, [])
-        i += 1
-    text = "\n".join(res).strip()
-    if len(prev) > 2000 and len(text) < len(prev) * 0.4:
-        return None, f"一次刪掉大半（{len(prev)} 字剩 {len(text)} 字），多半是看錯行號"
-    return text, ""
+        taken |= rng
+        if op == "刪":
+            for j in rng:
+                dels[j] = idx
+        else:
+            rep[a] = (b, new, idx)
+    if ops and not ended and ops[-1][3] and not _CONTENT.match(ops[-1][3][-1]):
+        why.setdefault(len(ops) - 1, f"最後沒寫 @@ 完，最後一行「{ops[-1][3][-1].strip()[:30]}」也收進去了（是說明就刪掉）")
+
+    def build():
+        res = [(ln, idx) for new, idx in ins.get(0, []) for ln in new]
+        i = 1
+        while i <= total:
+            if i in rep:
+                end, new, idx = rep[i]
+                res += [(ln, idx) for ln in new]
+                for j in range(i, end + 1):
+                    res += [(ln, ix) for new2, ix in ins.get(j, []) for ln in new2]
+                i = end + 1
+                continue
+            if i not in dels:
+                res.append((lines[i - 1], keep.get(i)))
+            res += [(ln, ix) for new2, ix in ins.get(i, []) for ln in new2]
+            i += 1
+        return res
+
+    res = build()
+    size = len("\n".join(r[0] for r in res))
+    if not allow_big and len(prev) > 2000 and size < len(prev) * 0.4:
+        # 一次刪掉大半，多半是看錯行號：先不刪，舊的留著，請模型確認
+        for j, idx in list(dels.items()):
+            keep[j] = idx
+            why[idx] = f"{label(*ops[idx][:3])} 一次刪掉大半，這幾行先留著（確定要刪就再寫一次 @@ 刪）"
+        dels.clear()
+        res = build()
+        if len("\n".join(r[0] for r in res)) < len(prev) * 0.4:
+            for a0, (b0, new, idx) in list(rep.items()):
+                if b0 - a0 >= 4:
+                    del rep[a0]
+                    for j in range(a0, b0 + 1):
+                        keep[j] = idx
+                    ins.setdefault(b0, []).append((new, idx))
+                    why[idx] = f"{label(*ops[idx][:3])} 一次換掉大半，舊的先留著、新的接在後面（確定就刪掉舊的）"
+            res = build()
+    flags = []
+    for idx, w in sorted(why.items()):
+        pos = [n for n, r in enumerate(res, 1) if r[1] == idx]
+        spans = []
+        for n in pos:
+            if spans and spans[-1][1] == n - 1:
+                spans[-1][1] = n
+            else:
+                spans.append([n, n])
+        flags.append({"why": w, "lines": [tuple(x) for x in spans]})
+    flags += [{"why": w, "lines": []} for w in loose]
+    return "\n".join(r[0] for r in res).strip("\n"), flags, ""
+
+
+def _fix_items(text: str, flags: list[dict], cap: int = 4000) -> str:
+    """要模型補正的那幾處：怎麼處理的＋新摘要裡那幾行（附新行號）"""
+    lines = text.split("\n")
+    out, used = [], 0
+    for f in flags:
+        block = [f"- {f['why']}"]
+        for a, b in f["lines"]:
+            for n in range(max(1, a), min(len(lines), b) + 1)[:20]:
+                block.append(f"  {n}| {lines[n - 1]}")
+        piece = "\n".join(block)
+        if used + len(piece) > cap:
+            piece = piece[:max(0, cap - used)]
+        out.append(piece)
+        used += len(piece)
+        if used >= cap:
+            break
+    return "\n".join(out)
+
+
+def _fallback_text(prev: str, older: list[dict]) -> str:
+    """摘要模型寫不出來時，程式自己整理的摘要（不用模型）：先前摘要原樣保留，接上這段的重點——
+    使用者講過的話、用過的工具、提到的檔案、助手最後的回覆開頭。下次壓縮時模型會在這份上面編輯整理"""
+    users, tools, files, last_reply = [], {}, [], ""
+    for m in older:
+        blocks = m.get("content") or []
+        if m["role"] == "user" and not (m.get("meta") or {}).get("internal"):
+            t = " ".join(" ".join(b.get("text") or "" for b in blocks if b.get("type") == "text" and not b.get("_wrap")).split())
+            if t:
+                users.append(t[:300] + ("…" if len(t) > 300 else ""))
+        elif m["role"] == "assistant":
+            for b in blocks:
+                if b.get("type") == "text" and (b.get("text") or "").strip():
+                    last_reply = b["text"].strip()
+                elif b.get("type") == "tool_call":
+                    tools[b.get("name") or "?"] = tools.get(b.get("name") or "?", 0) + 1
+                    for k, v in (b.get("args") or {}).items():
+                        if ("path" in k or "file" in k) and isinstance(v, str) and 0 < len(v) <= 160 and v not in files:
+                            files.append(v)
+    a, b = older[0]["id"], older[-1]["id"]
+    sec = [f"## 第 {a} 到 {b} 則訊息的重點（程式整理，細節用 session_search 查原文）"]
+    if users:
+        picked, used = [], 0
+        for t in reversed(users):
+            if used + len(t) > 3000:
+                break
+            picked.append(t)
+            used += len(t)
+        sec.append("使用者說過：")
+        sec += [f"- {t}" for t in reversed(picked)]
+    if tools:
+        sec.append("用過的工具：" + "、".join(f"{n}×{c}" for n, c in sorted(tools.items(), key=lambda x: -x[1])[:20]))
+    if files:
+        sec.append("提到的檔案：" + "、".join(files[-20:]))
+    if last_reply:
+        sec.append("助手最後的回覆開頭：" + " ".join(last_reply.split())[:400])
+    sec = "\n".join(sec)
+    return f"{prev.rstrip()}\n{sec}" if prev else sec
+
+
+class _NoSummary(RuntimeError):
+    """摘要模型沒寫出能用的東西（去呼叫工具、空白、寫成工具呼叫、沒有指令、太短）"""
 
 
 def _turn_requests(messages: list[dict], upto: int) -> str:
@@ -346,29 +478,43 @@ def register(woof):
         return {"use": use, "system": system, "messages": [*msgs, ask], "specs": specs, "effort": effort,
                 "note": note, "dropped": dropped}
 
-    def _check(out: str | None, prev: str, src_tok: float) -> tuple[str, str]:
-        """模型的回覆能不能當摘要：回傳 (摘要全文, 不能用的原因)。每次壓縮都檢查"""
+    def _check(out: str | None, prev: str, src_tok: float, allow_big: bool = False) -> tuple[str, list[dict], str]:
+        """模型的回覆能不能當摘要：回傳 (摘要全文, 猜著套的地方, 不能用的原因)。每次壓縮都檢查"""
         from woof import tokens
 
         if out is None:
-            return "", "去呼叫了工具"
+            return "", [], "去呼叫了工具"
         out = out.strip()
         if not out:
-            return "", "回了空白"
+            return "", [], "回了空白"
         if tokens.fake_call(out):
-            return "", "寫成了工具呼叫"
-        text = out
+            return "", [], "寫成了工具呼叫"
+        text, flags = out, []
         if prev:
-            text, why = _apply_edits(prev, out)
+            text, flags, why = _apply_edits(prev, out, allow_big)
             if text is None:
-                return "", why
+                return "", [], why
         if src_tok > SHORT_SRC_TOK and len(text) < MIN_CHARS:
-            return "", f"只寫了 {len(text)} 字"
-        return text, ""
+            return "", [], f"只寫了 {len(text)} 字"
+        return text, flags, ""
+
+    async def _call(ctx, req: dict, msgs: list[dict], stat: list[int]):
+        from woof.agent import loop
+
+        try:
+            out = await loop.complete(req["use"], req["system"], msgs, tools=req["specs"], effort=req["effort"],
+                                      session_id=ctx.session_id, kind="compact")
+        except loop.ToolCallInstead:
+            out = None
+        u = loop.AUX_USAGE.pop(ctx.session_id, None) or {}
+        stat[0] += int(u.get("input_tokens") or 0)
+        stat[1] += int(u.get("cache_read") or 0)
+        return out
 
     async def _write(ctx, model: dict, prev: str, kept: list[dict], target: int, src_tok: float, why: str):
-        """寫摘要，最多送兩次：第一次不能用，同一份請求在指令後面註明哪裡不對再寫一次（前面照樣吃快取）。
-        回傳 (摘要全文, [輸入, 快取讀取])；兩次都不能用就丟錯，不存（原文照送）"""
+        """寫摘要，回傳 (摘要全文, [輸入, 快取讀取])。都接在同一份請求後面，前面吃快取：
+        - 編輯指令有幾處只能猜著套：內容都已經收進去，再接一則請模型只補正那幾處（不重寫整份）；補正寫壞了就用補正前的
+        - 完全沒寫出能用的東西：在指令後面註明哪裡不對再要一次；還是沒有就丟 _NoSummary（交給呼叫端決定要不要用程式整理的摘要）"""
         from woof.agent import loop
 
         sid = ctx.session_id
@@ -381,17 +527,14 @@ def register(woof):
             msgs = req["messages"]
             if problem and problem != "超出模型上限":
                 ask = msgs[-1]
-                again = ask["content"][0]["text"] + _prompt_get("compact_retry", problem=problem,
-                                                                 what="整套 @@ 編輯指令（全部重寫一次，行號照【先前摘要】，最後一行 @@ 完）"
-                                                                 if prev else "摘要正文")
+                again = ask["content"][0]["text"] + _prompt_get(
+                    "compact_retry", problem=problem,
+                    what="@@ 編輯指令（行號照【先前摘要】，最後一行 @@ 完）" if prev else "摘要正文")
                 msgs = [*msgs[:-1], {**ask, "content": [{"type": "text", "text": again}]}]
                 await ctx.emit({"type": "notice", "session_id": sid,
                                 "text": f"摘要模型這次{problem}，用同一份內容再寫一次（前面照樣吃快取）"})
             try:
-                out = await loop.complete(req["use"], req["system"], msgs, tools=req["specs"], effort=req["effort"],
-                                          session_id=sid, kind="compact")
-            except loop.ToolCallInstead:
-                out = None
+                out = await _call(ctx, req, msgs, stat)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -404,13 +547,40 @@ def register(woof):
                                             + (f"（{req['note']}）" if req["note"] else "")})
                     continue
                 raise RuntimeError(f"壓縮摘要失敗（{req['use'].get('label', req['use']['id'])}）：{str(e)[:300]}") from e
-            u = loop.AUX_USAGE.pop(sid, None) or {}
-            stat[0] += int(u.get("input_tokens") or 0)
-            stat[1] += int(u.get("cache_read") or 0)
-            text, problem = _check(out, prev, src_tok)
-            if not problem:
-                return text, stat
-        raise RuntimeError(f"摘要模型兩次都沒寫出能用的摘要（{problem}），這次不壓縮；原文都還在")
+            text, flags, problem = _check(out, prev, src_tok)
+            if problem:
+                continue
+            if flags:
+                text = await _fix(ctx, req, msgs, out, text, flags, src_tok, stat)
+            return text, stat
+        raise _NoSummary(f"摘要模型兩次都沒寫出能用的摘要（{problem}）")
+
+    async def _fix(ctx, req, msgs, out, text, flags, src_tok, stat) -> str:
+        """編輯指令有幾處是猜著套的：接著同一份請求（加上模型剛才的回覆），請它只補正那幾處"""
+        sid = ctx.session_id
+        await ctx.emit({"type": "notice", "session_id": sid,
+                        "text": f"編輯指令有 {len(flags)} 處沒辦法照字面套（{'；'.join(f['why'] for f in flags[:3])}），"
+                                "內容都先收進去了，請模型補正這幾處（接著同一份請求，吃快取）"})
+        follow = [*msgs, {"role": "assistant", "content": [{"type": "text", "text": out}]},
+                  {"role": "user", "meta": {"internal": "compact_ask"},
+                   "content": [{"type": "text", "text": _prompt_get("compact_fix", items=_fix_items(text, flags))}]}]
+        try:
+            out2 = await _call(ctx, req, follow, stat)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            await ctx.emit({"type": "notice", "session_id": sid,
+                            "text": f"補正沒送成（{str(e)[:120]}），用補正前的摘要（內容都在，下次壓縮時再整理）"})
+            return text
+        t2, f2, problem = _check(out2, text, src_tok, allow_big=True)
+        if problem:
+            await ctx.emit({"type": "notice", "session_id": sid,
+                            "text": f"補正的回覆{problem}，用補正前的摘要（內容都在，下次壓縮時再整理）"})
+            return text
+        if f2:
+            await ctx.emit({"type": "notice", "session_id": sid,
+                            "text": f"補正後還有 {len(f2)} 處是猜著套的，內容都保留了，下次壓縮時再整理"})
+        return t2
 
     def _wait_at() -> float:
         return max(0.1, min(0.99, float(woof.settings.get("wait_at", 90) or 90) / 100.0))
@@ -425,14 +595,16 @@ def register(woof):
         """在背景壓縮；同一個對話已經有一個在跑就不再開"""
         sid = ctx.session_id
         t = _bg.get(sid)
-        if (t and not t.done()) or _fails.get(sid, 0) >= AUTO_FAIL_MAX:
+        if t and not t.done():
             return
         _bg[sid] = asyncio.create_task(_precompact(sid, ctx.model_cfg, ctx.registry, ctx.emit,
                                                    mid=bool(getattr(ctx, "mid_turn", False))))
 
     async def _precompact(session_id: str, model: dict, registry, emit, mid: bool = False) -> None:
+        # 上一次自動壓縮沒成功：這次模型再寫不出來，就用程式整理的摘要，上下文不會一直堆
         job = SimpleNamespace(session_id=session_id, model_cfg=model, registry=registry, emit=emit, mid_turn=mid,
-                              force_compact=False, is_bg=True, threshold=_trigger(), compact_reason="", compact_count=0)
+                              force_compact=False, is_bg=True, threshold=_trigger(), compact_reason="", compact_count=0,
+                              last_chance=_fails.get(session_id, 0) >= 1)
         try:
             await prepare_turn(job)
         except Exception:
@@ -481,10 +653,11 @@ def register(woof):
             # 回合開始、回合中每一步：超過門檻就交給背景寫摘要，這一步照常送（不等）；
             # 背景寫好後，下一次送出自動換成「摘要＋最近幾則」。用量到等待線還沒好，才停下來等
             r = _used_ratio(sid, ctx.model_cfg)
-            if r < _trigger() or _fails.get(sid, 0) >= AUTO_FAIL_MAX:
+            if r < _trigger():
                 return None
             if r < _wait_at():
-                if _warm(sid, ctx.model_cfg):
+                # 剛失敗過：回合中每一步不重試，這一步結束後（after_turn）再試一次
+                if _warm(sid, ctx.model_cfg) and not _fails.get(sid):
                     _start_bg(ctx)
                 # 快取大概過期了（隔了一陣子才傳訊息、WOOF 重開過）：這一步先照常送，順便把快取建回來；
                 # 這一步結束後（after_turn）或下一步再在背景壓縮，吃得到快取，同一份內容不會付兩次原價
@@ -520,13 +693,13 @@ def register(woof):
                 if manual:
                     ctx.compact_reason = f"壓縮失敗：{str(e)[:300]}"
                 elif not getattr(ctx, "force_compact", False):
-                    n = _fails[sid] = _fails.get(sid, 0) + 1
-                    if n == AUTO_FAIL_MAX:
-                        try:
-                            await ctx.emit({"type": "notice", "session_id": sid,
-                                            "text": f"自動壓縮失敗（{str(e)[:200]}），先停止自動壓縮；按「立即壓縮」可以再試，成功後恢復"})
-                        except Exception:
-                            pass
+                    _fails[sid] = _fails.get(sid, 0) + 1
+                    try:
+                        await ctx.emit({"type": "notice", "session_id": sid,
+                                        "text": f"自動壓縮這次沒成功（{str(e)[:200]}），原文先照送；這一步結束後再試一次，"
+                                                "模型還是寫不出來就改用程式整理的摘要，上下文不會一直堆"})
+                    except Exception:
+                        pass
                 raise
             finally:
                 await _compact_state(ctx, False)
@@ -646,7 +819,21 @@ def register(woof):
             why += "，在背景寫摘要（對話照常進行，寫好後下一次送出開始用）"
         ctx.compact_count = len(older)
         await _compact_state(ctx, True)
-        text, stat = await _write(ctx, model, prev, pending[cut:], target, src_tok, why)
+        # 一定要壓下去的時候（手動、上下文爆了、到等待線、上次自動壓縮已經失敗過）：模型寫不出來就用程式整理的摘要
+        must = force or bool(getattr(ctx, "manual", False)) or bool(getattr(ctx, "last_chance", False)) \
+            or bool(window and used / window >= _wait_at())
+        fallback = False
+        try:
+            text, stat = await _write(ctx, model, prev, pending[cut:], target, src_tok, why)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            if not must:
+                raise
+            text, stat, fallback = _fallback_text(prev, older), [0, 0], True
+            await ctx.emit({"type": "notice", "session_id": ctx.session_id,
+                            "text": f"{str(e)[:200]}；改用程式整理的摘要：先前摘要原樣保留，接上這段使用者講過的話、"
+                                    "用過的工具和檔案，上下文照樣降下來；下次壓縮時模型會在這份上面整理"})
         text = text.strip()
         cur = dict((store.get_session(ctx.session_id) or {}).get("engine_state") or {})
         cur["compress_count"] = int(cur.get("compress_count") or 0) + 1
@@ -674,7 +861,8 @@ def register(woof):
         # 附的原話在這裡算好存起來：之後每次送出都一樣，不重算、快取不斷
         quotes = _users_section(msgs, older[-1]["id"], _quote_n(), _quote_chars(), _reply_head())
         cur["summary"] = {"through": older[-1]["id"], "text": text, "quotes": quotes, "at": time.time(),
-                          "kept": sorted(recent_ids), "mode": mode, "inflight": inflight, "cache": stat}
+                          "kept": sorted(recent_ids), "mode": mode, "inflight": inflight, "cache": stat,
+                          **({"fallback": True} if fallback else {})}
         cur["tok_k"] = round(k, 3)
         from woof.agent.loop import mark_rewrite, retire_images_on_compact
 
@@ -737,7 +925,7 @@ def register(woof):
     async def mid_turn(ctx):
         if str(woof.settings.get("mid_turn", True)).lower() in ("false", "0", "off"):
             return None
-        return bool(await prepare_turn(ctx))   # 失敗一次自動壓縮就先停（_fails），不會每一步都再試
+        return bool(await prepare_turn(ctx))   # 自動壓縮失敗過（_fails）：回合中每一步不重試，回合結束再試
 
     woof.on("prepare_turn", prepare_turn, order=20)
     woof.on("after_turn", after_turn, order=20)
