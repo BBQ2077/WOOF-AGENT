@@ -114,7 +114,7 @@ def create(session_id: str, cwd: str, shell: str = "auto", cols: int = 100, rows
         cwd = str(Path.home())
     argv = _argv(shell)
     env = {k: v for k, v in os.environ.items() if k not in ("PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV")}
-    env.update({"TERM": "xterm-256color", "COLORTERM": "truecolor", "CHERE_INVOKING": "1"})
+    env.update({"TERM": "xterm-256color", "COLORTERM": "truecolor", "CHERE_INVOKING": "1", **procs.font_env()})
     p = winpty.PtyProcess.spawn(argv, cwd=cwd, env=env, dimensions=(max(5, rows), max(20, cols)))
     procs.assign_pid(p.pid)
     sh = shell if shell != "auto" else ("bash" if argv[0] == procs.BASH else "powershell")

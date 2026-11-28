@@ -548,7 +548,7 @@ def register(woof):
         im = video.sheet(list(zip(times, ims)))
         media, b64 = _shrink(im, max(256, min(int(woof.settings.get("max_px") or 1568), 2576)), None)
         sw, sh = _shrink.last
-        head = "｜".join(str(x) for x in (info.get("title"), info.get("uploader"), video.clock(dur) if dur else "", size) if x)
+        head = "｜".join(str(x) for x in (info.get("title"), info.get("uploader"), video.clock(dur, False) if dur else "", size) if x)
         lines = [f"（來源：{url or path}）{head}",
                  f"畫面：{len(times)} 格拼成一張，左上角是時間" + ("" if (sw, sh) == im.size else f"，縮成 {sw}×{sh}")]
         if url:

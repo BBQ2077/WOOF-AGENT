@@ -174,7 +174,7 @@ def pick_times(dur: float, start: float | None, end: float | None, n: int | None
     a = max(0.0, float(start or 0))
     b = min(float(end), dur or float("inf")) if end is not None else (dur or a + 1)
     if b <= a:
-        raise ValueError(f"start／end 不對：影片長 {clock(dur)}")
+        raise ValueError(f"start／end 不對：影片長 {clock(dur, False)}")
     n = max(1, min(MAX_FRAMES, int(n or 9)))
     step = (b - a) / n
     return [round(a + step * (i + 0.5), 2) for i in range(n)]   # 取每段中間，避開片頭黑畫面
@@ -206,9 +206,12 @@ async def _run_bytes(cmd: list[str], timeout: float) -> tuple[int, bytes, str]:
     return p.returncode, o, e.decode("utf-8", "replace")
 
 
-def clock(t: float) -> str:
-    t = int(t)
-    return f"{t // 3600}:{t % 3600 // 60:02d}:{t % 60:02d}" if t >= 3600 else f"{t // 60}:{t % 60:02d}"
+def clock(t: float, frac: bool = True) -> str:
+    """秒數 → m:ss（滿一小時 h:mm:ss）；有小數就接著寫到 0.01 秒（65.5 → 1:05.5）。"""
+    c = round(float(t) * 100) if frac else int(t) * 100
+    s, f = divmod(c, 100)
+    out = f"{s // 3600}:{s % 3600 // 60:02d}:{s % 60:02d}" if s >= 3600 else f"{s // 60}:{s % 60:02d}"
+    return out + (f".{f:02d}".rstrip("0") if f else "")
 
 
 def tile_width(n: int) -> int:

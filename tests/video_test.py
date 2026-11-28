@@ -91,6 +91,11 @@ class Sheet(unittest.TestCase):
         self.assertEqual(out.size, (2 * 400 + 4, 2 * 225 + 4))
         self.assertEqual(VD.tile_width(9), 533)
         self.assertEqual(VD.clock(3725), "1:02:05")
+        self.assertEqual(VD.clock(65.5), "1:05.5")
+        self.assertEqual(VD.clock(12.25), "0:12.25")
+        self.assertEqual(VD.clock(3600.05), "1:00:00.05")
+        self.assertEqual(VD.clock(59.999), "1:00")
+        self.assertEqual(VD.clock(65.5, False), "1:05")
 
 
 class FakeCDP:

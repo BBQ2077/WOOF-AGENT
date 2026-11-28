@@ -110,6 +110,37 @@ def kill_tree(pid: int) -> None:
             pass
 
 
+_FONTS_CONF = """<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+  <dir>WINDOWSFONTDIR</dir>
+  <dir>WINDOWSUSERFONTDIR</dir>
+  <cachedir>{cache}</cachedir>
+  <alias><family>sans-serif</family><prefer><family>Microsoft JhengHei</family><family>Arial</family></prefer></alias>
+  <alias><family>Sans</family><prefer><family>Microsoft JhengHei</family><family>Arial</family></prefer></alias>
+  <alias><family>serif</family><prefer><family>Times New Roman</family><family>MingLiU</family></prefer></alias>
+  <alias><family>monospace</family><prefer><family>Consolas</family><family>MingLiU</family></prefer></alias>
+</fontconfig>
+"""
+
+
+def font_env() -> dict:
+    """Windows 上 ffmpeg 等程式內附的 fontconfig 沒有設定檔，drawtext／subtitles 不指定字型檔就找不到字型而當掉。
+    沒設 FONTCONFIG_FILE／FONTCONFIG_PATH 時，給 WOOF 跑的指令一份指向 Windows 字型資料夾的設定（快取放 data/fontconfig）。"""
+    if not IS_WIN or os.environ.get("FONTCONFIG_FILE") or os.environ.get("FONTCONFIG_PATH"):
+        return {}
+    d = DATA / "fontconfig"
+    f = d / "fonts.conf"
+    text = _FONTS_CONF.format(cache=(d / "cache").as_posix())
+    try:
+        if not f.is_file() or f.read_text(encoding="utf-8") != text:
+            d.mkdir(parents=True, exist_ok=True)
+            f.write_text(text, encoding="utf-8")
+    except OSError:
+        return {}
+    return {"FONTCONFIG_FILE": str(f)}
+
+
 def find_bash() -> str:
     for p in (r"C:\Program Files\Git\bin\bash.exe", r"C:\Program Files (x86)\Git\bin\bash.exe"):
         if Path(p).exists():
@@ -127,7 +158,7 @@ def spawn(argv: list[str], cwd: str | None = None, env: dict | None = None,
         kw["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         kw["start_new_session"] = True
-    e = dict(os.environ)
+    e = {**os.environ, **font_env()}
     e.setdefault("PYTHONIOENCODING", "utf-8")
     e["PYTHONUNBUFFERED"] = "1"
     if env:
