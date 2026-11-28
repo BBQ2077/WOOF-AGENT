@@ -1087,6 +1087,11 @@ class Profiles(unittest.TestCase):
         self.assertEqual(len(self.profiles.all_profiles()), 1)
 
 
+def _base() -> str:
+    from woof import config
+    return str(config.BASE_DATA)
+
+
 class ConfigPathsByProfile(unittest.TestCase):
     """路徑看 WOOF_PROFILE：預設用專案本來的檔案，其他用 data/profiles/<id>/。"""
 
@@ -1099,7 +1104,7 @@ class ConfigPathsByProfile(unittest.TestCase):
         import subprocess
 
         env = dict(os.environ)
-        env["WOOF_DATA"] = data or TMP
+        env["WOOF_DATA"] = data or _base()   # 跟這個行程已載入的 config 同一個資料夾（前面的測試檔可能換過 WOOF_DATA）
         env["PYTHONIOENCODING"] = "utf-8"
         env.pop("WOOF_PROFILE", None)
         if profile:
@@ -1111,7 +1116,7 @@ class ConfigPathsByProfile(unittest.TestCase):
 
     def test_default(self):
         got = self.run_py()
-        base = str(Path(TMP))
+        base = _base()
         self.assertEqual(got["profile"], "default")
         self.assertEqual(got["data"], base)
         self.assertEqual(got["config"], str(Path(base) / "config.toml"))
@@ -1127,11 +1132,11 @@ class ConfigPathsByProfile(unittest.TestCase):
         self.addCleanup(lambda: (self._rm(p.dir), self._back(bak)))
 
         got = self.run_py(profile=p.id)
-        d = str(Path(TMP) / "profiles" / p.id / "data")
+        d = str(Path(_base()) / "profiles" / p.id / "data")
         self.assertEqual(got["profile"], p.id)
         self.assertEqual(got["data"], d)
-        self.assertEqual(got["config"], str(Path(TMP) / "profiles" / p.id / "config.toml"))
-        self.assertEqual(got["keys"], str(Path(TMP) / "profiles" / p.id / "keys.toml"))
+        self.assertEqual(got["config"], str(Path(_base()) / "profiles" / p.id / "config.toml"))
+        self.assertEqual(got["keys"], str(Path(_base()) / "profiles" / p.id / "keys.toml"))
         self.assertEqual(got["cron"], str(Path(d) / "cron.json"))
         self.assertEqual(got["db"], str(Path(d) / "woof.db"))
         self.assertNotEqual(got["data"], self.run_py()["data"])        # 跟預設組不同
@@ -1371,7 +1376,8 @@ class Pet(unittest.TestCase):
         self.assertEqual(got["ctx"], 200000)
         self.assertEqual(got["max_out"], 40)
         self.assertNotIn("watch", got)  # 舊欄位不再收
-        self.assertEqual(p.clean({"effort": "HIGH"})["effort"], "off")
+        self.assertEqual(p.clean({"effort": "HIGH"})["effort"], "high")   # 檔位照模型的，大小寫不拘
+        self.assertEqual(p.clean({"effort": "亂寫"})["effort"], "off")
 
     def test_est_tokens(self):
         p = self.up()

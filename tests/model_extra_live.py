@@ -1,3 +1,4 @@
+"""手動跑：`python tests/model_extra_live.py <模型 id>`，看圖與停止。要先開好測試後端（port 8765、token testtoken），會真的呼叫模型。"""
 import os
 import asyncio, json, sys, urllib.request, base64
 import websockets
@@ -22,11 +23,9 @@ async def turn(ws,sid,text,images=None,stop_after=None):
         if t=="run_end": break
     print("  deltas",deltas)
 async def main():
-    s=api("POST","/api/sessions",{"model":"cli-opus"}); sid=s["id"]; print("session",sid,s["effort"])
+    model=sys.argv[1]
+    s=api("POST","/api/sessions",{"model":model}); sid=s["id"]; print("session",sid)
     async with websockets.connect(f"ws://127.0.0.1:{P}/ws?token={T}",max_size=None) as ws:
-        print("== 第一輪（含圖）"); await turn(ws,sid,"你好",[{"media_type":"image/png","data":png}])
-        print("engine_state",api("GET","/api/sessions")[0]["engine_state"])
-        print("== 第二輪（應 resume）"); await turn(ws,sid,"再一次")
-        print("== 第三輪（2 秒後停止）"); await turn(ws,sid,"慢慢來",stop_after=2)
-    print("DB roles",[m["role"] for m in api("GET",f"/api/sessions/{sid}/messages")])
+        print("== 看圖"); await turn(ws,sid,"這張圖是什麼介面？左側、中間、右側各有什麼？三句話內回答。",[{"media_type":"image/png","data":png}])
+        print("== 停止測試"); await turn(ws,sid,"用 terminal 執行 sleep 45 && echo finished（不要放背景）",stop_after=8)
 asyncio.run(main())
