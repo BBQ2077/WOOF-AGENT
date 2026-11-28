@@ -32,6 +32,12 @@ _bg: dict[str, asyncio.Task] = {}
 # 自動壓縮連續沒成功的次數：失敗過就不在回合中每一步重試（每次都要付錢），等這一步結束後再試一次；
 # 那一次模型還是寫不出來，就用程式整理的摘要（_fallback_text），上下文不會一直堆。成功就歸零
 _fails: dict[str, int] = {}
+# 程式整理的摘要只是暫用：存下後在背景再請模型照原本的內容重寫（REDO_DELAY 秒後，失敗就隔 REDO_GAP 秒），
+# 最多 REDO_MAX 次；寫好就取代。_redo_snap＝寫不出來那次送的請求（前面還在快取裡，重寫照樣吃快取）
+_redo_snap: dict[str, dict] = {}
+_redo_t: dict[str, asyncio.Task] = {}
+_override: dict[str, dict] = {}   # 重組請求時改用的摘要（重寫：用程式整理之前的那份）
+REDO_MAX, REDO_DELAY, REDO_GAP = 2, 15, 60
 
 # 摘要長度（token）：第一次照「被摘要內容 × 摘要比例」，至少 1500；不超過設定的上限（summary_tokens）和上下文的 10%
 SUM_MIN_TOK, SUM_TOK_DEFAULT, SUM_WIN = 1500, 8000, 0.10
@@ -323,6 +329,10 @@ def _fallback_text(prev: str, older: list[dict]) -> str:
     return f"{prev.rstrip()}\n{sec}" if prev else sec
 
 
+class _RedoTooBig(RuntimeError):
+    """原本的內容已經超過模型上限，重寫送不出完整的那段"""
+
+
 class _NoSummary(RuntimeError):
     """摘要模型沒寫出能用的東西（去呼叫工具、空白、寫成工具呼叫、沒有指令、太短）"""
 
@@ -409,7 +419,8 @@ def register(woof):
         snap = loop.LAST_REQ.get(sid)
         return bool(snap) and time.time() - snap["at"] <= _ttl(model)
 
-    async def _request(ctx, model: dict, prev: str, kept: list[dict], target: int, fit: float = FIT) -> dict:
+    async def _request(ctx, model: dict, prev: str, kept: list[dict], target: int, fit: float = FIT,
+                       redo: dict | None = None) -> dict:
         """寫摘要的請求：下一步本來就要送的內容（跟主對話一字不差），最後加一則壓縮指令。
         記憶體裡有上一步就接著用；WOOF 重開過或對話狀態變了，照現在的狀態重組（同一套流程）。
         超過模型窗口（上下文已經爆了）就從最舊的訊息往後拿掉，直到送得出去。"""
@@ -418,9 +429,15 @@ def register(woof):
 
         sid = ctx.session_id
         use = loop.aux_model("compact", model) or model
-        snap = loop.LAST_REQ.get(sid)
         note = ""
-        if snap and snap["model"] == model.get("id") and snap.get("sig") == loop.req_sig(sid):
+        if redo is not None:
+            # 重寫程式整理的摘要：用寫不出來那次的請求（前面是程式整理之前的摘要＋原本的對話）
+            snap = _redo_snap.get(sid)
+            fresh = bool(snap) and snap.get("for") == redo["at"] and snap["model"] == model.get("id")
+        else:
+            snap = loop.LAST_REQ.get(sid)
+            fresh = bool(snap) and snap["model"] == model.get("id") and snap.get("sig") == loop.req_sig(sid)
+        if fresh:
             new = [m for m in loop.history(sid) if int(m.get("id") or 0) > int(snap["through"] or 0)]
             new = loop._drop_hollow_replies(loop._drop_missing_images(new))
             system, msgs, specs, effort = snap["system"], [*snap["messages"], *new], snap["specs"], snap["effort"]
@@ -428,7 +445,12 @@ def register(woof):
             if age > _ttl(model):
                 note = f"上一步在 {int(age // 60)} 分鐘前，快取大概過期了，這次整段照原價算"
         else:
-            r = await loop.rebuild_request(sid, model, ctx)
+            if redo is not None:
+                _override[sid] = redo["base"]
+            try:
+                r = await loop.rebuild_request(sid, model, ctx)
+            finally:
+                _override.pop(sid, None)
             if not r:
                 raise RuntimeError("這個對話還沒有可以送出的內容")
             system, msgs, specs, effort = r["system"], list(r["messages"]), r["specs"], r["effort"]
@@ -475,8 +497,11 @@ def register(woof):
                 sizes.pop(start)
                 dropped += 1
             note = (note + "；" if note else "") + f"上下文超過模型上限，最舊的 {dropped} 則這次沒送（摘要裡不會有它們的細節，原文還在資料庫）"
+        ids = [int(m["id"]) for m in msgs if m.get("id")]
         return {"use": use, "system": system, "messages": [*msgs, ask], "specs": specs, "effort": effort,
-                "note": note, "dropped": dropped}
+                "note": note, "dropped": dropped,
+                "snap": {"model": model.get("id"), "through": max(ids) if ids else 0, "system": system,
+                         "messages": msgs, "specs": specs, "effort": effort}}
 
     def _check(out: str | None, prev: str, src_tok: float, allow_big: bool = False) -> tuple[str, list[dict], str]:
         """模型的回覆能不能當摘要：回傳 (摘要全文, 猜著套的地方, 不能用的原因)。每次壓縮都檢查"""
@@ -501,24 +526,42 @@ def register(woof):
     async def _call(ctx, req: dict, msgs: list[dict], stat: list[int]):
         from woof.agent import loop
 
-        try:
-            out = await loop.complete(req["use"], req["system"], msgs, tools=req["specs"], effort=req["effort"],
-                                      session_id=ctx.session_id, kind="compact")
-        except loop.ToolCallInstead:
-            out = None
-        u = loop.AUX_USAGE.pop(ctx.session_id, None) or {}
-        stat[0] += int(u.get("input_tokens") or 0)
-        stat[1] += int(u.get("cache_read") or 0)
-        return out
+        n = 0
+        while True:
+            try:
+                return await loop.complete(req["use"], req["system"], msgs, tools=req["specs"], effort=req["effort"],
+                                           session_id=ctx.session_id, kind="compact")
+            except loop.ToolCallInstead:
+                return None
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # 連線、限流、伺服器暫時出錯：跟主對話一樣等一下重送同一份（設定 → 一般的重試次數）
+                if n >= loop.api_retries() or not loop.is_transient_error(e):
+                    raise
+                n += 1
+                wait = loop.retry_wait(e, n)
+                await ctx.emit({"type": "notice", "session_id": ctx.session_id,
+                                "text": f"摘要模型暫時失敗（{str(e)[:120]}），{wait} 秒後重送（{n}/{loop.api_retries()}）"})
+                await asyncio.sleep(wait)
+            finally:
+                u = loop.AUX_USAGE.pop(ctx.session_id, None) or {}
+                stat[0] += int(u.get("input_tokens") or 0)
+                stat[1] += int(u.get("cache_read") or 0)
 
-    async def _write(ctx, model: dict, prev: str, kept: list[dict], target: int, src_tok: float, why: str):
+    async def _write(ctx, model: dict, prev: str, kept: list[dict], target: int, src_tok: float, why: str,
+                     redo: dict | None = None, box: dict | None = None):
         """寫摘要，回傳 (摘要全文, [輸入, 快取讀取])。都接在同一份請求後面，前面吃快取：
         - 編輯指令有幾處只能猜著套：內容都已經收進去，再接一則請模型只補正那幾處（不重寫整份）；補正寫壞了就用補正前的
         - 完全沒寫出能用的東西：在指令後面註明哪裡不對再要一次；還是沒有就丟 _NoSummary（交給呼叫端決定要不要用程式整理的摘要）"""
         from woof.agent import loop
 
         sid = ctx.session_id
-        req = await _request(ctx, model, prev, kept, target)
+        req = await _request(ctx, model, prev, kept, target, redo=redo)
+        if box is not None:
+            box["req"] = req
+        if redo is not None and req["dropped"] and not getattr(ctx, "manual", False):
+            raise _RedoTooBig("原本那段已經超過模型上限，送不出完整的內容")
         await ctx.emit({"type": "notice", "session_id": sid,
                         "text": f"{why}，正在壓縮較早的 {ctx.compact_count} 則訊息"
                                 f"（{'只寫要改的行' if prev else f'目標約 {target} 字'}）…" + (f"（{req['note']}）" if req["note"] else "")})
@@ -540,7 +583,9 @@ def register(woof):
             except Exception as e:
                 if attempt == 0 and loop.is_overflow_error(e):
                     # 估計比實際少：再多拿掉一些舊訊息重送
-                    req = await _request(ctx, model, prev, kept, target, fit=FIT * 0.8)
+                    req = await _request(ctx, model, prev, kept, target, fit=FIT * 0.8, redo=redo)
+                    if box is not None:
+                        box["req"] = req
                     problem = "超出模型上限"
                     await ctx.emit({"type": "notice", "session_id": sid,
                                     "text": "摘要請求超出模型上限，多拿掉一些最舊的訊息再送一次"
@@ -610,9 +655,35 @@ def register(woof):
         except Exception:
             pass   # 失敗的提示在 prepare_turn 裡送
 
+    def _schedule_redo(ctx, delay: float) -> None:
+        """在背景請模型重寫程式整理的摘要（不擋對話）；同一個對話已經排了就不再排"""
+        sid = ctx.session_id
+        t = _redo_t.get(sid)
+        if t and not t.done() and t is not asyncio.current_task():
+            return
+        model, registry, emit = ctx.model_cfg, ctx.registry, ctx.emit
+
+        async def run():
+            await asyncio.sleep(delay)
+            job = SimpleNamespace(session_id=sid, model_cfg=model, registry=registry, emit=emit, mid_turn=False,
+                                  force_compact=False, is_bg=True, threshold=_trigger(), compact_reason="",
+                                  compact_count=0)
+            try:
+                await prepare_turn(job)
+            except Exception:
+                pass
+        _redo_t[sid] = asyncio.create_task(run())
+
     async def after_turn(ctx):
+        from woof import store
         from woof import tokens
 
+        # 用的是程式整理的摘要、還有重寫次數、背景沒在排（例如 WOOF 重開過）：這一步結束後排一次重寫
+        s = tokens.summary_of((store.get_session(ctx.session_id) or {}).get("engine_state") or {})
+        if s.get("fallback") and int((s.get("redo") or {}).get("n") or 0) < REDO_MAX:
+            t = _redo_t.get(ctx.session_id)
+            if not t or t.done():
+                _schedule_redo(ctx, 0)
         window = tokens.window_of(ctx.model_cfg, ctx.session_id)
         if not window:
             return
@@ -725,13 +796,23 @@ def register(woof):
         # 上次模型實際回報的用量＋之後新增訊息的估計（剛貼進來的長文也算得到）
         used = tokens.current(ctx.session_id)["used"]
         trigger = getattr(ctx, "threshold", None) or _trigger()
-        if not force and (not used or used / window < trigger):
-            return
 
         mid = bool(getattr(ctx, "mid_turn", False))
         msgs = store.get_messages(ctx.session_id)
         es = dict(st.get("engine_state") or {})
         summary = tokens.summary_of(es)  # 讀取時的摘要，寫回前會重新讀取
+        manual = bool(getattr(ctx, "manual", False))
+        # 現在用的是程式整理的摘要：從整理之前的那份摘要＋原本的對話，請模型重寫（還有次數、或手動壓縮）
+        redo = summary.get("redo") if summary.get("fallback") else None
+        if redo and int(redo.get("n") or 0) >= REDO_MAX and not manual:
+            redo = None                       # 自動重寫的次數用完：照一般的壓縮，在程式整理的這份上面編輯
+        fb = summary if redo else None
+        if redo:
+            redo = {**redo, "at": summary.get("at")}
+            summary = redo["base"]
+        redo_only = bool(redo) and not force and not manual and (not used or used / window < trigger)
+        if not force and not redo and (not used or used / window < trigger):
+            return
         through = int(summary.get("through") or 0)
         pending = [m for m in msgs if m["id"] > through]
         starts = [i for i, m in enumerate(pending)
@@ -760,6 +841,9 @@ def register(woof):
         last_step = max((i for i, m in enumerate(pending) if m["role"] != "tool"), default=None)
         if last_step is not None:
             cut = min(cut, last_step)
+        if fb:
+            # 重寫至少要涵蓋程式整理那份涵蓋到的地方
+            cut = max(cut, sum(1 for m in pending if m["id"] <= int(fb.get("through") or 0)))
         if cut <= 0:
             ctx.compact_reason = f"還沒壓縮過的部分都在原樣保留的量（約 {_tail_tok():,} token）以內，不需要壓縮"
             return
@@ -767,12 +851,14 @@ def register(woof):
         inflight = 0
         if mid and (req is None or cut > req):
             inflight = pending[req]["id"] if req is not None else int(summary.get("inflight") or 0)
+        if fb:
+            inflight = inflight or int(fb.get("inflight") or 0)
         older, recent_ids = pending[:cut], {m["id"] for m in pending[cut:]}
 
         # 先試只清舊工具輸出：較早、已經用過的工具結果換成一行佔位，夠降到門檻以下就不花模型呼叫寫摘要。
         # 只在本來就要壓縮時做，平常不動，快取照舊。
         # Claude 不做：它的每段思考都綁著前面的內容，改了較早的工具輸出，後面所有思考就失效（照收費、模型讀到過期的推理）
-        if not force and model.get("provider") != "anthropic":
+        if not force and not redo and model.get("provider") != "anthropic":
             done_through = int((es.get("prune") or {}).get("through") or 0)
             saved, last_id, n_res = 0, 0, 0
             for m in older:
@@ -813,6 +899,8 @@ def register(woof):
         mode = _mode()
 
         why = (getattr(ctx, "compact_reason", "") or "手動壓縮") if force else f"上下文已用 {used / window:.0%}"
+        if redo_only:
+            why = "先前用的是程式整理的摘要，請模型照原本的內容重寫"
         if mid:
             why = "回合進行中，" + why
         if getattr(ctx, "is_bg", False):
@@ -820,20 +908,38 @@ def register(woof):
         ctx.compact_count = len(older)
         await _compact_state(ctx, True)
         # 一定要壓下去的時候（手動、上下文爆了、到等待線、上次自動壓縮已經失敗過）：模型寫不出來就用程式整理的摘要
-        must = force or bool(getattr(ctx, "manual", False)) or bool(getattr(ctx, "last_chance", False)) \
+        must = force or manual or bool(getattr(ctx, "last_chance", False)) \
             or bool(window and used / window >= _wait_at())
-        fallback = False
+        fallback, box = False, {}
         try:
-            text, stat = await _write(ctx, model, prev, pending[cut:], target, src_tok, why)
+            text, stat = await _write(ctx, model, prev, pending[cut:], target, src_tok, why, redo=redo, box=box)
         except asyncio.CancelledError:
             raise
         except Exception as e:
+            if redo_only:
+                # 重寫沒成功：程式整理的那份照用，隔一下再試，次數用完就停
+                n = REDO_MAX if isinstance(e, _RedoTooBig) else int(redo.get("n") or 0) + 1
+                cur = dict((store.get_session(ctx.session_id) or {}).get("engine_state") or {})
+                cs = cur.get("summary") or {}
+                if cs.get("fallback") and cs.get("at") == redo["at"]:
+                    cur["summary"] = {**cs, "redo": {**cs["redo"], "n": n}}
+                    store.update_session(ctx.session_id, engine_state=cur)
+                more = n < REDO_MAX
+                await ctx.emit({"type": "notice", "session_id": ctx.session_id,
+                                "text": f"模型重寫摘要沒成功（{str(e)[:200]}），程式整理的那份先用著；"
+                                        + (f"{REDO_GAP} 秒後再試一次" if more else
+                                           "自動重寫先停，按「立即壓縮」可以再請模型重寫；上下文再到門檻時照常壓縮")})
+                if more:
+                    _schedule_redo(ctx, REDO_GAP)
+                return False
             if not must:
                 raise
             text, stat, fallback = _fallback_text(prev, older), [0, 0], True
             await ctx.emit({"type": "notice", "session_id": ctx.session_id,
-                            "text": f"{str(e)[:200]}；改用程式整理的摘要：先前摘要原樣保留，接上這段使用者講過的話、"
-                                    "用過的工具和檔案，上下文照樣降下來；下次壓縮時模型會在這份上面整理"})
+                            "text": f"{str(e)[:200]}；先用程式整理的摘要頂著（先前摘要原樣保留，接上這段使用者講過的話、"
+                                    "用過的工具和檔案），上下文照樣降下來；"
+                                    + (f"{REDO_DELAY} 秒後在背景請模型照原本的內容重寫，寫好就換掉" if not box.get("req", {}).get("dropped")
+                                       else "原本那段已經超過模型上限，不自動重寫，下次壓縮時模型會在這份上面整理")})
         text = text.strip()
         cur = dict((store.get_session(ctx.session_id) or {}).get("engine_state") or {})
         cur["compress_count"] = int(cur.get("compress_count") or 0) + 1
@@ -860,9 +966,16 @@ def register(woof):
                 cur["told"] = {k: v for k, v in (cur.get("told") or {}).items() if k != "tools_add"}
         # 附的原話在這裡算好存起來：之後每次送出都一樣，不重算、快取不斷
         quotes = _users_section(msgs, older[-1]["id"], _quote_n(), _quote_chars(), _reply_head())
-        cur["summary"] = {"through": older[-1]["id"], "text": text, "quotes": quotes, "at": time.time(),
-                          "kept": sorted(recent_ids), "mode": mode, "inflight": inflight, "cache": stat,
-                          **({"fallback": True} if fallback else {})}
+        at = time.time()
+        cur["summary"] = {"through": older[-1]["id"], "text": text, "quotes": quotes, "at": at,
+                          "kept": sorted(recent_ids), "mode": mode, "inflight": inflight, "cache": stat}
+        if fallback:
+            # 記下整理之前的那份摘要，之後請模型照原本的內容重寫
+            base = {k: v for k, v in summary.items() if k not in ("fallback", "redo")}
+            r = box.get("req")
+            cur["summary"].update(fallback=True, redo={"base": base, "n": REDO_MAX if r and r["dropped"] else 0})
+            if r and not r["dropped"]:
+                _redo_snap[ctx.session_id] = {**r["snap"], "at": at, "for": at}
         cur["tok_k"] = round(k, 3)
         from woof.agent.loop import mark_rewrite, retire_images_on_compact
 
@@ -871,7 +984,13 @@ def register(woof):
         s2 = store.update_session(ctx.session_id, engine_state=cur)
         # 對話畫面據此在被摘要的訊息後面畫一條分隔線（可展開看摘要）
         await ctx.emit({"type": "session_updated", "session": s2})
+        if fallback and not cur["summary"]["redo"]["n"]:
+            _schedule_redo(ctx, REDO_DELAY)
+        elif not fallback:
+            _redo_snap.pop(ctx.session_id, None)
         hit = f"，送出 {stat[0]:,} token、快取命中 {stat[1] / stat[0]:.0%}" if stat[0] else ""
+        if fb and not fallback:
+            hit += "（取代先前程式整理的摘要）"
         await ctx.emit({"type": "notice", "session_id": ctx.session_id,
                         "text": (f"已把這一回合較早的 {len(older)} 則摘要成 {len(text)} 字，最近 {len(recent_ids)} 則保持原樣，"
                                  f"使用者這次的要求會在摘要後面重述，模型接著做{hit}") if inflight else
@@ -887,7 +1006,7 @@ def register(woof):
         from woof import tokens
 
         st = store.get_session(ctx.session_id) or {}
-        summary = tokens.summary_of(st.get("engine_state") or {})
+        summary = _override[ctx.session_id] if ctx.session_id in _override else tokens.summary_of(st.get("engine_state") or {})
         if not summary or not summary.get("text"):
             if (st.get("engine_state") or {}).get("prune"):
                 return tokens.apply_prune(messages, st.get("engine_state"))

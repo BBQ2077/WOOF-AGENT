@@ -164,6 +164,8 @@ class Flow(unittest.TestCase):
         self.hooks = {}
         C._fails.clear()
         C._bg.clear()
+        C._redo_t.clear()
+        C._redo_snap.clear()
         short = C.SHORT_SRC_TOK
         C.SHORT_SRC_TOK = 10 ** 9                        # 這裡的假摘要只有幾行，不檢查長度（test_two_bad_answers 另外測）
         self.addCleanup(setattr, C, "SHORT_SRC_TOK", short)
@@ -200,7 +202,7 @@ class Flow(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
-    def run_with(self, replies, hook="force_compact"):
+    def fake_complete(self, replies):
         async def complete(model, system, messages, tools=None, effort=None, session_id=None, kind=None):
             self.calls.append({"system": system, "messages": messages, "tools": tools, "effort": effort, "kind": kind,
                                "ask": messages[-1]["content"][0]["text"]})
@@ -209,9 +211,26 @@ class Flow(unittest.TestCase):
             r = replies.pop(0)
             if r is None:
                 raise loop.ToolCallInstead("tool")
+            if isinstance(r, Exception):
+                raise r
             return r
-        with unittest.mock.patch.object(loop, "complete", complete):
+        return complete
+
+    def run_with(self, replies, hook="force_compact"):
+        with unittest.mock.patch.object(loop, "complete", self.fake_complete(replies)):
             return asyncio.run(self.hooks[hook](self.ctx))
+
+    def run_then_redo(self, replies, rounds=1):
+        """先手動壓縮（寫不出來→程式整理），再等背景的重寫跑完"""
+        async def main():
+            await self.hooks["force_compact"](self.ctx)
+            for _ in range(rounds):
+                while C._redo_t.get(self.sid) and not C._redo_t[self.sid].done():
+                    await C._redo_t[self.sid]
+                    await asyncio.sleep(0)
+        with unittest.mock.patch.object(loop, "complete", self.fake_complete(replies)), \
+                unittest.mock.patch.multiple(C, REDO_DELAY=0, REDO_GAP=0):
+            asyncio.run(main())
 
     def summ(self):
         return store.get_session(self.sid)["engine_state"].get("summary")
@@ -314,7 +333,8 @@ class Flow(unittest.TestCase):
         self.assertIn("- 第 2 個追加要求", s["text"])
         self.assertIn("read_file×", s["text"])
         self.assertIn("f0", s["text"])
-        self.assertIn("改用程式整理的摘要", self.notices())
+        self.assertIn("先用程式整理的摘要頂著", self.notices())
+        self.assertEqual(s["redo"], {"base": {}, "n": 0})                # 第一次就寫不出來：重寫時從頭寫
 
     def test_fallback_keeps_previous_summary(self):
         self.ctx.manual = True
@@ -322,6 +342,65 @@ class Flow(unittest.TestCase):
         s = self.summ()
         self.assertTrue(s["text"].startswith(PREV))                      # 先前摘要原樣保留
         self.assertIn("程式整理", s["text"])
+
+    def test_fallback_redone_by_model_with_cache(self):
+        self.run_then_redo(["我把摘要整理如下", FAKE, "@@ 插 5\n3. 讀完 f0 到 f3\n@@ 完"])
+        self.assertEqual(len(self.calls), 3)
+        c = self.calls[2]                                                # 背景重寫：同一份請求，前面吃快取
+        self.assertEqual(c["system"], "系統")
+        self.assertEqual(c["messages"][:-1], self.sent)
+        self.assertIn("1| ## 使用者的目標與要求", c["ask"])              # 照程式整理之前的那份摘要編輯
+        self.assertNotIn("程式整理", c["ask"])
+        s = self.summ()
+        self.assertNotIn("fallback", s)
+        self.assertNotIn("程式整理", s["text"])
+        self.assertIn("3. 讀完 f0 到 f3", s["text"])
+        self.assertIn("取代先前程式整理的摘要", self.notices())
+        self.assertNotIn(self.sid, C._redo_snap)
+
+    def test_redo_fails_twice_then_stops(self):
+        self.run_then_redo(["我把摘要整理如下", FAKE, FAKE, FAKE, FAKE, FAKE], rounds=2)
+        self.assertEqual(len(self.calls), 6)                             # 第一次 2 個、重寫 2 輪各 2 個，就停
+        s = self.summ()
+        self.assertTrue(s["fallback"])                                   # 程式整理的那份照用
+        self.assertEqual(s["redo"]["n"], C.REDO_MAX)
+        self.assertIn("秒後再試一次", self.notices())
+        self.assertIn("自動重寫先停", self.notices())
+        self.calls.clear()
+        now = time.time() + 30
+        with unittest.mock.patch.object(C.time, "time", lambda: now):
+            self.run_with(["@@ 插 5\n3. 讀完\n@@ 完"])                 # 之後手動壓縮：再請模型重寫
+        self.assertIn("1| ## 使用者的目標與要求", self.calls[0]["ask"])
+        self.assertNotIn("fallback", self.summ())
+
+    def test_redo_after_restart_rebuilds_from_base(self):
+        self.run_with(["我把摘要整理如下", FAKE])
+        C._redo_snap.clear()                                             # WOOF 重開過
+        seen = []
+
+        async def rebuild(sid, model, turn=None):
+            seen.append((C._override.get(sid) or {}).get("text"))
+            return {"system": "重組的系統", "messages": self.sent, "specs": [], "effort": None}
+
+        async def main():
+            self.ctx.manual = False
+            await self.hooks["after_turn"](self.ctx)                     # 這一步結束：排一次重寫
+            await C._redo_t[self.sid]
+        with unittest.mock.patch.object(loop, "complete", self.fake_complete(["@@ 插 5\n3. 讀完\n@@ 完"])), \
+                unittest.mock.patch.object(loop, "rebuild_request", rebuild):
+            asyncio.run(main())
+        self.assertEqual(seen, [PREV])                                   # 重組時用程式整理之前的那份摘要
+        self.assertEqual(self.calls[-1]["system"], "重組的系統")
+        self.assertNotIn("fallback", self.summ())
+
+    def test_transient_error_resent(self):
+        err = RuntimeError("503 service unavailable")
+        with unittest.mock.patch.object(loop, "retry_wait", lambda e, n: 0):
+            self.run_with([err, "@@ 插 5\n3. 讀完\n@@ 完"])
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(self.calls[1]["messages"], self.calls[0]["messages"])   # 同一份重送
+        self.assertIn("暫時失敗", self.notices())
+        self.assertIn("3. 讀完", self.summ()["text"])
 
     def test_big_delete_confirmed_in_follow_up(self):
         long = "\n".join(f"{i}. 很長的一行內容，記錄做過的事情與結果，" * 3 for i in range(60))
