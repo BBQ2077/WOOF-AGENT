@@ -207,5 +207,136 @@ class WatchLocal(unittest.TestCase):
         self.assertIn("找不到檔案", r["output"])
 
 
+class _Srv:
+    """本機 HTTP：ranged＝支援分段（drop＝前幾個分段請求送一半就斷線）；否則一律回整個檔案"""
+
+    def __init__(self, data: bytes, ranged: bool = True, drop: int = 0):
+        import http.server
+        import threading
+        srv = self
+        self.data, self.ranged, self.drop, self.ranges = data, ranged, drop, []
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                rng = self.headers.get("Range", "")
+                m = __import__("re").fullmatch(r"bytes=(\d+)-(\d*)", rng)
+                if not (srv.ranged and m):
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(srv.data)))
+                    self.end_headers()
+                    self.wfile.write(srv.data)
+                    return
+                a = int(m.group(1))
+                b = int(m.group(2)) if m.group(2) else len(srv.data) - 1
+                srv.ranges.append((a, b))
+                body = srv.data[a:b + 1]
+                self.send_response(206)
+                self.send_header("Content-Range", f"bytes {a}-{b}/{len(srv.data)}")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                if b > 0 and srv.drop > 0:
+                    srv.drop -= 1
+                    self.wfile.write(body[:len(body) // 2])
+                    self.wfile.flush()
+                    self.connection.shutdown(2)
+                    return
+                self.wfile.write(body)
+
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}/v.mp4"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+class Download(unittest.TestCase):
+    """分段平行下載：慢的連線不拖住別段、斷線從斷點接著要、不支援分段改走 yt-dlp"""
+
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp(prefix="woof_test_dl_"))
+        self.data = os.urandom(10 * (1 << 20) + 12345)
+        self.said = []
+        self.old = VD.PIECE
+        VD.PIECE = 1 << 20
+
+    def tearDown(self):
+        VD.PIECE = self.old
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    async def say(self, t):
+        self.said.append(t)
+
+    def test_parallel_pieces_and_resume_after_drop(self):
+        s = _Srv(self.data, drop=3)
+        try:
+            asyncio.run(VD.download(s.url, {"Range": "bytes=0-"}, self.d / "video.mp4", self.say))
+        finally:
+            s.close()
+        self.assertEqual((self.d / "video.mp4").read_bytes(), self.data)
+        self.assertFalse((self.d / "video.mp4.part").exists())
+        self.assertGreaterEqual(len({a for a, b in s.ranges if b - a + 1 == VD.PIECE}), 8)   # 一段一段分開要
+        self.assertTrue(any(a % VD.PIECE for a, _ in s.ranges[1:]))                          # 斷線的段從斷點接著要
+        self.assertTrue(any(x.startswith("下載 ") for x in self.said))
+
+    def test_no_range_raises(self):
+        s = _Srv(self.data, ranged=False)
+        try:
+            with self.assertRaises(VD._NoRange):
+                asyncio.run(VD.download(s.url, {}, self.d / "video.mp4", self.say))
+        finally:
+            s.close()
+        self.assertFalse(any(self.d.iterdir()))
+
+    def _fetch(self, ranged):
+        import hashlib
+        import json
+        s = _Srv(self.data, ranged=ranged)
+        d = self.d / hashlib.sha1(s.url.encode()).hexdigest()[:12]
+        info = {"url": s.url, "protocol": "http", "ext": "mp4", "http_headers": {}, "extractor_key": "Generic"}
+        calls = []
+
+        async def run(cmd, timeout, on_line=None, idle=None):
+            calls.append(cmd)
+            if "-J" in cmd:
+                return 0, json.dumps(info), ""
+            (d / "video.mp4").write_bytes(b"from-ytdlp")
+            return 0, "", ""
+
+        old = VD._ytdlp, VD._run
+        VD._ytdlp, VD._run = (lambda: ["yt-dlp"]), run
+        try:
+            path, _ = asyncio.run(VD.fetch(s.url, self.d, self.say))
+        finally:
+            VD._ytdlp, VD._run = old
+            s.close()
+        return path, calls
+
+    def test_fetch_uses_parallel_for_plain_file(self):
+        path, calls = self._fetch(True)
+        self.assertEqual(path.read_bytes(), self.data)
+        self.assertEqual(len(calls), 1)                                   # 只問資訊，下載不經 yt-dlp
+        self.assertEqual(calls[0][calls[0].index("-f") + 1], VD.FMT)      # 問資訊時就選好畫質
+
+    def test_fetch_falls_back_to_ytdlp_without_range(self):
+        path, calls = self._fetch(False)
+        self.assertEqual(path.read_bytes(), b"from-ytdlp")
+        self.assertTrue(any("伺服器不支援分段" in x for x in self.said))
+        self.assertIn("-N", calls[-1])                                    # 切片格式時 yt-dlp 平行抓
+
+
+class Idle(unittest.TestCase):
+    def test_no_output_for_idle_seconds_stops(self):
+        cmd = [sys.executable, "-c", "import time; print('a', flush=True); time.sleep(30)"]
+        t = time.time()
+        with self.assertRaises(TimeoutError):
+            asyncio.run(VD._run(cmd, 60, None, 1))
+        self.assertLess(time.time() - t, 15)
+
+
 if __name__ == "__main__":
     unittest.main()

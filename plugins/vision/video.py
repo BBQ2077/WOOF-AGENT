@@ -3,6 +3,9 @@
 - yt-dlp 不裝進 WOOF：用 `uv run --with yt-dlp --exclude-newer "7 days"` 跑，只用發佈滿 7 天的版本
   （被駭的版本通常幾天內就下架）。沒有 uv 時，WOOF 的 Python 裡有 yt_dlp 就用它。
 - 只抓 480p 以下的純畫面（不用合併音軌），存在 data/spill/video/<網址雜湊>/，同一支再看不重抓，放 1 天就刪。
+- 下載：一整個檔案的格式由 WOOF 分段平行下載（PARTS 條連線各要一段，影片站常對每條連線限速）；
+  伺服器不支援分段（回整個檔案而不是 206）就交給 yt-dlp 單線下載。切片格式（HLS／DASH）交給 yt-dlp -N 平行抓切片。
+  超過 IDLE 秒沒有進度才算失敗，長影片不會被總時間卡掉。
 - 抽畫面用 ffmpeg：PATH 上找，沒有就同樣用 uv 拿 imageio-ffmpeg 附的。
 """
 from __future__ import annotations
@@ -26,6 +29,8 @@ COOLDOWN = "7 days"
 MAX_FRAMES = 16
 SUB_CHARS = 6000
 FMT = "bv*[height<=480]/b[height<=480]/wv*/w"
+SORT = "res:480,+size"
+PARTS, PIECE, IDLE = 8, 4 << 20, 60
 _NOWIN = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 _ENV = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
 _LOCKS: dict[str, asyncio.Lock] = {}
@@ -49,13 +54,17 @@ def _kill(pid: int) -> None:
     subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, creationflags=_NOWIN)
 
 
-async def _run(cmd: list[str], timeout: float, on_line=None) -> tuple[int, str, str]:
+async def _run(cmd: list[str], timeout: float, on_line=None, idle: float | None = None) -> tuple[int, str, str]:
+    """idle：超過這麼多秒沒有新的一行輸出就結束（TimeoutError）"""
     p = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                                              env=_ENV, creationflags=_NOWIN, limit=64 * 1024 * 1024)
 
     async def out() -> bytes:
         buf = []
-        async for line in p.stdout:
+        while True:
+            line = await (asyncio.wait_for(p.stdout.readline(), idle) if idle else p.stdout.readline())
+            if not line:
+                break
             buf.append(line)
             if on_line:
                 await on_line(line.decode("utf-8", "replace").strip())
@@ -73,6 +82,73 @@ def _last_err(err: str) -> str:
     lines = [ln.strip() for ln in err.splitlines() if ln.strip()]
     bad = [ln for ln in lines if ln.startswith("ERROR")]
     return ((bad or lines or ["（沒有訊息）"])[-1])[:300]
+
+
+class _NoRange(Exception):
+    """伺服器不支援分段"""
+
+
+async def download(url: str, headers: dict, dest: Path, say) -> None:
+    """分段平行下載：先要第 0 個位元組看伺服器支不支援分段（206＋總大小），再切成 PIECE 大小的段，
+    PARTS 條連線輪流領下一段（慢的連線不會拖住別段）；一段斷掉就從斷的位置接著要，連續失敗 5 次才放棄。
+    伺服器不支援分段丟 _NoRange。"""
+    import httpx
+    hdr = {k: v for k, v in (headers or {}).items() if k.lower() != "range"}
+    async with httpx.AsyncClient(timeout=httpx.Timeout(IDLE / 2, connect=15), follow_redirects=True,
+                                 limits=httpx.Limits(max_connections=PARTS)) as c:
+        async with c.stream("GET", url, headers={**hdr, "Range": "bytes=0-0"}) as r:
+            m = re.fullmatch(r"bytes 0-0/(\d+)", r.headers.get("content-range", "").strip())
+            if r.status_code != 206 or not m:
+                raise _NoRange(f"HTTP {r.status_code}")
+        size = int(m.group(1))
+        tmp = dest.with_name(dest.name + ".part")
+        with open(tmp, "wb") as f:
+            f.truncate(size)
+        todo = [(a, min(a + PIECE, size) - 1) for a in range(0, size, PIECE)][::-1]
+        got, shown = [0], [-10.0]
+
+        async def worker() -> None:
+            with open(tmp, "r+b") as f:
+                while todo:
+                    a, b = todo.pop()
+                    pos, tries = a, 0
+                    while pos <= b:
+                        start = pos
+                        try:
+                            async with c.stream("GET", url, headers={**hdr, "Range": f"bytes={pos}-{b}"}) as r:
+                                if r.status_code != 206:
+                                    raise httpx.HTTPError(f"HTTP {r.status_code}")
+                                async for chunk in r.aiter_bytes(256 * 1024):
+                                    chunk = chunk[:b - pos + 1]
+                                    f.seek(pos)
+                                    f.write(chunk)
+                                    pos += len(chunk)
+                                    got[0] += len(chunk)
+                                    pct = got[0] * 100 / size
+                                    if pct - shown[0] >= 10:
+                                        shown[0] = pct
+                                        await say(f"下載 {pct:.1f}%")
+                        except httpx.HTTPError:
+                            if pos == start:
+                                tries += 1
+                        if pos <= b:
+                            if tries >= 5:
+                                raise RuntimeError(f"第 {a:,} 位元組起的那段連續 5 次沒拿到資料")
+                            await asyncio.sleep(tries)
+
+        tasks = [asyncio.create_task(worker()) for _ in range(min(PARTS, len(todo)))]
+        try:
+            await asyncio.gather(*tasks)
+        except BaseException:
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            tmp.unlink(missing_ok=True)
+            raise
+    if got[0] != size:
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError(f"只收到 {got[0]:,}／{size:,} 位元組")
+    tmp.replace(dest)
 
 
 def _pick_sub(info: dict) -> tuple[str, bool]:
@@ -112,20 +188,32 @@ async def fetch(url: str, root: Path, say) -> tuple[Path, dict]:
         if not yt:
             raise RuntimeError("看網址影片要 uv（https://docs.astral.sh/uv/），或在 WOOF 的 Python 裝 yt-dlp")
         await say("讀影片資訊…")
-        rc, out, err = await _run(yt + ["-J", "--no-playlist", url], 120)
+        # 帶上畫質條件：頂層就是選好的那個檔案（網址、協定、要帶的標頭）
+        rc, out, err = await _run(yt + ["-J", "--no-playlist", "-f", FMT, "-S", SORT, url], 120)
         if rc or not out.strip():
             raise RuntimeError(f"yt-dlp 讀不到影片：{_last_err(err)}")
         info = json.loads(out)
         if info.get("is_live"):
             raise RuntimeError("直播中的影片看不了")
         (d / "info.json").write_text(json.dumps(info, ensure_ascii=False), "utf-8")
-        cmd = yt + ["--load-info-json", str(d / "info.json"), "-P", str(d), "-o", "video.%(ext)s",
-                    "-f", FMT, "-S", "res:480,+size", "--quiet", "--progress", "--newline",
-                    "--progress-template", "download:%(progress._percent_str)s"]
+        base = yt + ["--load-info-json", str(d / "info.json"), "-P", str(d), "-f", FMT, "-S", SORT]
         lang, auto = _pick_sub(info)
-        if lang:
-            cmd += ["--write-auto-subs" if auto else "--write-subs", "--sub-langs", lang,
-                    "--sub-format", "vtt/srt/best", "-o", "subtitle:sub"]
+        subs = (["--write-auto-subs" if auto else "--write-subs", "--sub-langs", lang,
+                 "--sub-format", "vtt/srt/best", "-o", "subtitle:sub"] if lang else [])
+        await say("下載中…")
+        if info.get("url") and info.get("protocol") in ("http", "https"):
+            try:
+                await download(info["url"], info.get("http_headers") or {}, d / f"video.{info.get('ext') or 'mp4'}", say)
+            except _NoRange:
+                await say("伺服器不支援分段，改用單線下載…")
+            except Exception as e:
+                await say(f"分段下載失敗（{str(e)[:120]}），改用 yt-dlp 下載…")
+            else:
+                if subs:
+                    await _run(base + ["--skip-download", "--quiet"] + subs, 120)
+                return _cached(d), info
+        cmd = base + ["-o", "video.%(ext)s", "-N", str(PARTS), "--quiet", "--progress", "--newline",
+                      "--progress-template", "download:%(progress._percent_str)s"] + subs
         if str(info.get("extractor_key", "")).lower().startswith("bilibili"):
             cmd += ["--add-headers", "Range:bytes=0-"]   # B 站部分 CDN 沒這個會回 567
         shown = [-10.0]
@@ -136,8 +224,10 @@ async def fetch(url: str, root: Path, say) -> tuple[Path, dict]:
                 shown[0] = float(m.group(1))
                 await say(f"下載 {m.group(1)}%")
 
-        await say("下載中…")
-        rc, _, err = await _run(cmd, 600, prog)
+        try:
+            rc, _, err = await _run(cmd, 6 * 3600, prog, IDLE)
+        except TimeoutError:
+            raise RuntimeError(f"下載超過 {IDLE} 秒沒有進度") from None
         v = _cached(d)
         if rc or not v:
             raise RuntimeError(f"下載失敗：{_last_err(err)}")
