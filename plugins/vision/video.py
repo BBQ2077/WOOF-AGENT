@@ -4,7 +4,8 @@
   （被駭的版本通常幾天內就下架）。沒有 uv 時，WOOF 的 Python 裡有 yt_dlp 就用它。
 - 只抓 480p 以下的純畫面（不用合併音軌），存在 data/spill/video/<網址雜湊>/，同一支再看不重抓，放 1 天就刪。
 - 下載：一整個檔案的格式由 WOOF 分段平行下載（PARTS 條連線各要一段，影片站常對每條連線限速）；
-  伺服器不支援分段（回整個檔案而不是 206）就交給 yt-dlp 單線下載。切片格式（HLS／DASH）交給 yt-dlp -N 平行抓切片。
+  伺服器不支援分段（回整個檔案而不是 206）就單線下載。開始後太慢就重讀影片資訊找其他鏡像站一起下載（見 download）。
+  WOOF 自己下載失敗才交給 yt-dlp；切片格式（HLS／DASH）交給 yt-dlp -N 平行抓切片。
   超過 IDLE 秒沒有進度才算失敗，長影片不會被總時間卡掉。
 - 抽畫面用 ffmpeg：PATH 上找，沒有就同樣用 uv 拿 imageio-ffmpeg 附的。
 """
@@ -21,6 +22,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -31,6 +33,8 @@ SUB_CHARS = 6000
 FMT = "bv*[height<=480]/b[height<=480]/wv*/w"
 SORT = "res:480,+size"
 PARTS, PIECE, IDLE = 8, 4 << 20, 60
+# 開始 TRY_SEC 秒後合計不到 SLOW（位元組／秒）就重讀 REROLL 次影片資訊找其他鏡像站
+SLOW, TRY_SEC, REROLL, PROBE = 2 << 20, 5, 3, 1 << 20
 _NOWIN = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 _ENV = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
 _LOCKS: dict[str, asyncio.Lock] = {}
@@ -84,71 +88,220 @@ def _last_err(err: str) -> str:
     return ((bad or lines or ["（沒有訊息）"])[-1])[:300]
 
 
-class _NoRange(Exception):
-    """伺服器不支援分段"""
+def _stream(c, url: str, hdr: dict, rng: str | None):
+    return c.stream("GET", url, headers={**hdr, "Range": rng} if rng else hdr)
 
 
-async def download(url: str, headers: dict, dest: Path, say) -> None:
-    """分段平行下載：先要第 0 個位元組看伺服器支不支援分段（206＋總大小），再切成 PIECE 大小的段，
-    PARTS 條連線輪流領下一段（慢的連線不會拖住別段）；一段斷掉就從斷的位置接著要，連續失敗 5 次才放棄。
-    伺服器不支援分段丟 _NoRange。"""
+def _host(url: str) -> str:
+    return url.split("/")[2] if "//" in url else url
+
+
+async def _mirrors(more, seen: set) -> list[tuple[str, dict]]:
+    """重讀 REROLL 次影片資訊（同時跑），留下主機沒看過的網址"""
+    if not more:
+        return []
+    got = await asyncio.gather(*(more() for _ in range(REROLL)), return_exceptions=True)
+    out = []
+    for g in got:
+        if isinstance(g, tuple) and g[0] and _host(g[0]) not in seen:
+            seen.add(_host(g[0]))
+            out.append(g)
+    return out
+
+
+async def _speed(c, url: str, hdr: dict, size: int) -> float:
+    """要開頭 PROBE 位元組（最多量 3 秒）量這台一條連線的速度（位元組／秒）；拿不到或檔案大小不同＝0"""
+    import httpx
+    t, n = time.monotonic(), 0
+    try:
+        async with _stream(c, url, hdr, f"bytes=0-{min(size, PROBE) - 1}") as r:
+            m = re.fullmatch(r"bytes 0-\d+/(\d+)", r.headers.get("content-range", "").strip())
+            if r.status_code != 206 or not m or int(m.group(1)) != size:
+                return 0.0
+            async for ch in r.aiter_bytes():
+                n += len(ch)
+                if time.monotonic() - t > 3:
+                    break
+    except httpx.HTTPError:
+        return 0.0
+    return n / max(time.monotonic() - t, 1e-3)
+
+
+def _mb(x: float) -> str:
+    return f"{x / (1 << 20):.1f} MB/s"
+
+
+async def download(url: str, headers: dict, dest: Path, say, more=None) -> None:
+    """下載一整個檔案到 dest。more()＝重讀一次影片資訊，回 (網址, 標頭)（可能分到別的鏡像站）。
+    - 伺服器支援分段：切成 PIECE 大小的段，PARTS 條連線輪流領下一段；斷線從斷點接著要，同一段連續 5 次沒拿到才放棄。
+      開始 TRY_SEC 秒後合計不到 SLOW，就找其他鏡像站：每台量一條連線的速度，不到最快那台三分之一的不用，
+      連線分到留下的鏡像站上（快的自然多領幾段），被淘汰的那台正在下載的段由別台接著要。
+    - 不支援分段：單線下載；TRY_SEC 秒後不到 SLOW 就讓其他鏡像站也各自從頭下載，再過 TRY_SEC 秒留預計最快完成的那條。"""
     import httpx
     hdr = {k: v for k, v in (headers or {}).items() if k.lower() != "range"}
     async with httpx.AsyncClient(timeout=httpx.Timeout(IDLE / 2, connect=15), follow_redirects=True,
-                                 limits=httpx.Limits(max_connections=PARTS)) as c:
-        async with c.stream("GET", url, headers={**hdr, "Range": "bytes=0-0"}) as r:
+                                 limits=httpx.Limits(max_connections=PARTS * (REROLL + 1))) as c:
+        async with _stream(c, url, hdr, "bytes=0-0") as r:
             m = re.fullmatch(r"bytes 0-0/(\d+)", r.headers.get("content-range", "").strip())
-            if r.status_code != 206 or not m:
-                raise _NoRange(f"HTTP {r.status_code}")
-        size = int(m.group(1))
-        tmp = dest.with_name(dest.name + ".part")
-        with open(tmp, "wb") as f:
-            f.truncate(size)
-        todo = [(a, min(a + PIECE, size) - 1) for a in range(0, size, PIECE)][::-1]
-        got, shown = [0], [-10.0]
+            ranged = r.status_code == 206 and m
+        if ranged:
+            await _ranged(c, url, hdr, int(m.group(1)), dest, say, more)
+        else:
+            await say("伺服器不支援分段，單線下載…")
+            await _race(c, url, hdr, dest, say, more)
 
-        async def worker() -> None:
-            with open(tmp, "r+b") as f:
-                while todo:
-                    a, b = todo.pop()
-                    pos, tries = a, 0
-                    while pos <= b:
-                        start = pos
-                        try:
-                            async with c.stream("GET", url, headers={**hdr, "Range": f"bytes={pos}-{b}"}) as r:
-                                if r.status_code != 206:
-                                    raise httpx.HTTPError(f"HTTP {r.status_code}")
-                                async for chunk in r.aiter_bytes(256 * 1024):
-                                    chunk = chunk[:b - pos + 1]
-                                    f.seek(pos)
-                                    f.write(chunk)
-                                    pos += len(chunk)
-                                    got[0] += len(chunk)
-                                    pct = got[0] * 100 / size
-                                    if pct - shown[0] >= 10:
-                                        shown[0] = pct
-                                        await say(f"下載 {pct:.1f}%")
-                        except httpx.HTTPError:
-                            if pos == start:
-                                tries += 1
-                        if pos <= b:
-                            if tries >= 5:
-                                raise RuntimeError(f"第 {a:,} 位元組起的那段連續 5 次沒拿到資料")
-                            await asyncio.sleep(tries)
 
-        tasks = [asyncio.create_task(worker()) for _ in range(min(PARTS, len(todo)))]
-        try:
-            await asyncio.gather(*tasks)
-        except BaseException:
-            for t in tasks:
-                t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            tmp.unlink(missing_ok=True)
-            raise
+async def _ranged(c, url: str, hdr: dict, size: int, dest: Path, say, more) -> None:
+    import httpx
+    tmp = dest.with_name(dest.name + ".part")
+    with open(tmp, "wb") as f:
+        f.truncate(size)
+    todo = [(a, min(a + PIECE, size) - 1) for a in range(0, size, PIECE)][::-1]
+    srcs = [{"url": url, "hdr": hdr, "dead": False}]
+    got, shown, t0 = [0], [-10.0], time.monotonic()
+
+    def pick(i: int) -> dict:
+        live = [s for s in srcs if not s["dead"]]
+        return live[i % len(live)]
+
+    async def worker(i: int) -> None:
+        with open(tmp, "r+b") as f:
+            while todo:
+                a, b = todo.pop()
+                pos, tries = a, 0
+                while pos <= b:
+                    s, start = pick(i), pos
+                    try:
+                        async with _stream(c, s["url"], s["hdr"], f"bytes={pos}-{b}") as r:
+                            if r.status_code != 206:
+                                raise httpx.HTTPError(f"HTTP {r.status_code}")
+                            async for chunk in r.aiter_bytes(256 * 1024):
+                                chunk = chunk[:b - pos + 1]
+                                f.seek(pos)
+                                f.write(chunk)
+                                pos += len(chunk)
+                                got[0] += len(chunk)
+                                pct = got[0] * 100 / size
+                                if pct - shown[0] >= 10:
+                                    shown[0] = pct
+                                    await say(f"下載 {pct:.1f}%")
+                                if s["dead"]:
+                                    break
+                    except httpx.HTTPError:
+                        if pos == start:
+                            tries += 1
+                    if pos <= b and not s["dead"]:
+                        if tries >= 5:
+                            raise RuntimeError(f"第 {a:,} 位元組起的那段連續 5 次沒拿到資料")
+                        await asyncio.sleep(tries)
+
+    async def watch() -> None:
+        await asyncio.sleep(TRY_SEC)
+        rate = got[0] / (time.monotonic() - t0)
+        if rate >= SLOW or not todo or not more:
+            return
+        await say(f"速度 {_mb(rate)} 偏慢，找其他伺服器…")
+        cands = await _mirrors(more, {_host(url)})
+        if not cands:
+            await say("沒有拿到其他伺服器，照原本的下載")
+            return
+        allc = [(url, hdr)] + cands
+        sp = await asyncio.gather(*(_speed(c, u, h, size) for u, h in allc))
+        best = max(sp)
+        if best <= 0:
+            return
+        for (u, h), v in list(zip(allc, sp))[1:]:
+            if v >= best / 3:
+                srcs.append({"url": u, "hdr": h, "dead": False})
+        srcs[0]["dead"] = sp[0] < best / 3
+        live = [f"{_host(s['url'])}（{_mb(v)}）" for s, v in zip(srcs, [sp[0]] + [v for v in sp[1:] if v >= best / 3])
+                if not s["dead"]]
+        await say(f"改從 {len(live)} 台伺服器同時下載：" + "、".join(live))
+
+    tasks = [asyncio.create_task(worker(i)) for i in range(min(PARTS, len(todo)))]
+    mon = asyncio.create_task(watch())
+    try:
+        await asyncio.gather(*tasks)
+    except BaseException:
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        tmp.unlink(missing_ok=True)
+        raise
+    finally:
+        mon.cancel()
+        await asyncio.gather(mon, return_exceptions=True)
     if got[0] != size:
         tmp.unlink(missing_ok=True)
         raise RuntimeError(f"只收到 {got[0]:,}／{size:,} 位元組")
     tmp.replace(dest)
+
+
+async def _race(c, url: str, hdr: dict, dest: Path, say, more) -> None:
+    runs: list[dict] = []
+    lead = [None]
+
+    async def one(e: dict) -> None:
+        shown = -10.0
+        async with _stream(c, e["url"], e["hdr"], None) as r:
+            if r.status_code != 200:
+                raise RuntimeError(f"HTTP {r.status_code}")
+            e["size"] = int(r.headers.get("content-length") or 0)
+            with open(e["tmp"], "wb") as f:
+                async for chunk in r.aiter_bytes(256 * 1024):
+                    f.write(chunk)
+                    e["n"] += len(chunk)
+                    if lead[0] is e and e["size"] and (pct := e["n"] * 100 / e["size"]) - shown >= 10:
+                        shown = pct
+                        await say(f"下載 {pct:.1f}%")
+        if e["size"] and e["n"] != e["size"]:
+            raise RuntimeError(f"只收到 {e['n']:,}／{e['size']:,} 位元組")
+
+    def start(u: str, h: dict) -> dict:
+        e = {"url": u, "hdr": h, "n": 0, "size": 0, "t0": time.monotonic(),
+             "tmp": dest.with_name(f"{dest.name}.{len(runs)}.part")}
+        e["task"] = asyncio.create_task(one(e))
+        runs.append(e)
+        return e
+
+    def rate(e: dict) -> float:
+        return e["n"] / max(time.monotonic() - e["t0"], 1e-3)
+
+    def eta(e: dict) -> float:
+        if e["task"].done():
+            return -1.0 if not e["task"].exception() else float("inf")
+        left = (e["size"] - e["n"]) if e["size"] else 1
+        return left / rate(e) if rate(e) else float("inf")
+
+    lead[0] = start(url, hdr)
+    try:
+        await asyncio.wait({lead[0]["task"]}, timeout=TRY_SEC)
+        if not lead[0]["task"].done() and rate(lead[0]) < SLOW and more:
+            await say(f"速度 {_mb(rate(lead[0]))} 偏慢，同時從其他伺服器下載，{TRY_SEC} 秒後留最快的…")
+            for u, h in await _mirrors(more, {_host(url)}):
+                start(u, h)
+            if len(runs) > 1:
+                await asyncio.wait({e["task"] for e in runs}, timeout=TRY_SEC, return_when=asyncio.FIRST_COMPLETED)
+                lead[0] = min(runs, key=eta)
+                await say(f"留下 {_host(lead[0]['url'])}（{_mb(rate(lead[0]))}）")
+            else:
+                await say("沒有拿到其他伺服器，照原本的下載")
+        for e in runs:
+            if e is not lead[0]:
+                e["task"].cancel()
+        await lead[0]["task"]
+    except BaseException:
+        for e in runs:
+            e["task"].cancel()
+        await asyncio.gather(*(e["task"] for e in runs), return_exceptions=True)
+        for e in runs:
+            e["tmp"].unlink(missing_ok=True)
+        raise
+    await asyncio.gather(*(e["task"] for e in runs), return_exceptions=True)
+    for e in runs:
+        if e is not lead[0]:
+            e["tmp"].unlink(missing_ok=True)
+    lead[0]["tmp"].replace(dest)
 
 
 def _pick_sub(info: dict) -> tuple[str, bool]:
@@ -202,10 +355,16 @@ async def fetch(url: str, root: Path, say) -> tuple[Path, dict]:
                  "--sub-format", "vtt/srt/best", "-o", "subtitle:sub"] if lang else [])
         await say("下載中…")
         if info.get("url") and info.get("protocol") in ("http", "https"):
+            async def more() -> tuple[str, dict] | None:
+                # 重讀一次影片資訊，可能分到別的鏡像站；要同一個格式才算
+                rc, out, _ = await _run(yt + ["-J", "--no-playlist", "-f", FMT, "-S", SORT, url], 120)
+                j = json.loads(out) if rc == 0 and out.strip() else {}
+                if j.get("format_id") == info.get("format_id") and j.get("protocol") in ("http", "https") and j.get("url"):
+                    return j["url"], j.get("http_headers") or {}
+                return None
+
             try:
-                await download(info["url"], info.get("http_headers") or {}, d / f"video.{info.get('ext') or 'mp4'}", say)
-            except _NoRange:
-                await say("伺服器不支援分段，改用單線下載…")
+                await download(info["url"], info.get("http_headers") or {}, d / f"video.{info.get('ext') or 'mp4'}", say, more)
             except Exception as e:
                 await say(f"分段下載失敗（{str(e)[:120]}），改用 yt-dlp 下載…")
             else:

@@ -376,7 +376,7 @@ tests/         測試腳本（`.venv/Scripts/python tests/unit_test.py` 跑單�
 
 MCP 連線在第一次對話時建立，插件重載或後端結束時關閉。
 
-`watch_video` 看網址影片用 [yt-dlp](https://github.com/yt-dlp/yt-dlp)（Unlicense），不裝進 WOOF：每次用 `uv run --with yt-dlp --exclude-newer "7 days"` 跑，只取發佈滿 7 天的版本，剛發佈的版本即使被植入惡意程式碼也輪不到你（這類版本通常幾天內就被發現下架）；YouTube 改版讓舊版失效時，等新版滿 7 天就自動換上。沒有 uv 時改用 WOOF 的 Python 裡裝好的 `yt_dlp`。只下載 480p 以下的畫面、不下載音軌，同一支影片 1 天內再看不重新下載。影片站常對每條連線限速，所以一整個檔案的格式由 WOOF 開 8 條連線分段同時下載，斷線的段從斷點接著要；伺服器不支援分段就改用 yt-dlp 單線下載，切片格式（HLS／DASH）由 yt-dlp 同時抓 8 個切片；超過 60 秒沒有進度才算下載失敗。抽畫面用 ffmpeg：先找 PATH，沒有就同樣用 uv 拿 `imageio-ffmpeg` 附的 ffmpeg。本機影片檔只要 ffmpeg。
+`watch_video` 看網址影片用 [yt-dlp](https://github.com/yt-dlp/yt-dlp)（Unlicense），不裝進 WOOF：每次用 `uv run --with yt-dlp --exclude-newer "7 days"` 跑，只取發佈滿 7 天的版本，剛發佈的版本即使被植入惡意程式碼也輪不到你（這類版本通常幾天內就被發現下架）；YouTube 改版讓舊版失效時，等新版滿 7 天就自動換上。沒有 uv 時改用 WOOF 的 Python 裡裝好的 `yt_dlp`。只下載 480p 以下的畫面、不下載音軌，同一支影片 1 天內再看不重新下載。影片站常對每條連線限速，所以一整個檔案的格式由 WOOF 開 8 條連線分段同時下載，斷線的段從斷點接著要；伺服器不支援分段就單線下載。開始 5 秒後合計不到 2MB/s，就重讀 3 次影片資訊找其他鏡像站：支援分段時每台量一條連線的速度，不到最快那台三分之一的不用，8 條連線分到留下的鏡像站上；不支援分段時各台同時從頭下載，再過 5 秒留預計最快完成的那條，其他的停掉刪檔。WOOF 自己下載失敗才改用 yt-dlp，切片格式（HLS／DASH）由 yt-dlp 同時抓 8 個切片；超過 60 秒沒有進度才算下載失敗。抽畫面用 ffmpeg：先找 PATH，沒有就同樣用 uv 拿 `imageio-ffmpeg` 附的 ffmpeg。本機影片檔只要 ffmpeg。
 
 WOOF 也能當 MCP 伺服器，讓其他程式（例如 Claude Code）用 MCP 操作 WOOF：列對話、讀對話、送訊息、改提示模式和壓縮設定。預設關閉，在「設定 → 進階 → MCP 伺服器」打開，當場啟動、不用重開；只聽本機 `127.0.0.1:6990/mcp`（`config.toml` 的 `[mcp] port` 可改），每個請求要帶 `data/mcp_token` 的權杖，API 金鑰不經過 MCP。關著時不載入 MCP 套件，開程式比較快。stdio 子程序由 SDK 放進 Job Object，後端被殺會一起結束。
 
