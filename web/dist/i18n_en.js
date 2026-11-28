@@ -2159,7 +2159,7 @@ window.WOOF_EN = {
 "附的原話合計最多幾 token": "Total token cap for the quoted messages",
 "第一次寫摘要時，長度佔原文的百分之幾（壓縮幅度，建議 10 到 30）；不超過摘要上限": "Length of the first summary as a percentage of the original (suggested 10 to 30); never above the summary cap",
 "更新摘要（只寫要改的行）": "Update summary (only the changed lines)",
-"整份重寫（手動壓縮）": "Full rewrite (manual compaction)",
+"手動壓縮的清理": "Cleanup on manual compaction",
 "已經有摘要時，舊摘要附行號交給模型，它只輸出編輯指令，程式套用；{n}＝舊摘要字數，{cap}＝上限字數": "When a summary exists, the old summary is given to the model with line numbers; it outputs only edit commands and the program applies them; {n} = old summary length, {cap} = cap in characters",
 "壓縮後，被摘要那段裡使用者最近幾則原話照抄在摘要後面（新的在前）": "After compaction, the user's latest few messages from the compacted part are quoted after the summary (newest first)",
 "摘要的編輯指令看不懂，這次改成整份重寫": "Could not parse the summary edit commands; rewriting the whole summary this time",

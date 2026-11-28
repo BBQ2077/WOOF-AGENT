@@ -144,8 +144,8 @@ class Quotes(unittest.TestCase):
         s = C._users_section(msgs, 99, 1, 5000)
         self.assertIn("開頭", s)
         self.assertIn("結尾", s)
-        self.assertIn("全文用 session_search around=10 查", s)   # 單則超過 500 字只附開頭和結尾
-        self.assertLess(len(s.split("使用者：")[1]), 600)
+        self.assertIn("全文用 session_search around=10 查", s)   # 單則超過 750 字只附開頭和結尾
+        self.assertLess(len(s.split("使用者：")[1]), 850)
 
 
 def big(n):
@@ -272,22 +272,21 @@ class Flow(unittest.TestCase):
         sent = self.hooks["before_request"]([{**m, "meta": {}} for m in store.get_messages(self.sid)], self.ctx)
         self.assertIn(s["quotes"], sent[0]["content"][0]["text"])
 
-    def test_manual_rewrites_whole_summary(self):
-        self.ctx.rewrite = True                                          # 已經有摘要、按「立即壓縮」：整份重寫
-        new = "## 目前目標\n- 做 A\n## 已完成\n1. 改了 a.py\n2. 跑測試全過\n3. 讀完 f0 到 f2\n## 壓縮當時進行中\n- 在讀 f3"
-        self.run_with([new])
+    def test_manual_tidies_with_edits(self):
+        self.ctx.tidy = True                                             # 已經有摘要、按「立即壓縮」：一樣只寫編輯指令，順便整份清理
+        self.run_with(["@@ 刪 2\n@@ 改 7\n- 在讀 f3\n@@ 完"])
         c = self.calls[0]
-        self.assertEqual(c["messages"][:-1], self.sent)                  # 一樣接在原本的請求後面，前面吃快取
-        self.assertIn("整份重寫成一份新的摘要", c["ask"])
-        self.assertNotIn("1| ## 使用者的目標與要求", c["ask"])           # 不附行號、不要編輯指令
-        self.assertEqual(self.summ()["text"], new)
-        self.assertIn("整份重寫", self.notices())
+        self.assertEqual(c["messages"][:-1], self.sent)                  # 接在原本的請求後面，前面吃快取
+        self.assertIn("1| ## 使用者的目標與要求", c["ask"])              # 舊摘要附行號，只寫要改的行
+        self.assertIn("逐段檢查整份", c["ask"])
+        text = self.summ()["text"]
+        self.assertNotIn("- 做 A", text)
+        self.assertTrue(text.endswith("- 在讀 f3"))
+        self.assertIn("順便整份清理", self.notices())
 
-    def test_manual_rewrite_still_takes_edits(self):
-        self.ctx.rewrite = True
-        self.run_with(["@@ 改 7\n- 在讀 f3\n@@ 完"])                     # 還是寫了編輯指令：照編輯套上
-        self.assertTrue(self.summ()["text"].endswith("- 在讀 f3"))
-        self.assertIn("- 做 A", self.summ()["text"])
+    def test_auto_compact_no_tidy(self):
+        self.run_with(["@@ 改 7\n- 在讀 f3\n@@ 完"])
+        self.assertNotIn("逐段檢查整份", self.calls[0]["ask"])
 
     def test_rules_keep_state_not_history(self):
         from woof import prompts

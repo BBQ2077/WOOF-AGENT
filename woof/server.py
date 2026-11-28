@@ -3074,7 +3074,7 @@ async def compact_session(sid: str):
     ctx.model_cfg = model_cfg
     ctx.registry = REG
     ctx.manual = True
-    ctx.rewrite = True   # 手動壓縮：已經有摘要時照現在的規則整份重寫（清掉過時、重複的）
+    ctx.tidy = True   # 手動壓縮：編輯時順便整份檢查清理（一樣只寫要改的行）
 
     async def emit(ev):
         await broadcast(ev)
