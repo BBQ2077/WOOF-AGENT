@@ -13,6 +13,7 @@
   tail_tokens   壓縮後原樣保留的最近訊息（token，照模型實際算法校正過）；至少留最後一步
   quote_count   摘要後面附上被壓縮那段裡使用者最近幾則原話
   quote_tokens  附的原話合計最多幾 token
+  quote_each_chars 單則原話最多幾字，超過只附開頭和結尾（例如直接貼文件），註明用 session_search 查全文
   quote_reply_chars 每則原話前面附它回應的助手那則開頭幾字
   summary_tokens 摘要最多幾 token；更新時只輸出要改的行（行號編輯指令），沒變的由程式原樣保留
   ratio     第一次寫摘要時，長度佔原文的百分比（壓縮幅度）
@@ -45,7 +46,7 @@ CHARS_PER_TOK = 1.5
 # 原樣保留的最近訊息（實際 token，設定 tail_tokens）；最多佔上下文的 25%，小模型才不會整段都是保留區
 TAIL_TOK_DEFAULT, TAIL_WIN = 10000, 0.25
 # 摘要後面附上被壓縮那段裡使用者最近幾則原話（新的在前）：則數、合計 token（設定 quote_count、quote_tokens）、單則上限（字）
-# 單則超過 USER_MAX 字（例如直接貼文件）只附開頭和結尾，註明用 session_search 查全文
+# 單則超過上限字數（設定 quote_each_chars，例如直接貼文件）只附開頭和結尾，註明用 session_search 查全文
 QUOTE_N_DEFAULT, QUOTE_TOK_DEFAULT, USER_MAX = 3, 1500, 750
 REPLY_HEAD_DEFAULT = 250   # 每則原話前面附上它回應的助手那則的開頭（先講結論，開頭就是重點），看得出回的是什麼
 # 快取大概還在的時間（Claude 放 5 分鐘；其他家多半更久）：超過就先讓這一步照常送（順便把快取建回來），下一步再壓縮
@@ -65,7 +66,8 @@ def _elide(text: str, cap: int, more: str = "") -> str:
 
 
 def _users_section(messages: list[dict], through: int, n: int = QUOTE_N_DEFAULT,
-                   budget: int = int(QUOTE_TOK_DEFAULT * CHARS_PER_TOK), head: int = REPLY_HEAD_DEFAULT) -> str:
+                   budget: int = int(QUOTE_TOK_DEFAULT * CHARS_PER_TOK), head: int = REPLY_HEAD_DEFAULT,
+                   each: int = USER_MAX) -> str:
     """被壓縮那段（id ≤ through）裡使用者最近 n 則親口講的話，新的在前，合計不超過 budget 字；
     每則前面附它回應的助手那則開頭 head 字。內部訊息（接續、回報…）不算。"""
     if n <= 0 or budget <= 0:
@@ -90,7 +92,7 @@ def _users_section(messages: list[dict], through: int, n: int = QUOTE_N_DEFAULT,
         room = budget - used
         if len(picked) >= n or room < 60:
             break
-        text = _elide(text, min(USER_MAX, room), f"，全文用 session_search around={m['id']} 查" if m.get("id") else "")
+        text = _elide(text, min(each, room), f"，全文用 session_search around={m['id']} 查" if m.get("id") else "")
         cap = min(head, room - len(text))
         reply = (reply[:cap] + "…" if len(reply) > cap else reply) if reply and cap >= 40 else ""
         when = time.strftime("%m-%d %H:%M", time.localtime(m["created"])) if m.get("created") else ""
@@ -386,6 +388,9 @@ def register(woof):
 
     def _reply_head() -> int:
         return _int("quote_reply_chars", REPLY_HEAD_DEFAULT, 0, 2000)
+
+    def _quote_each() -> int:
+        return _int("quote_each_chars", USER_MAX, 100, 20000)
 
     def _quote_chars() -> int:
         return int(_int("quote_tokens", QUOTE_TOK_DEFAULT, 0, 20000) * CHARS_PER_TOK)
@@ -968,7 +973,7 @@ def register(woof):
             if add:   # 已經正式加入了：之後同一個工具再「先用 tool_call」加一次，要再告訴模型
                 cur["told"] = {k: v for k, v in (cur.get("told") or {}).items() if k != "tools_add"}
         # 附的原話在這裡算好存起來：之後每次送出都一樣，不重算、快取不斷
-        quotes = _users_section(msgs, older[-1]["id"], _quote_n(), _quote_chars(), _reply_head())
+        quotes = _users_section(msgs, older[-1]["id"], _quote_n(), _quote_chars(), _reply_head(), _quote_each())
         at = time.time()
         cur["summary"] = {"through": older[-1]["id"], "text": text, "quotes": quotes, "at": at,
                           "kept": sorted(recent_ids), "mode": mode, "inflight": inflight, "cache": stat}
@@ -1022,7 +1027,7 @@ def register(woof):
         kept = tokens.apply_prune(kept, st.get("engine_state"))
         body = _prompt_get("compact_head", summary=summary["text"])
         # 使用者的原話照抄在摘要後面（不經摘要模型），跟摘要有出入以原話為準；同一份摘要每次都一樣，快取不斷
-        users = summary["quotes"] if "quotes" in summary else _users_section(messages, through, _quote_n(), _quote_chars(), _reply_head())
+        users = summary["quotes"] if "quotes" in summary else _users_section(messages, through, _quote_n(), _quote_chars(), _reply_head(), _quote_each())
         if users:
             body += _prompt_get("compact_users", users=users)
         if "session_search" in getattr(getattr(ctx, "registry", None), "tools", {}):

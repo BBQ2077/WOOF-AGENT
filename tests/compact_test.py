@@ -146,6 +146,8 @@ class Quotes(unittest.TestCase):
         self.assertIn("結尾", s)
         self.assertIn("全文用 session_search around=10 查", s)   # 單則超過 750 字只附開頭和結尾
         self.assertLess(len(s.split("使用者：")[1]), 850)
+        s2 = C._users_section(msgs, 99, 1, 9000, each=4000)              # 設定 quote_each_chars 調大
+        self.assertNotIn("中間省略", s2)
 
 
 def big(n):
