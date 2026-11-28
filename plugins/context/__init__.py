@@ -28,6 +28,10 @@ import time
 from types import SimpleNamespace
 
 _bg: dict[str, asyncio.Task] = {}
+# 自動壓縮（背景、回合中）連續失敗幾次就先停：不然每一步都再試一次，每次都是整段送去寫摘要。
+# 手動「立即壓縮」不受限，任何一次成功就歸零
+_fails: dict[str, int] = {}
+AUTO_FAIL_MAX = 3
 
 MSG_CAP = 12000      # 單則訊息送給摘要的字數上限（超過的頭尾留、中間省略）
 # 一般做法（不沿用快取）送給摘要模型的節錄：工具結果頭尾留幾字、工具參數留幾字。
@@ -420,7 +424,7 @@ def register(woof):
         """在背景壓縮；同一個對話已經有一個在跑就不再開"""
         sid = ctx.session_id
         t = _bg.get(sid)
-        if t and not t.done():
+        if (t and not t.done()) or _fails.get(sid, 0) >= AUTO_FAIL_MAX:
             return
         _bg[sid] = asyncio.create_task(_precompact(sid, ctx.model_cfg, ctx.registry, ctx.emit,
                                                    mid=bool(getattr(ctx, "mid_turn", False))))
@@ -479,7 +483,7 @@ def register(woof):
             # 回合開始、回合中每一步：超過門檻就交給背景寫摘要，這一步照常送（不等）；
             # 背景寫好後，下一次送出自動換成「摘要＋最近幾則」。用量到等待線還沒好，才停下來等
             r = _used_ratio(sid, ctx.model_cfg)
-            if r < _trigger():
+            if r < _trigger() or _fails.get(sid, 0) >= AUTO_FAIL_MAX:
                 return None
             if r < _wait_at():
                 _start_bg(ctx)
@@ -509,10 +513,19 @@ def register(woof):
                     done = await _compact(ctx)
                 if done:
                     _last_done[sid] = time.time()
+                    _fails.pop(sid, None)
                 return done
             except Exception as e:
                 if manual:
                     ctx.compact_reason = f"壓縮失敗：{str(e)[:300]}"
+                else:
+                    n = _fails[sid] = _fails.get(sid, 0) + 1
+                    if n == AUTO_FAIL_MAX:
+                        try:
+                            await ctx.emit({"type": "notice", "session_id": sid,
+                                            "text": f"自動壓縮連續失敗 {n} 次，先停止自動壓縮；按「立即壓縮」可以再試，成功後恢復"})
+                        except Exception:
+                            pass
                 raise
             finally:
                 await _compact_state(ctx, False)

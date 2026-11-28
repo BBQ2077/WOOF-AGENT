@@ -221,6 +221,33 @@ class NotSummary(unittest.TestCase):
         self.assertIn("只寫了", str(cm.exception))
         self.assertNotIn("summary", store.get_session(self.sid)["engine_state"])
 
+    def test_auto_stops_after_three_failures(self):
+        C._fails.clear()
+        C._bg.clear()
+        self.ctx.force_compact, self.ctx.manual, self.ctx.is_bg = False, False, True
+        replies = [self.FAKE] * 6
+        n = []
+
+        async def complete(model, system, messages, *a, **k):
+            n.append(1)
+            return replies.pop(0)
+        with unittest.mock.patch.object(loop, "complete", complete), \
+                unittest.mock.patch.object(loop, "aux_model", lambda task, fb: None):
+            for _ in range(3):
+                with self.assertRaises(RuntimeError):
+                    asyncio.run(self.hooks["prepare_turn"](self.ctx))
+            self.assertEqual(len(n), 6)                    # 每次最多寫兩次
+            self.assertEqual(C._fails[self.sid], 3)
+            self.assertTrue(any("連續失敗 3 次" in (e.get("text") or "") for e in self.events))
+            self.ctx.is_bg = False
+            asyncio.run(self.hooks["after_turn"](self.ctx))
+            self.assertIsNone(C._bg.get(self.sid))         # 不再開背景壓縮
+            self.assertIsNone(asyncio.run(self.hooks["prepare_turn"](self.ctx)))
+        good = "## 已完成\n" + "1. 讀完 f0 到 f3，內容是資料。\n" * 20
+        self.ctx.manual = True
+        self.run_with([good])                              # 手動照樣能壓，成功就歸零
+        self.assertNotIn(self.sid, C._fails)
+
     def test_stored_fake_summary_ignored(self):
         from woof import tokens
         es = dict(store.get_session(self.sid)["engine_state"])
