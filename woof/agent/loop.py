@@ -1166,7 +1166,9 @@ def apply_pending(session: dict | None) -> dict | None:
     中途改 plugins_off 會改到 prompt_fp，讓模型的前綴快取整段失效；改成排隊，
     等下一次重組（ compress_count 改變、或 fp 本來就不同）再一次套用，不多花一次快取。
     """
-    es = dict((session or {}).get("engine_state") or {})
+    # 從資料庫重新讀：呼叫端手上的 session 可能是 await 之前讀的，期間壓縮寫進去的摘要不能被蓋掉
+    fresh = store.get_session(session["id"]) if session else None
+    es = dict((fresh or session or {}).get("engine_state") or {})
     off = es.pop("pending_off", None)
     gen = es.pop("pending_gen", None)
     if off is None:
@@ -1526,7 +1528,8 @@ async def run_turn(session_id: str, blocks: list[dict], emit: Emit) -> None:
 
     note, told = settings_note(session)
     if note:
-        es = dict(session.get("engine_state") or {})
+        # 重新讀最新的：中間有 await，期間手動壓縮寫進去的摘要不能被回合開始時讀到的舊狀態蓋掉
+        es = dict((store.get_session(session_id) or session).get("engine_state") or {})
         es["told"] = told
         session = store.update_session(session_id, engine_state=es) or session
     m = store.add_message(session_id, "user", blocks, {"note": note} if note else None)

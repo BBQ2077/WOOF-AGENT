@@ -953,6 +953,18 @@ class Presets(unittest.TestCase):
         self.assertIs(loop.apply_pending(s), s)     # 沒排隊就原樣返回，不白寫一次資料庫
         self.assertEqual(loop.pending_off(s), [])
 
+    def test_pending_keeps_summary_written_meanwhile(self):
+        from woof.agent import loop
+
+        s = store.create_session("m", None, "t")
+        stale = store.update_session(s["id"], engine_state={"pending_off": ["x"], "pending_gen": 1})
+        cur = dict(stale["engine_state"])
+        cur["summary"] = {"through": 5, "text": "壓縮期間寫進去的摘要"}   # 回合開始讀完之後，手動壓縮做完
+        store.update_session(s["id"], engine_state=cur)
+        got = loop.apply_pending(stale)
+        self.assertEqual(got["engine_state"]["summary"]["text"], "壓縮期間寫進去的摘要")
+        self.assertEqual(got["engine_state"]["plugins_off"], ["x"])
+
 
 class Profiles(unittest.TestCase):
     """多組設定：每組的金鑰、模型、記憶、Skills、對話、排程各自獨立；預設那組不動。"""
