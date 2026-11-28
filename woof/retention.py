@@ -1,6 +1,7 @@
 """資料保留：暫存 7 天、用量紀錄 30 天，沒有永久留著的暫存。
 
 - 工具長輸出全文（data/spill，含 read_file 把 docx／pptx 轉成的文字和圖）、背景指令紀錄（data/logs）：放 7 天就刪
+- watch_video 下載的影片（data/spill/video）：放 1 天就刪
 - 用量紀錄（usage_log：模型、token 數、時間）：放 30 天就刪，用量統計最多也只看 30 天
 - 已刪對話留下的工具耗時紀錄、系統提示快照：直接刪
 開程式時整理一次，之後每 6 小時一次。「設定 → 一般 → 暫存與紀錄」可以一鍵全部清掉，不用等。
@@ -11,6 +12,7 @@ import time
 from pathlib import Path
 
 TEMP_DAYS = 7
+VIDEO_DAYS = 1
 USAGE_DAYS = 30
 
 
@@ -31,13 +33,14 @@ def _files(cut: float | None) -> list[Path]:
     spill, logs = _dirs()
     keep = _running_logs()
     out = []
-    # spill/docs/<編號>/：read_file 把 docx、pptx 轉成的文字和解出的圖
-    for d, pat in ((spill, "*.txt"), (logs, "task_*.log"), (spill / "docs", "*/*")):
+    vcut = None if cut is None else max(cut, time.time() - VIDEO_DAYS * 86400)
+    # spill/docs/<編號>/：read_file 把 docx、pptx 轉成的文字和解出的圖；spill/video/<網址雜湊>/：watch_video 下載的影片
+    for d, pat, c in ((spill, "*.txt", cut), (logs, "task_*.log", cut), (spill / "docs", "*/*", cut), (spill / "video", "*/*", vcut)):
         if not d.is_dir():
             continue
         for p in d.glob(pat):
             try:
-                if str(p) in keep or (cut is not None and p.stat().st_mtime >= cut):
+                if str(p) in keep or (c is not None and p.stat().st_mtime >= c):
                     continue
             except OSError:
                 continue
@@ -55,7 +58,7 @@ def _drop_files(paths: list[Path]) -> tuple[int, int]:
             size += s
         except OSError:
             pass
-        if p.parent.parent.name == "docs":
+        if p.parent.parent.name in ("docs", "video"):
             try:
                 p.parent.rmdir()   # 轉檔資料夾清空了就一起刪
             except OSError:

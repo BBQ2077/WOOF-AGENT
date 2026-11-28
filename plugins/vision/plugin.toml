@@ -1,7 +1,7 @@
 name = "vision"
 version = "0.1.0"
 kinds = ["tool"]
-description = "讓 agent 看圖：本機或網址圖片（vision_analyze）、網頁與 HTML／SVG 截圖（view_page）"
+description = "讓 agent 看圖：本機或網址圖片（vision_analyze）、網頁與 HTML／SVG 截圖（view_page）、看影片（watch_video）"
 enabled = true
 
 [settings.max_px]

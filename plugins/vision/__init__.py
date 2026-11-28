@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import importlib.util
 import io
 import json
 import os
@@ -20,8 +21,19 @@ from pathlib import Path
 import httpx
 from PIL import Image, ImageOps
 
+# 同資料夾的 video.py（插件不是一般套件，用檔案路徑載入）
+_vspec = importlib.util.spec_from_file_location(__name__ + "_video", Path(__file__).with_name("video.py"))
+video = importlib.util.module_from_spec(_vspec)
+_vspec.loader.exec_module(video)
+
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 MAX_DOWNLOAD = 15 * 1024 * 1024  # 網址圖片上限 15 MB
+LOAD_WAIT, JS_WAIT, SHOT_WAIT = 15, 20, 15   # view_page 每一步最多等幾秒
+_STEP = {"Page.navigate": "開網址", "Runtime.evaluate": "執行 js", "Page.captureScreenshot": "截圖"}
+
+
+class StepTimeout(RuntimeError):
+    """某一步的 CDP 指令逾時（不是整個工具的時限）。"""
 
 
 def _shrink(im: Image.Image, max_px: int, region: tuple[int, int, int, int] | None) -> tuple[str, str]:
@@ -124,7 +136,11 @@ class _CDP:
         f = asyncio.get_running_loop().create_future()
         self.pending[self.n] = f
         await self.ws.send(json.dumps({"id": self.n, "method": method, "params": params or {}}))
-        r = await asyncio.wait_for(f, timeout)
+        try:
+            r = await asyncio.wait_for(f, timeout)
+        except asyncio.TimeoutError:
+            self.pending.pop(self.n, None)
+            raise StepTimeout(f"{_STEP.get(method, method)}超過 {timeout:g} 秒沒回應") from None
         if "error" in r:
             raise RuntimeError(f"{method}：{r['error'].get('message')}")
         return r.get("result") or {}
@@ -203,18 +219,18 @@ async def _shoot_page(exe: str, url: str, shots: list[dict], first_wait: int, ma
                 raise RuntimeError(f"頁面打不開：{nav['errorText']}")
             notes: list[str] = []
             try:
-                await asyncio.wait_for(loaded, 30)
+                await asyncio.wait_for(loaded, LOAD_WAIT)
             except asyncio.TimeoutError:
-                notes.append("頁面 30 秒內沒有載完，照當下的畫面截")
+                notes.append(f"頁面 {LOAD_WAIT} 秒內沒有載完，照當下的畫面截")
             await asyncio.sleep(first_wait / 1000)
             out = []
-            for s in shots:
+            for i, s in enumerate(shots):
                 if (s["width"], s["height"]) != (vw, vh):
                     vw, vh = s["width"], s["height"]
                     await cdp.call("Emulation.setDeviceMetricsOverride", {"width": vw, "height": vh, "deviceScaleFactor": 1, "mobile": False})
                 js_out = None
                 if s.get("js"):
-                    r = await cdp.call("Runtime.evaluate", {"expression": s["js"], "awaitPromise": True, "returnByValue": True}, timeout=60)
+                    r = await _eval(cdp, s["js"])
                     if r.get("exceptionDetails"):
                         d = r["exceptionDetails"]
                         js_out = "js 出錯：" + str((d.get("exception") or {}).get("description") or d.get("text"))[:600]
@@ -251,7 +267,12 @@ async def _shoot_page(exe: str, url: str, shots: list[dict], first_wait: int, ma
                     params["clip"] = {**clip, "scale": scale}
                 if scale != 1:
                     desc += f"，放大 {scale}×"
-                data = (await cdp.call("Page.captureScreenshot", params, timeout=90))["data"]
+                try:
+                    data = await _capture(cdp, params, vw, vh)
+                except StepTimeout:
+                    out.append({"error": "頁面停止更新畫面，截不到圖（影片、動畫頁常見）", "desc": desc, "js": js_out})
+                    out += [{"error": "略過（前一張截不到）", "desc": ""} for _ in shots[i + 1:]]
+                    break
                 im = Image.open(io.BytesIO(base64.b64decode(data)))
                 ow, oh = im.size
                 media, b64 = _shrink(im, max_px, None)
@@ -267,6 +288,32 @@ async def _shoot_page(exe: str, url: str, shots: list[dict], first_wait: int, ma
             if not Path(udd).exists():
                 break
             await asyncio.sleep(0.4)
+
+
+async def _eval(cdp: _CDP, js: str) -> dict:
+    """跑 js；頁面自己跳轉（重新導向、換播放器）把它打斷時，等載完再跑一次。"""
+    for k in range(2):
+        loaded = cdp.expect("Page.loadEventFired")
+        try:
+            return await cdp.call("Runtime.evaluate", {"expression": js, "awaitPromise": True, "returnByValue": True}, timeout=JS_WAIT)
+        except RuntimeError as e:
+            if k or isinstance(e, StepTimeout) or not any(t in str(e) for t in ("navigated or closed", "context was destroyed")):
+                raise
+        try:
+            await asyncio.wait_for(loaded, 10)
+        except asyncio.TimeoutError:
+            pass
+        await asyncio.sleep(1)
+
+
+async def _capture(cdp: _CDP, params: dict, vw: int, vh: int) -> str:
+    """截圖要等頁面畫出新的一格；頁面停住時改一下視窗大小逼它重畫，再試一次。"""
+    try:
+        return (await cdp.call("Page.captureScreenshot", params, timeout=8))["data"]
+    except StepTimeout:
+        for h in (vh + 1, vh):
+            await cdp.call("Emulation.setDeviceMetricsOverride", {"width": vw, "height": h, "deviceScaleFactor": 1, "mobile": False}, timeout=5)
+        return (await cdp.call("Page.captureScreenshot", params, timeout=SHOT_WAIT))["data"]
 
 
 def _norm_shots(raw, limit: int) -> list[dict]:
@@ -421,53 +468,8 @@ def register(woof):
         tried = f"（{'；'.join(errs)}，改用 {who}）" if errs else ""
         return {"output": f"（{who}）{tried}\n{info}\n{text or '（模型沒有回覆）'}"}
 
-    async def view_page(args: dict, ctx) -> dict:
-        raw = (args.get("path") or "").strip()
-        url = (args.get("url") or "").strip()
-        if bool(raw) == bool(url):
-            return {"output": "path 與 url 要給一個（只能一個）", "is_error": True}
-        if raw:
-            p = Path(raw).expanduser()
-            if not p.is_absolute():
-                p = Path(ctx.cwd or ".") / p
-            if not p.is_file():
-                return {"output": f"找不到檔案：{p}", "is_error": True}
-            url, src = p.resolve().as_uri(), str(p)
-        else:
-            if not url.lower().startswith(("http://", "https://", "file:///")):
-                return {"output": "url 只接受 http://、https:// 或 file:///", "is_error": True}
-            src = url
-        exe = _find_browser(str(woof.settings.get("browser") or "").strip())
-        if not exe:
-            return {"output": "找不到 Chrome 或 Edge：在「設定 → 插件 → vision」填瀏覽器路徑", "is_error": True}
-        try:
-            shots = _norm_shots(args.get("shots"), max(1, int(woof.settings.get("max_shots") or 6)))
-        except (TypeError, ValueError) as e:
-            return {"output": str(e), "is_error": True}
-        max_px = max(256, min(int(woof.settings.get("max_px") or 1568), 2576))
-        first_wait = max(0, min(30000, int(args.get("wait_ms") if args.get("wait_ms") is not None else 1000)))
-        try:
-            res, errs = await asyncio.wait_for(_shoot_page(exe, url, shots, first_wait, max_px), 300)
-        except asyncio.TimeoutError:
-            return {"output": "截圖超過 300 秒沒完成，已關掉瀏覽器", "is_error": True}
-        except Exception as e:
-            return {"output": f"截圖失敗：{type(e).__name__}: {e}", "is_error": True}
-        question = (args.get("question") or "看這幾張截圖，描述畫面並指出明顯的問題（錯位、重疊、縫隙、破圖、文字被切掉）。").strip()
-        lines, pics = [], []
-        for i, (r, s) in enumerate(zip(res, shots), 1):
-            head = f"第 {i} 張" + (f"「{s['label']}」" if s["label"] else "")
-            if r.get("error"):
-                lines.append(f"{head}：{r['error']}" + (f"；js 回傳 {r['js']}" if r.get("js") else ""))
-                continue
-            size = f"截圖 {r['w']}×{r['h']}" + ("" if (r["sw"], r["sh"]) == (r["w"], r["h"])
-                                               else f"，縮成 {r['sw']}×{r['sh']} 給你看（座標乘 {r['w'] / r['sw']:.2f} 換回截圖）")
-            lines.append(f"{head}：{r['desc']}；{size}" + (f"；js 回傳 {r['js']}" if r.get("js") else ""))
-            pics.append(r)
-        if errs:
-            lines.append(f"頁面錯誤（{len(errs)}）：\n" + "\n".join(errs[:20]))
-        info = f"（來源：{src}）\n" + "\n".join(lines)
-        if not pics:
-            return {"output": info, "is_error": True}
+    async def deliver(ctx, pics: list[dict], info: str, question: str, lead: str, hint: str) -> dict:
+        """圖交給模型：主模型能看圖就直接放進上下文，不能就請看圖模型轉成文字。pics＝[{png(b64), media}…]"""
         turn = getattr(ctx, "turn", None)
         tm = _native_model(woof, turn.model_cfg if turn is not None else None)
         if tm is not None:
@@ -478,8 +480,7 @@ def register(woof):
                 pic = DIR / f"{uuid.uuid4().hex[:12]}.png"
                 pic.write_bytes(base64.b64decode(r["png"]))
                 imgs.append({"type": "image", "path": str(pic), "media_type": r["media"]})
-            return {"output": f"{len(imgs)} 張截圖已依序放進你的上下文。{info}\n細節看不清就用 region 加 scale 放大再截。直接用你自己的視覺看圖回答：{question}",
-                    "images": imgs}
+            return {"output": f"{lead}{info}\n{hint}直接用你自己的視覺看圖回答：{question}", "images": imgs}
         from woof.agent.loop import complete, vision_chain
         from woof.config import DATA
         from woof.prompts import get as _prompt
@@ -510,6 +511,110 @@ def register(woof):
         if model is None:
             return {"output": info + "\n看圖失敗：\n" + "\n".join(errs2) + _VIS_HINT, "is_error": True}
         return {"output": f"（{model.get('label') or model['id']}）{info}\n{text or '（模型沒有回覆）'}"}
+
+    async def watch_video(args: dict, ctx) -> dict:
+        url = (args.get("url") or "").strip()
+        raw = (args.get("path") or "").strip()
+        if bool(url) == bool(raw):
+            return {"output": "url 與 path 要給一個（只能一個）", "is_error": True}
+        from woof.config import DATA
+
+        async def say(text: str) -> None:
+            await ctx.output(text + "\n")
+
+        info: dict = {}
+        try:
+            if url:
+                if not url.lower().startswith(("http://", "https://")):
+                    return {"output": "url 只接受 http:// 或 https://", "is_error": True}
+                path, info = await video.fetch(url, DATA / "spill" / "video", say)
+            else:
+                path = Path(raw).expanduser()
+                if not path.is_absolute():
+                    path = Path(ctx.cwd or ".") / path
+                if not path.is_file():
+                    return {"output": f"找不到檔案：{path}", "is_error": True}
+            ff = await video.ffmpeg()
+            dur, size = await video.probe(ff, path)
+            dur = dur or float(info.get("duration") or 0)
+            times = video.pick_times(dur, args.get("start"), args.get("end"), args.get("frames"), args.get("times"))
+            ims = await video.grab(ff, path, times, video.tile_width(len(times)))
+        except (ValueError, TypeError, RuntimeError) as e:
+            return {"output": str(e), "is_error": True}
+        except asyncio.TimeoutError:
+            return {"output": "影片處理逾時（下載最多等 10 分鐘）", "is_error": True}
+        if not any(ims):
+            return {"output": f"抽不到畫面：{path.name} 可能不是影片", "is_error": True}
+        im = video.sheet(list(zip(times, ims)))
+        media, b64 = _shrink(im, max(256, min(int(woof.settings.get("max_px") or 1568), 2576)), None)
+        sw, sh = _shrink.last
+        head = "｜".join(str(x) for x in (info.get("title"), info.get("uploader"), video.clock(dur) if dur else "", size) if x)
+        lines = [f"（來源：{url or path}）{head}",
+                 f"畫面：{len(times)} 格拼成一張，左上角是時間" + ("" if (sw, sh) == im.size else f"，縮成 {sw}×{sh}")]
+        if url:
+            if args.get("times"):
+                lo, hi = min(times) - 5, max(times) + 5
+            else:
+                lo, hi = float(args.get("start") or 0), float(args["end"]) if args.get("end") is not None else float("inf")
+            name, text = video.subs_text(path.parent, lo, hi)
+            lines.append(f"字幕（{name}）：\n{text}" if text else ("字幕：這段沒有" if name else "字幕：沒有"))
+        question = (args.get("question") or "描述這段影片的內容").strip()
+        return await deliver(ctx, [{"png": b64, "media": media}], "\n".join(lines), question, "",
+                             "看細節用 start／end 縮小範圍或 times 指定秒數，格數越少每格越大。")
+
+    async def view_page(args: dict, ctx) -> dict:
+        raw = (args.get("path") or "").strip()
+        url = (args.get("url") or "").strip()
+        if bool(raw) == bool(url):
+            return {"output": "path 與 url 要給一個（只能一個）", "is_error": True}
+        if raw:
+            p = Path(raw).expanduser()
+            if not p.is_absolute():
+                p = Path(ctx.cwd or ".") / p
+            if not p.is_file():
+                return {"output": f"找不到檔案：{p}", "is_error": True}
+            url, src = p.resolve().as_uri(), str(p)
+        else:
+            if not url.lower().startswith(("http://", "https://", "file:///")):
+                return {"output": "url 只接受 http://、https:// 或 file:///", "is_error": True}
+            src = url
+        exe = _find_browser(str(woof.settings.get("browser") or "").strip())
+        if not exe:
+            return {"output": "找不到 Chrome 或 Edge：在「設定 → 插件 → vision」填瀏覽器路徑", "is_error": True}
+        try:
+            shots = _norm_shots(args.get("shots"), max(1, int(woof.settings.get("max_shots") or 6)))
+        except (TypeError, ValueError) as e:
+            return {"output": str(e), "is_error": True}
+        max_px = max(256, min(int(woof.settings.get("max_px") or 1568), 2576))
+        first_wait = max(0, min(30000, int(args.get("wait_ms") if args.get("wait_ms") is not None else 1000)))
+        # 每一步都有自己的時限；這個是防萬一的總時限：開瀏覽器＋載入＋每張（js 兩次＋截圖兩次＋wait_ms）
+        limit = 30 + LOAD_WAIT + first_wait / 1000 + sum(2 * JS_WAIT + 2 * SHOT_WAIT + 5 + s["wait_ms"] / 1000 for s in shots)
+        try:
+            res, errs = await asyncio.wait_for(_shoot_page(exe, url, shots, first_wait, max_px), limit)
+        except StepTimeout as e:
+            return {"output": f"截圖失敗：{e}，已關掉瀏覽器", "is_error": True}
+        except asyncio.TimeoutError:
+            return {"output": f"截圖整體超過 {limit:.0f} 秒沒完成，已關掉瀏覽器", "is_error": True}
+        except Exception as e:
+            return {"output": f"截圖失敗：{type(e).__name__}: {e}", "is_error": True}
+        question = (args.get("question") or "看這幾張截圖，描述畫面並指出明顯的問題（錯位、重疊、縫隙、破圖、文字被切掉）。").strip()
+        lines, pics = [], []
+        for i, (r, s) in enumerate(zip(res, shots), 1):
+            head = f"第 {i} 張" + (f"「{s['label']}」" if s["label"] else "")
+            if r.get("error"):
+                lines.append(f"{head}：{r['error']}" + (f"；js 回傳 {r['js']}" if r.get("js") else ""))
+                continue
+            size = f"截圖 {r['w']}×{r['h']}" + ("" if (r["sw"], r["sh"]) == (r["w"], r["h"])
+                                               else f"，縮成 {r['sw']}×{r['sh']} 給你看（座標乘 {r['w'] / r['sw']:.2f} 換回截圖）")
+            lines.append(f"{head}：{r['desc']}；{size}" + (f"；js 回傳 {r['js']}" if r.get("js") else ""))
+            pics.append(r)
+        if errs:
+            lines.append(f"頁面錯誤（{len(errs)}）：\n" + "\n".join(errs[:20]))
+        info = f"（來源：{src}）\n" + "\n".join(lines)
+        if not pics:
+            return {"output": info, "is_error": True}
+        return await deliver(ctx, pics, info, question, f"{len(pics)} 張截圖已依序放進你的上下文。",
+                             "細節看不清就用 region 加 scale 放大再截。")
 
     woof.add_tool(
         "vision_analyze",
@@ -553,4 +658,19 @@ def register(woof):
             "question": {"type": "string", "description": "要檢查什麼；空白＝描述畫面並指出問題"},
         }},
         view_page,
+    )
+
+    woof.add_tool(
+        "watch_video",
+        "看影片：YouTube、B 站等網址或本機影片檔。抽幾格畫面拼成一張圖給你看，有字幕就附上。先看整段，再用 start／end 或 times 看細節。",
+        {"type": "object", "properties": {
+            "url": {"type": "string", "description": "影片網址"},
+            "path": {"type": "string", "description": "本機影片檔（或用 url）"},
+            "start": {"type": "number", "description": "從第幾秒"},
+            "end": {"type": "number", "description": "到第幾秒"},
+            "frames": {"type": "integer", "description": f"抽幾格，預設 9，最多 {video.MAX_FRAMES}"},
+            "times": {"type": "array", "items": {"type": "number"}, "description": "指定要看的秒數，取代 frames"},
+            "question": {"type": "string", "description": "要看什麼"},
+        }},
+        watch_video,
     )

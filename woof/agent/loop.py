@@ -580,10 +580,10 @@ def _clip(text: str, call_id: str) -> str:
 # 同一回合的多個工具怎麼跑：只讀、查詢類的一起跑；寫檔看路徑，跟同一批的讀寫不重疊才一起跑；
 # 跑指令、MCP、會改檔的子代理、不認得的工具照順序，一個做完才開始下一個。
 # （模型同時發「截圖」和「看圖」時，看圖要等截圖完成，不然看到的是舊圖或沒圖）
-PARALLEL_SAFE = {"read_file", "search_files", "list_tree", "vision_analyze", "view_page", "skill_view", "skills_list",
+PARALLEL_SAFE = {"read_file", "search_files", "list_tree", "vision_analyze", "view_page", "watch_video", "skill_view", "skills_list",
                  "current_time", "system_info", "session_search", "tool_search", "tool_describe", "memory_view",
                  "web_search", "web_extract", "image_generate", "video_generate", "delegate_task"}
-_SCOPED_READERS = {"read_file", "search_files", "list_tree", "vision_analyze", "view_page"}
+_SCOPED_READERS = {"read_file", "search_files", "list_tree", "vision_analyze", "view_page", "watch_video"}
 _SCOPED_WRITERS = {"write_file", "patch"}
 _PATH_LOCKS: dict[str, asyncio.Lock] = {}
 
