@@ -1,6 +1,6 @@
 [project]
 name = "woof"
-version = "0.4.26"
+version = "0.4.27"
 description = "WOOF 個人 AI agent 後端"
 requires-python = ">=3.14"
 license = "MIT"
