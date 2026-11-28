@@ -98,7 +98,7 @@ def _users_section(messages: list[dict], through: int, n: int = QUOTE_N_DEFAULT,
 
 
 # 更新摘要用的行號編輯指令：模型只寫要改的地方，沒提到的行原樣保留
-_OP = re.compile(r"^\s*@@\s*(改|刪|插|不變)\s*(?:第\s*)?(\d+)?\s*行?\s*(?:[-–~～至到]\s*(?:第\s*)?(\d+)\s*行?)?\s*(?:之?後)?\s*$")
+_OP = re.compile(r"^\s*@@\s*(改|刪|插|不變|完)\s*(?:第\s*)?(\d+)?\s*行?\s*(?:[-–~～至到]\s*(?:第\s*)?(\d+)\s*行?)?\s*(?:之?後)?\s*$")
 _NUM = re.compile(r"^\d{1,4}\| ?")
 
 
@@ -106,51 +106,76 @@ def _numbered(text: str) -> str:
     return "\n".join(f"{i}| {ln}" for i, ln in enumerate(text.split("\n"), 1))
 
 
-def _apply_edits(prev: str, out: str) -> tuple[str | None, list[str], str]:
-    """把行號編輯指令套到舊摘要上，回傳 (新摘要, 跳過的指令, 套不上的原因)。
-    @@ 改 a-b ＋新內容：換掉第 a 到 b 行；@@ 刪 a-b；@@ 插 n ＋新內容：插在第 n 行後面（0＝最前面，超過最後一行＝接在最後）；@@ 不變。
-    指令前後的說明、``` 、行號前綴都略過；單一指令有錯（行號不存在、範圍跟別的重疊、沒有內容）只跳過那一個，其他照套。
-    一個能套的指令都沒有，或一次刪掉大半（多半是看錯行號），新摘要回 None。"""
+def _apply_edits(prev: str, out: str) -> tuple[str | None, str]:
+    """把行號編輯指令套到舊摘要上，回傳 (新摘要, 不能用的原因)。全部指令都對才算數，有一條不對整份不用（不存半套的摘要）。
+    @@ 改 a-b ＋新內容：換掉第 a 到 b 行；@@ 刪 a-b；@@ 插 n ＋新內容：插在第 n 行後面（0＝最前面，超過最後一行＝接在最後）；
+    @@ 不變；最後一行 @@ 完，後面寫的都不算。第一個指令前面的說明、``` 、行號前綴都略過。
+    沒寫指令、但寫出了整份摘要（段落標題齊、長度跟舊的差不多）：直接當新摘要用，不用再寫一次。"""
     lines = prev.split("\n")
     total = len(lines)
-    ops, cur = [], None
+    ops, cur, ended, fence = [], None, False, False
     for ln in out.strip("\n").split("\n"):
         if ln.strip().startswith("```"):
-            if ops:
+            fence = not fence
+            if ops and not fence:
                 cur = None     # 指令寫完收尾的 ```：後面的說明不算進最後一個指令
             continue
         m = _OP.match(ln)
+        if m and m.group(1) == "完":
+            ended = True
+            break
         if m:
             cur = [m.group(1), int(m.group(2)) if m.group(2) else None, int(m.group(3)) if m.group(3) else None, []]
             ops.append(cur)
         elif cur is not None:
             cur[3].append(_NUM.sub("", ln) if _NUM.match(ln) else ln)
-    ops = [o for o in ops if o[0] != "不變"] if any(o[0] != "不變" for o in ops) else ops
     if not ops:
-        return None, [], "沒有寫出 @@ 編輯指令"
-    if ops[0][0] == "不變":
-        return prev, [], ""
-    repl, ins, taken, skipped = {}, {}, set(), []
+        body = out.strip()
+        heads = [ln for ln in body.split("\n") if ln.startswith("## ")]
+        if not ended and len(heads) >= 3 and len(body) >= len(prev) * 0.6:
+            return body, ""
+        return None, "沒有寫出 @@ 編輯指令"
+    if any(o[0] == "不變" for o in ops):
+        if len(ops) > 1:
+            return None, "寫了 @@ 不變 又寫了其他指令"
+        return prev, ""
+    if not ended and ops[-1][3] and not ops[-1][3][-1].strip().startswith(("-", "#", "*", "|")) \
+            and not re.match(r"^\s*\d+[.、)]", ops[-1][3][-1]):
+        # 沒寫 @@ 完：最後一條的最後一行看起來不像摘要內容（不是條列、標題），多半是收尾的說明
+        return None, f"最後沒有寫 @@ 完（最後一行「{ops[-1][3][-1].strip()[:30]}」分不出是內容還是說明）"
+    repl, ins, taken, bad = {}, {}, set(), []
     for op, a, b, new in ops:
         while new and not new[-1].strip():
             new.pop()
         while new and not new[0].strip():
             new.pop(0)
         label = f"@@ {op} {a if a is not None else ''}{f'-{b}' if b is not None else ''}".rstrip()
-        if a is None or (op != "刪" and not new):
-            skipped.append(label)
+        if a is None:
+            bad.append(f"{label}：沒寫行號")
             continue
         if op == "插":
+            if not new:
+                bad.append(f"{label}：下面沒有內容")
+                continue
             ins.setdefault(min(a, total), []).extend(new)
             continue
-        b = min(b if b is not None else a, total)
-        if not 1 <= a <= b or taken & set(range(a, b + 1)):
-            skipped.append(label)
+        if op == "刪" and new:
+            bad.append(f"{label}：刪的下面又寫了內容（要換掉請用 @@ 改）")
+            continue
+        if op == "改" and not new:
+            bad.append(f"{label}：下面沒有內容（要刪掉請用 @@ 刪）")
+            continue
+        b = b if b is not None else a
+        if not 1 <= a <= b <= total:
+            bad.append(f"{label}：先前摘要只有 1 到 {total} 行")
+            continue
+        if taken & set(range(a, b + 1)):
+            bad.append(f"{label}：範圍跟別的指令重疊")
             continue
         taken |= set(range(a, b + 1))
-        repl[a] = (b, new if op == "改" else [])
-    if not repl and not ins:
-        return None, skipped, f"寫的指令都套不上（{'、'.join(skipped[:3])}）"
+        repl[a] = (b, new)
+    if bad:
+        return None, "編輯指令有錯：" + "；".join(bad[:6])
     res = list(ins.get(0, []))
     i = 1
     while i <= total:
@@ -166,8 +191,8 @@ def _apply_edits(prev: str, out: str) -> tuple[str | None, list[str], str]:
         i += 1
     text = "\n".join(res).strip()
     if len(prev) > 2000 and len(text) < len(prev) * 0.4:
-        return None, skipped, f"一次刪掉大半（{len(prev)} 字剩 {len(text)} 字），多半是看錯行號"
-    return text, skipped, ""
+        return None, f"一次刪掉大半（{len(prev)} 字剩 {len(text)} 字），多半是看錯行號"
+    return text, ""
 
 
 def _turn_requests(messages: list[dict], upto: int) -> str:
@@ -321,30 +346,29 @@ def register(woof):
         return {"use": use, "system": system, "messages": [*msgs, ask], "specs": specs, "effort": effort,
                 "note": note, "dropped": dropped}
 
-    def _check(out: str | None, prev: str, src_tok: float) -> tuple[str, list[str], str]:
-        """模型的回覆能不能當摘要：回傳 (摘要全文, 跳過的編輯指令, 不能用的原因)。每次壓縮都檢查"""
+    def _check(out: str | None, prev: str, src_tok: float) -> tuple[str, str]:
+        """模型的回覆能不能當摘要：回傳 (摘要全文, 不能用的原因)。每次壓縮都檢查"""
         from woof import tokens
 
         if out is None:
-            return "", [], "去呼叫了工具"
+            return "", "去呼叫了工具"
         out = out.strip()
         if not out:
-            return "", [], "回了空白"
+            return "", "回了空白"
         if tokens.fake_call(out):
-            return "", [], "寫成了工具呼叫"
-        skipped: list[str] = []
+            return "", "寫成了工具呼叫"
         text = out
         if prev:
-            text, skipped, why = _apply_edits(prev, out)
+            text, why = _apply_edits(prev, out)
             if text is None:
-                return "", [], why
+                return "", why
         if src_tok > SHORT_SRC_TOK and len(text) < MIN_CHARS:
-            return "", [], f"只寫了 {len(text)} 字"
-        return text, skipped, ""
+            return "", f"只寫了 {len(text)} 字"
+        return text, ""
 
     async def _write(ctx, model: dict, prev: str, kept: list[dict], target: int, src_tok: float, why: str):
         """寫摘要，最多送兩次：第一次不能用，同一份請求在指令後面註明哪裡不對再寫一次（前面照樣吃快取）。
-        回傳 (摘要全文, 跳過的編輯指令, [輸入, 快取讀取])；兩次都不能用就丟錯，不存"""
+        回傳 (摘要全文, [輸入, 快取讀取])；兩次都不能用就丟錯，不存（原文照送）"""
         from woof.agent import loop
 
         sid = ctx.session_id
@@ -358,7 +382,8 @@ def register(woof):
             if problem and problem != "超出模型上限":
                 ask = msgs[-1]
                 again = ask["content"][0]["text"] + _prompt_get("compact_retry", problem=problem,
-                                                                 what="@@ 編輯指令" if prev else "摘要正文")
+                                                                 what="整套 @@ 編輯指令（全部重寫一次，行號照【先前摘要】，最後一行 @@ 完）"
+                                                                 if prev else "摘要正文")
                 msgs = [*msgs[:-1], {**ask, "content": [{"type": "text", "text": again}]}]
                 await ctx.emit({"type": "notice", "session_id": sid,
                                 "text": f"摘要模型這次{problem}，用同一份內容再寫一次（前面照樣吃快取）"})
@@ -382,9 +407,9 @@ def register(woof):
             u = loop.AUX_USAGE.pop(sid, None) or {}
             stat[0] += int(u.get("input_tokens") or 0)
             stat[1] += int(u.get("cache_read") or 0)
-            text, skipped, problem = _check(out, prev, src_tok)
+            text, problem = _check(out, prev, src_tok)
             if not problem:
-                return text, skipped, stat
+                return text, stat
         raise RuntimeError(f"摘要模型兩次都沒寫出能用的摘要（{problem}），這次不壓縮；原文都還在")
 
     def _wait_at() -> float:
@@ -621,7 +646,7 @@ def register(woof):
             why += "，在背景寫摘要（對話照常進行，寫好後下一次送出開始用）"
         ctx.compact_count = len(older)
         await _compact_state(ctx, True)
-        text, skipped, stat = await _write(ctx, model, prev, pending[cut:], target, src_tok, why)
+        text, stat = await _write(ctx, model, prev, pending[cut:], target, src_tok, why)
         text = text.strip()
         cur = dict((store.get_session(ctx.session_id) or {}).get("engine_state") or {})
         cur["compress_count"] = int(cur.get("compress_count") or 0) + 1
@@ -659,11 +684,10 @@ def register(woof):
         # 對話畫面據此在被摘要的訊息後面畫一條分隔線（可展開看摘要）
         await ctx.emit({"type": "session_updated", "session": s2})
         hit = f"，送出 {stat[0]:,} token、快取命中 {stat[1] / stat[0]:.0%}" if stat[0] else ""
-        miss = f"；跳過看不懂的編輯指令：{'、'.join(skipped[:5])}" if skipped else ""
         await ctx.emit({"type": "notice", "session_id": ctx.session_id,
                         "text": (f"已把這一回合較早的 {len(older)} 則摘要成 {len(text)} 字，最近 {len(recent_ids)} 則保持原樣，"
-                                 f"使用者這次的要求會在摘要後面重述，模型接著做{hit}{miss}") if inflight else
-                                f"已把較早的 {len(older)} 則摘要成 {len(text)} 字，最近 {len(recent_ids)} 則保持原樣{hit}{miss}"})
+                                 f"使用者這次的要求會在摘要後面重述，模型接著做{hit}") if inflight else
+                                f"已把較早的 {len(older)} 則摘要成 {len(text)} 字，最近 {len(recent_ids)} 則保持原樣{hit}"})
         # 舊的用量回報不算數了：先換成估計值，下一次模型回報再更新（避免剛壓縮完又被判定要壓縮）
         u = tokens.reestimate(ctx.session_id, window or None)
         await ctx.emit({"type": "usage", "session_id": ctx.session_id, **u})

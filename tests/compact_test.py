@@ -42,7 +42,7 @@ def edit(prev, out):
 
 class Edits(unittest.TestCase):
     def test_replace_delete_insert(self):
-        out = "@@ 插 5\n3. 改好 b.py\n@@ 改 7\n- 在寫 README\n@@ 刪 2"
+        out = "@@ 插 5\n3. 改好 b.py\n@@ 改 7\n- 在寫 README\n@@ 刪 2\n@@ 完"
         self.assertEqual(edit(PREV, out), "\n".join([
             "## 使用者的目標與要求", "## 已完成", "1. 改了 a.py", "2. 跑測試全過", "3. 改好 b.py",
             "## 壓縮當時進行中", "- 在寫 README"]))
@@ -50,33 +50,45 @@ class Edits(unittest.TestCase):
     def test_unchanged_prefix_and_chatter_ignored(self):
         self.assertEqual(edit(PREV, "@@ 不變"), PREV)
         out = edit(PREV, "好的，以下是修改：\n```\n@@ 插 0\n1| # 交接\n```\n以上。")
-        self.assertTrue(out.startswith("# 交接\n## 使用者的目標與要求"))   # 前後的說明、``` 、行號前綴都略過
+        self.assertTrue(out.startswith("# 交接\n## 使用者的目標與要求"))   # 前面的說明、``` 、行號前綴都略過
         self.assertNotIn("以上", out)
         self.assertNotIn("好的", out)
+        out = edit(PREV, "@@ 插 5\n3. 改好 b.py\n@@ 完\n以上是這次的修改。")
+        self.assertNotIn("以上", out)                                   # @@ 完 後面的都不算
+
+    def test_trailing_chatter_without_end_rejected(self):
+        text, why = C._apply_edits(PREV, "@@ 插 5\n3. 改好 b.py\n以上是這次的修改。")
+        self.assertIsNone(text)                                         # 分不出是內容還是說明：不採用，不會塞進摘要
+        self.assertIn("@@ 完", why)
 
     def test_insert_after_replaced_range(self):
-        out = edit(PREV, "@@ 改 6-7\n## 壓縮當時進行中\n- 沒有\n@@ 插 7\n## 當時還沒做完的\n- 發版")
+        out = edit(PREV, "@@ 改 6-7\n## 壓縮當時進行中\n- 沒有\n@@ 插 7\n## 當時還沒做完的\n- 發版\n@@ 完")
         self.assertTrue(out.endswith("## 壓縮當時進行中\n- 沒有\n## 當時還沒做完的\n- 發版"))
 
     def test_new_section_appended_past_end(self):
-        out = edit(PREV, "@@ 插 99\n## 重要的檔案、指令與數據\n- plugins/context/__init__.py\n- 測試 317 個")
+        out = edit(PREV, "@@ 插 99\n## 重要的檔案、指令與數據\n- plugins/context/__init__.py\n- 測試 317 個\n@@ 完")
         self.assertTrue(out.startswith(PREV))                          # 原本的全部留著
         self.assertTrue(out.endswith("## 重要的檔案、指令與數據\n- plugins/context/__init__.py\n- 測試 317 個"))
 
-    def test_bad_op_skipped_others_applied(self):
-        text, skipped, why = C._apply_edits(PREV, "@@ 改 0\nx\n@@ 插 5\n3. 改好 b.py\n@@ 刪 2-4\n@@ 改 3\n重疊")
-        self.assertIn("3. 改好 b.py", text)
-        self.assertNotIn("1. 改了 a.py", text)
-        self.assertEqual(skipped, ["@@ 改 0", "@@ 改 3"])              # 行號不存在、範圍重疊：只跳過那一個
-        self.assertEqual(why, "")
-
-    def test_nothing_applicable(self):
-        for bad in ("這是新的摘要全文", "@@ 改 0\nx", "@@ 插 3", "@@ 改 2"):
-            text, _, why = C._apply_edits(PREV, bad)
-            self.assertIsNone(text, bad)
-            self.assertTrue(why)
+    def test_any_bad_op_rejects_whole(self):
+        for bad, hint in (("@@ 改 0\nx\n@@ 插 5\n3. 改好 b.py\n@@ 完", "只有 1 到 7 行"),
+                          ("@@ 改 9\nx\n@@ 完", "只有 1 到 7 行"),
+                          ("@@ 刪 2-4\n@@ 改 3\n重疊\n@@ 完", "重疊"),
+                          ("@@ 插 3\n@@ 完", "沒有內容"),
+                          ("@@ 改 2\n@@ 完", "沒有內容"),
+                          ("@@ 刪 2\n- 新的\n@@ 完", "@@ 改"),
+                          ("@@ 不變\n@@ 刪 2", "不變"),
+                          ("這是新的摘要全文", "沒有寫出")):
+            text, why = C._apply_edits(PREV, bad)
+            self.assertIsNone(text, bad)                                # 有一條不對整份不用：不存半套的摘要
+            self.assertIn(hint, why, bad)
         long = "\n".join(f"{i}. 很長的一行內容，記錄做過的事情與結果，" * 3 for i in range(60))
-        self.assertIsNone(edit(long, "@@ 刪 1-50"))                    # 一次刪掉大半：多半是看錯行號
+        self.assertIsNone(edit(long, "@@ 刪 1-50\n@@ 完"))             # 一次刪掉大半：多半是看錯行號
+
+    def test_full_summary_instead_of_edits_accepted(self):
+        full = PREV.replace("- 在改 b.py", "- 在寫 README") + "\n## 當時還沒做完的\n- 發版"
+        self.assertEqual(edit(PREV, full), full)                       # 直接寫了整份（段落齊、長度夠）：照用
+        self.assertIsNone(edit(PREV, "## 已完成\n- 只有新的"))          # 只寫新的那一點：不採用（會丟掉舊的）
 
 
 class Quotes(unittest.TestCase):
@@ -227,19 +239,26 @@ class Flow(unittest.TestCase):
         self.assertEqual(self.summ()["text"], GOOD.strip())
 
     def test_unreadable_edit_retried_as_edit_with_cache(self):
-        self.run_with(["我把摘要整理如下：……", "@@ 改 7\n- 在讀 f3"])
+        self.run_with(["我把摘要整理如下：……", "@@ 改 7\n- 在讀 f3\n@@ 完"])
         self.assertEqual(len(self.calls), 2)
         self.assertEqual(self.calls[1]["messages"][:-1], self.sent)    # 同一份請求，前面照樣吃快取
-        self.assertIn("直接輸出@@ 編輯指令", self.calls[1]["ask"])     # 還是只寫要改的行，不是整份重寫
+        self.assertIn("整套 @@ 編輯指令", self.calls[1]["ask"])         # 還是只寫要改的行，不是整份重寫
         self.assertIn("2. 跑測試全過", self.summ()["text"])
         self.assertTrue(self.summ()["text"].endswith("- 在讀 f3"))
         self.assertIn("沒有寫出 @@ 編輯指令", self.notices())
 
-    def test_partly_bad_edit_kept_and_reported(self):
-        self.run_with(["@@ 改 30\nx\n@@ 插 5\n3. 讀完 f0 到 f2"])
-        self.assertEqual(len(self.calls), 1)
+    def test_partly_bad_edit_not_stored_half(self):
+        self.run_with(["@@ 改 30\nx\n@@ 插 5\n3. 讀完 f0 到 f2\n@@ 完", "@@ 插 5\n3. 讀完 f0 到 f2\n- 在讀 f3\n@@ 完"])
+        self.assertEqual(len(self.calls), 2)                            # 有一條不對：整套重寫一次指令
+        self.assertIn("@@ 改 30：先前摘要只有 1 到 7 行", self.calls[1]["ask"])   # 告訴模型哪一條錯在哪
         self.assertIn("3. 讀完 f0 到 f2", self.summ()["text"])
-        self.assertIn("跳過看不懂的編輯指令：@@ 改 30", self.notices())
+        self.assertNotIn("x", self.summ()["text"].split("\n"))
+
+    def test_partly_bad_twice_stores_nothing(self):
+        self.ctx.manual, self.ctx.force_compact = False, True
+        with self.assertRaises(RuntimeError):
+            self.run_with(["@@ 改 30\nx\n@@ 插 5\n3. 讀完\n@@ 完", "@@ 改 31\nx\n@@ 完"])
+        self.assertEqual(self.summ()["text"], PREV)                     # 舊摘要原樣，不存半套
 
     def test_fake_call_rewritten_once_with_cache(self):
         self.run_with([FAKE, "@@ 改 7\n- 在讀 f3"])
