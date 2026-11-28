@@ -14,7 +14,7 @@ os.environ["WOOF_DATA"] = TMP
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from woof import store  # noqa: E402
+from woof import store, tokens  # noqa: E402
 from woof.agent import loop  # noqa: E402
 
 spec = importlib.util.spec_from_file_location("ctx_plugin_t", ROOT / "plugins" / "context" / "__init__.py")
@@ -101,6 +101,10 @@ class Calib(unittest.TestCase):
 class Flow(unittest.TestCase):
     def setUp(self):
         self.hooks = {}
+        C._fails.clear()
+        src_min = C.FIRST_SRC
+        C.FIRST_SRC = 10 ** 9                             # 這裡的假摘要只有幾行，不檢查長度（NotSummary 另外測）
+        self.addCleanup(setattr, C, "FIRST_SRC", src_min)
         self.fake = types.SimpleNamespace(settings={"trigger": 50, "tail_tokens": 3000, "quote_count": 2},
                                           on=lambda ev, fn, **k: self.hooks.setdefault(ev, fn))
         C.register(self.fake)
@@ -187,6 +191,43 @@ class Flow(unittest.TestCase):
         self.assertTrue(summ["text"].endswith("## 壓縮當時進行中\n- 在讀 f3"))
         self.assertIn("2. 跑測試全過", summ["text"])
 
+    def _cached_run(self, replies, window):
+        import time
+        last = store.get_messages(self.sid)[-1]["id"]
+        snap = {"model": "m", "at": time.time(), "sig": "s", "through": last, "system": "系統",
+                "specs": [], "effort": None,
+                "messages": [{"role": "user", "content": [{"type": "text", "text": "前綴"}]}]}
+        calls = []
+
+        async def complete(model, system, messages, *a, **k):
+            calls.append(system)
+            return replies.pop(0)
+        self.ctx.model_cfg = {**(self.ctx.model_cfg or {}), "context_window": window}
+        with unittest.mock.patch.dict(loop.LAST_REQ, {self.sid: snap}), \
+                unittest.mock.patch.object(loop, "req_sig", lambda sid: "s"), \
+                unittest.mock.patch.object(loop, "complete", complete), \
+                unittest.mock.patch.object(loop, "aux_model", lambda task, fb: None), \
+                unittest.mock.patch.object(tokens, "window_of", lambda m, s=None: 50):
+            self.ctx.force_compact = False
+            asyncio.run(self.hooks["force_compact"](self.ctx))
+        return calls
+
+    def test_cache_limit_is_model_window(self):
+        # 壓縮設定的「上下文大小」很小（50）也照樣沿用快取：上限看模型本身的窗口
+        calls = self._cached_run(["@@ 改 7\n- 在讀 f3"], 10 ** 6)
+        self.assertEqual(calls, ["系統"])
+
+    def test_cache_skip_reason_shown(self):
+        calls = self._cached_run(["@@ 改 7\n- 在讀 f3"], 10)
+        self.assertEqual(len(calls), 1)
+        self.assertNotEqual(calls[0], "系統")
+        self.assertTrue(any("這次沒沿用快取：整段約" in (e.get("text") or "") for e in self.events))
+
+    def test_cached_fake_retried_with_cache(self):
+        calls = self._cached_run(["<tool_call>\n[呼叫 terminal] ls\n</tool_call>", "@@ 改 7\n- 在讀 f3"], 10 ** 6)
+        self.assertEqual(calls, ["系統", "系統"])          # 重寫也沿用快取
+        self.assertEqual(store.get_session(self.sid)["engine_state"]["summary"].get("how"), "cached")
+
 
 class NotSummary(unittest.TestCase):
     """摘要模型沒寫摘要（照紀錄寫出工具呼叫、太短）：重寫一次；兩次都不行就不存"""
@@ -194,9 +235,17 @@ class NotSummary(unittest.TestCase):
 
     def setUp(self):
         Flow.setUp(self)
+        C.FIRST_SRC = 200
         es = dict(store.get_session(self.sid)["engine_state"])
-        es.pop("summary")                                 # 第一次壓縮
+        self.prev = es.pop("summary")                     # 第一次壓縮
         store.update_session(self.sid, engine_state=es)
+
+    def test_later_compaction_also_checked(self):
+        es = dict(store.get_session(self.sid)["engine_state"])
+        es["summary"] = self.prev                         # 已經有摘要：第二次以後的壓縮一樣檢查
+        store.update_session(self.sid, engine_state=es)
+        with self.assertRaises(RuntimeError):
+            self.run_with([self.FAKE, "NOOP"])
 
     FAKE = "<tool_call>\n[呼叫 terminal] cd C:/x && ls\n</tool_call>"
 
@@ -221,7 +270,7 @@ class NotSummary(unittest.TestCase):
         self.assertIn("只寫了", str(cm.exception))
         self.assertNotIn("summary", store.get_session(self.sid)["engine_state"])
 
-    def test_auto_stops_after_three_failures(self):
+    def test_auto_stops_after_one_failure(self):
         C._fails.clear()
         C._bg.clear()
         self.ctx.force_compact, self.ctx.manual, self.ctx.is_bg = False, False, True
@@ -233,12 +282,11 @@ class NotSummary(unittest.TestCase):
             return replies.pop(0)
         with unittest.mock.patch.object(loop, "complete", complete), \
                 unittest.mock.patch.object(loop, "aux_model", lambda task, fb: None):
-            for _ in range(3):
-                with self.assertRaises(RuntimeError):
-                    asyncio.run(self.hooks["prepare_turn"](self.ctx))
-            self.assertEqual(len(n), 6)                    # 每次最多寫兩次
-            self.assertEqual(C._fails[self.sid], 3)
-            self.assertTrue(any("連續失敗 3 次" in (e.get("text") or "") for e in self.events))
+            with self.assertRaises(RuntimeError):
+                asyncio.run(self.hooks["prepare_turn"](self.ctx))
+            self.assertEqual(len(n), 2)                    # 一次壓縮最多寫兩次
+            self.assertEqual(C._fails[self.sid], 1)
+            self.assertTrue(any("先停止自動壓縮" in (e.get("text") or "") for e in self.events))
             self.ctx.is_bg = False
             asyncio.run(self.hooks["after_turn"](self.ctx))
             self.assertIsNone(C._bg.get(self.sid))         # 不再開背景壓縮

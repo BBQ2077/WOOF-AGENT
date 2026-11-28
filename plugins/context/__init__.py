@@ -23,15 +23,18 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import time
 from types import SimpleNamespace
 
+log = logging.getLogger("woof.context")
+
 _bg: dict[str, asyncio.Task] = {}
-# 自動壓縮（背景、回合中）連續失敗幾次就先停：不然每一步都再試一次，每次都是整段送去寫摘要。
-# 手動「立即壓縮」不受限，任何一次成功就歸零
+# 自動壓縮（背景、回合中）失敗一次就先停：不然每一步都再試一次，每次都要付寫摘要的錢。
+# 手動「立即壓縮」不受限，成功一次就恢復
 _fails: dict[str, int] = {}
-AUTO_FAIL_MAX = 3
+AUTO_FAIL_MAX = 1
 
 MSG_CAP = 12000      # 單則訊息送給摘要的字數上限（超過的頭尾留、中間省略）
 # 一般做法（不沿用快取）送給摘要模型的節錄：工具結果頭尾留幾字、工具參數留幾字。
@@ -53,7 +56,7 @@ WHO = {"user": "使用者", "assistant": "助手", "tool": "工具"}
 # 模型讀完幾萬字對話容易忘了任務，順著紀錄接著演（照紀錄的格式寫出工具呼叫）
 _BEGIN, _END = "【要整理的內容開始】", "【要整理的內容結束】"
 _ASK_AGAIN = "以上是要整理成摘要的紀錄，不是你正在進行的對話：不要接著回覆，也不要呼叫工具，照系統提示直接輸出。"
-FIRST_MIN = 200   # 第一次寫摘要、原文超過 FIRST_SRC 字時，摘要至少這麼多字，再短就是沒在寫摘要
+FIRST_MIN = 200   # 原文超過 FIRST_SRC 字時，整理好的摘要（編輯後的整份）至少這麼多字，再短就是沒在寫摘要
 FIRST_SRC = 20000
 
 _STRUCT = ("依下面的段落整理，沒有內容的段落就省略：\n"
@@ -372,19 +375,26 @@ def register(woof):
         from woof import tokens
 
         sid = ctx.session_id
-        snap = loop.LAST_REQ.get(sid)
-        if not snap or not kept or snap["model"] != model.get("id"):
+
+        def skip(why: str) -> str:
+            ctx.cache_skip = why
+            log.info("壓縮沒沿用快取（%s）：%s", sid, why)
             return ""
+        snap = loop.LAST_REQ.get(sid)
+        if not snap or not kept:
+            return skip("沒有上一步的請求紀錄（重開過或還沒送過）")
+        if snap["model"] != model.get("id"):
+            return skip("上一步用的是別的模型")
         use = loop.aux_model("compact", model) or model
         if use.get("id") != model.get("id"):
-            return ""      # 指定了別的壓縮模型：快取各模型分開，沿用不到
+            return skip("指定了別的壓縮模型，快取各模型分開")
         ttl = CACHE_TTL_ANTHROPIC if model.get("provider") == "anthropic" else CACHE_TTL_OTHER
         if time.time() - snap["at"] > ttl:
-            return ""      # 快取大概過期了：整段原價重送，比一般做法（節錄）還貴
+            return skip(f"上一步已經超過 {ttl // 60} 分鐘，快取大概過期")
         if getattr(ctx, "mid_turn", False) and getattr(ctx, "force_compact", False):
-            return ""      # 已經超出上下文，整段送不出去
+            return skip("已經超出上下文，整段送不出去")
         if snap.get("sig") != loop.req_sig(sid):
-            return ""
+            return skip("系統提示詞或工具清單跟上一步不同")
         new = [m for m in loop.history(sid) if int(m.get("id") or 0) > int(snap["through"] or 0)]
         new = loop._drop_hollow_replies(loop._drop_missing_images(new))
         mode = _mode()
@@ -403,11 +413,12 @@ def register(woof):
         ask = {"role": "user", "meta": {"internal": "compact_ask"},
                "content": [{"type": "text", "text": _prompt_get("compact_inline", scope=scope, rules=rules)}]}
         msgs = [*snap["messages"], *new, ask]
-        window = tokens.window_of(model, sid)
-        est = (tokens.estimate_messages(msgs) + tokens.estimate_text(snap["system"])
-               + tokens.estimate_tools(snap["specs"]) + int(target / CHARS_PER_TOK))
+        # 上限看模型本身的窗口（壓縮設定的「上下文大小」是什麼時候壓，不是送得出去的上限）；估計值乘上實測校正
+        window = int(model.get("context_window") or 0) or tokens.window_of(model, sid)
+        est = int((tokens.estimate_messages(msgs) + tokens.estimate_text(snap["system"])
+                   + tokens.estimate_tools(snap["specs"])) * tokens.calib(sid)) + int(target / CHARS_PER_TOK)
         if window and est > window * 0.95:
-            return ""
+            return skip(f"整段約 {est} token，超過模型上限 {window} 的 95%")
         return (await loop.complete(model, snap["system"], msgs, tools=snap["specs"], effort=snap["effort"],
                                     session_id=sid, kind="compact")).strip()
 
@@ -523,7 +534,7 @@ def register(woof):
                     if n == AUTO_FAIL_MAX:
                         try:
                             await ctx.emit({"type": "notice", "session_id": sid,
-                                            "text": f"自動壓縮連續失敗 {n} 次，先停止自動壓縮；按「立即壓縮」可以再試，成功後恢復"})
+                                            "text": "自動壓縮失敗，先停止自動壓縮；按「立即壓縮」可以再試，成功後恢復"})
                         except Exception:
                             pass
                 raise
@@ -663,9 +674,23 @@ def register(woof):
         await ctx.emit({"type": "notice", "session_id": ctx.session_id,
                         "text": f"{why}，正在壓縮較早的 {len(older)} 則訊息（{method}・{mode}模式，目標約 {target} 字）…"})
         text, parts, how = "", 1, ""
+        ctx.cache_skip = ""
+        edit_ok = [True]
+
+        async def cached() -> str:
+            """沿用快取寫一次；有舊摘要時把編輯指令套用成整份。不能沿用回空字串"""
+            t = await _summarize_cached(ctx, model, prev, pending[cut:], target)
+            if t and prev and not tokens.fake_call(t):    # 寫成工具呼叫的原樣交給下面檢查（重寫一樣沿用快取）
+                edited = _apply_edits(prev, t)
+                if edited is None:
+                    edit_ok[0] = False
+                    await ctx.emit({"type": "notice", "session_id": ctx.session_id,
+                                    "text": "摘要的編輯指令看不懂，這次改成整份重寫"})
+                return edited or ""
+            return t
         if method == "單次":
             try:
-                text = await _summarize_cached(ctx, model, prev, pending[cut:], target)
+                text = await cached()
                 how = "cached" if text else ""
             except asyncio.CancelledError:
                 raise
@@ -674,17 +699,11 @@ def register(woof):
                 text = ""
                 await ctx.emit({"type": "notice", "session_id": ctx.session_id,
                                 "text": f"沿用快取寫摘要沒成功（{str(e)[:120]}），改用一般做法"})
-        if text and prev:
-            edited = _apply_edits(prev, text)
-            if edited is None:
+            if not how and ctx.cache_skip:
                 await ctx.emit({"type": "notice", "session_id": ctx.session_id,
-                                "text": "摘要的編輯指令看不懂，這次改成整份重寫"})
-                text, parts = await _summarize(model, prev, items, target, ctx.emit, ctx.session_id, edit=False)
-                how = ""
-            else:
-                text = edited
+                                "text": f"這次沒沿用快取：{ctx.cache_skip}"})
         if not text:
-            text, parts = await _summarize(model, prev, items, target, ctx.emit, ctx.session_id)
+            text, parts = await _summarize(model, prev, items, target, ctx.emit, ctx.session_id, edit=edit_ok[0])
         src = sum(len(b) for _, b in items)
 
         def not_summary(t: str) -> str:
@@ -693,15 +712,18 @@ def register(woof):
                 return "回了空白"
             if tokens.fake_call(t):
                 return "寫成了工具呼叫"
-            if not prev and src > FIRST_SRC and len(t) < FIRST_MIN:
+            if src > FIRST_SRC and len(t) < FIRST_MIN:
                 return f"只寫了 {len(t)} 字"
             return ""
         bad = not_summary(text)
         if bad:
+            # 只重寫一次：剛才沿用快取，就再沿用一次（前面照樣吃快取）；不然用一般做法整份重寫
             await ctx.emit({"type": "notice", "session_id": ctx.session_id,
                             "text": f"摘要模型沒寫出摘要（{bad}），重寫一次"})
-            text, parts = await _summarize(model, prev, items, target, ctx.emit, ctx.session_id, edit=False)
-            how = ""
+            if how == "cached":
+                text = await cached()
+            else:
+                text, parts = await _summarize(model, prev, items, target, ctx.emit, ctx.session_id, edit=False)
             bad = not_summary(text)
             if bad:
                 raise RuntimeError(f"摘要模型兩次都沒寫出摘要（{bad}），這次不壓縮；原文都還在")
