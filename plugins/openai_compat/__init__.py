@@ -25,6 +25,7 @@ from woof.lazy import lazy_module
 openai = lazy_module("openai")
 
 from woof import cachediag, caps
+from woof.keypool import reset_at as _reset_at
 from woof.agent.loop import load_image_b64, new_call_id, sdk_retries
 
 _RETRY_STATUS = {401, 402, 403, 429}
@@ -327,21 +328,6 @@ async def _describe_images(woof, messages: list[dict]) -> list[dict]:
             blocks.append({"type": "text", "text": await desc_of(b, "使用者")} if b.get("type") == "image" else b)
         out.append({**m, "content": blocks})
     return out
-
-
-def _reset_at(body: str) -> float | None:
-    """錯誤訊息裡的額度重置時間（例如「quota resets at 2026-11-20T02:05」）；沒寫時區當本機時間。"""
-    import re
-    from datetime import datetime
-    mm = re.search(r"reset\w*\s+(?:at|on)\s+(\d{4}-\d\d-\d\d[T ]\d\d:\d\d(?::\d\d)?(?:\.\d+)?(?:Z|[+-]\d\d:?\d\d)?)", body or "", re.I)
-    if not mm:
-        return None
-    try:
-        t = datetime.fromisoformat(mm.group(1).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    ts = t.timestamp()   # 沒有時區就是本機時間
-    return ts if ts > time.time() else None
 
 
 def _pool_down_text(pool) -> str:

@@ -19,6 +19,7 @@ from pathlib import Path
 import httpx
 
 from woof import caps
+from woof.keypool import reset_at
 from woof.config import DATA
 
 MEDIA = DATA / "media"
@@ -62,12 +63,48 @@ def _agnes(m: dict) -> bool:
     return "agnes-ai.com" in str(m.get("base_url") or "")
 
 
-def _key(woof, m: dict) -> str:
+class _KeyDown(RuntimeError):
+    """這把 key 不能用（限流、額度用完、失效）：換下一把再送"""
+
+    def __init__(self, status: int, msg: str):
+        super().__init__(msg)
+        self.status = status
+
+
+_ROTATE = {401, 402, 403, 429}
+
+
+def _key_ok(r: httpx.Response, msg: str) -> None:
+    if r.status_code in _ROTATE:
+        raise _KeyDown(r.status_code, msg)
+
+
+async def _with_keys(woof, m: dict, fn):
+    """fn(key) 用金鑰池裡的 key 輪流送：401/402/403/429 標記這把（限流 60 秒、額度用完到重置時間或一天、失效一天）再換下一把，
+    全部不能用才報錯，錯誤裡寫明試了幾把、什麼時候恢復"""
     pool = woof.keys(m.get("key_pool") or m.get("provider"))
-    e = pool.get()
-    if e is None:
-        raise RuntimeError(f"「{m.get('label', m['id'])}」沒有可用的 API key（金鑰池「{pool.name}」），請到「設定 → API 金鑰」貼上")
-    return e.key
+    name = m.get("label", m["id"])
+    tried, last = 0, None
+    while True:
+        e = pool.get()
+        if e is None:
+            if last is None:
+                raise RuntimeError(f"「{name}」沒有可用的 API key（金鑰池「{pool.name}」），請到「設定 → API 金鑰」貼上")
+            n = len(pool.entries)
+            soon = [x.until for x in pool.entries if x.status in ("rate_limited", "exhausted") and x.until]
+            when = f"，最早 {time.strftime('%H:%M:%S', time.localtime(min(soon)))} 恢復" if soon else ""
+            raise RuntimeError(f"{last}；金鑰池「{pool.name}」{n} 把 key 這次試了 {tried} 把都不能用{when}") from last
+        try:
+            return await fn(e.key)
+        except _KeyDown as x:
+            tried, last = tried + 1, x
+            if x.status == 429:
+                pool.mark(e, "rate_limited", time.time() + 60, "HTTP 429 限流")
+            elif x.status == 402:
+                until = reset_at(str(x)) or time.time() + 86400
+                pool.mark(e, "exhausted", until, f"HTTP 402 額度用完，{time.strftime('%m-%d %H:%M', time.localtime(until))} 重置")
+            else:
+                pool.mark(e, "invalid", time.time() + 86400, f"HTTP {x.status}")
 
 
 
@@ -272,6 +309,7 @@ async def _gemini(c: httpx.AsyncClient, m: dict, key: str, inputs: list, fmt: di
     hdr = {"x-goog-api-key": key}
     body = {"model": m.get("model") or m["id"], "input": inputs, "response_format": fmt, "store": False}
     r = await c.post(f"{root}/v1beta/interactions", json=body, headers=hdr)
+    _key_ok(r, f"{m.get('label', m['id'])} 生成失敗（{_err(r)}）")
     if r.status_code >= 400:
         raise RuntimeError(f"{m.get('label', m['id'])} 生成失敗（{_err(r)}）")
     blk = _find(r.json(), want)
@@ -305,49 +343,54 @@ async def gen_image(woof, m: dict, prompt: str, *, images: list[str] | None = No
     fam = family(m)
     p, notes = settle(m, ratio=ratio, size=size if not re.fullmatch(r"\d+x\d+", size or "") else "")
     body: dict = {"model": m.get("model") or m["id"], "prompt": prompt}
-    key = _key(woof, m)
     t0 = time.time()
-    async with httpx.AsyncClient(timeout=360) as c:
-        if fam == "gemini":
-            inputs = [{"type": "text", "text": prompt}]
-            for ip in (images or [])[:14]:
-                uri = _data_uri(ip)
-                inputs.append({"type": "image", "mime_type": uri[5:uri.index(";")], "data": uri.split(",", 1)[1]})
-            fmt = {"type": "image", "aspect_ratio": p.get("ratio") or "1:1"}
-            if p.get("size"):
-                fmt["image_size"] = p["size"]
-            raw, ext = await _gemini(c, m, key, inputs, fmt, "image")
-        else:
-            if fam == "agnes":
-                body["size"] = p.get("size") or "1K"
-                if p.get("ratio"):
-                    body["ratio"] = p["ratio"]
-                extra: dict = {"response_format": "url"}
-                if images:
-                    extra["image"] = [_data_uri(x) for x in images[:8]]
-                body["extra_body"] = extra
-            elif fam == "xai":
-                body.update(n=1, aspect_ratio=p.get("ratio") or "auto", resolution=p.get("size") or "1k", response_format="b64_json")
-                if images:
-                    notes.append("xAI 參考圖還沒接，這張只用文字生成")
+
+    async def once(key: str) -> tuple[bytes, str]:
+        async with httpx.AsyncClient(timeout=360) as c:
+            if fam == "gemini":
+                inputs = [{"type": "text", "text": prompt}]
+                for ip in (images or [])[:14]:
+                    uri = _data_uri(ip)
+                    inputs.append({"type": "image", "mime_type": uri[5:uri.index(";")], "data": uri.split(",", 1)[1]})
+                fmt = {"type": "image", "aspect_ratio": p.get("ratio") or "1:1"}
+                if p.get("size"):
+                    fmt["image_size"] = p["size"]
+                raw, ext = await _gemini(c, m, key, inputs, fmt, "image")
             else:
-                body["size"] = size if re.fullmatch(r"\d+x\d+", size or "") else _OAI_SIZE.get(p.get("ratio") or "1:1", "1024x1024")
-                body["n"] = 1
-                if images:
-                    body["image"] = [_data_uri(x) for x in images[:8]]
-            r = await c.post(f"{base}/images/generations", json=body, headers={"Authorization": f"Bearer {key}"})
-            if r.status_code >= 400:
-                raise RuntimeError(f"{m.get('label', m['id'])} 生成圖片失敗（{_err(r)}）")
-            d = (r.json().get("data") or [{}])[0]
-            if d.get("b64_json"):
-                raw, ext = base64.b64decode(d["b64_json"]), ".png"
-            elif d.get("url"):
-                g = await c.get(d["url"], follow_redirects=True)
-                g.raise_for_status()
-                raw = g.content
-                ext = {"image/jpeg": ".jpg", "image/webp": ".webp"}.get(g.headers.get("content-type", "").split(";")[0], ".png")
-            else:
-                raise RuntimeError(f"{m.get('label', m['id'])} 沒有回傳圖片：{str(r.json())[:300]}")
+                if fam == "agnes":
+                    body["size"] = p.get("size") or "1K"
+                    if p.get("ratio"):
+                        body["ratio"] = p["ratio"]
+                    extra: dict = {"response_format": "url"}
+                    if images:
+                        extra["image"] = [_data_uri(x) for x in images[:8]]
+                    body["extra_body"] = extra
+                elif fam == "xai":
+                    body.update(n=1, aspect_ratio=p.get("ratio") or "auto", resolution=p.get("size") or "1k", response_format="b64_json")
+                    if images and "xAI 參考圖還沒接，這張只用文字生成" not in notes:
+                        notes.append("xAI 參考圖還沒接，這張只用文字生成")
+                else:
+                    body["size"] = size if re.fullmatch(r"\d+x\d+", size or "") else _OAI_SIZE.get(p.get("ratio") or "1:1", "1024x1024")
+                    body["n"] = 1
+                    if images:
+                        body["image"] = [_data_uri(x) for x in images[:8]]
+                r = await c.post(f"{base}/images/generations", json=body, headers={"Authorization": f"Bearer {key}"})
+                _key_ok(r, f"{m.get('label', m['id'])} 生成圖片失敗（{_err(r)}）")
+                if r.status_code >= 400:
+                    raise RuntimeError(f"{m.get('label', m['id'])} 生成圖片失敗（{_err(r)}）")
+                d = (r.json().get("data") or [{}])[0]
+                if d.get("b64_json"):
+                    raw, ext = base64.b64decode(d["b64_json"]), ".png"
+                elif d.get("url"):
+                    g = await c.get(d["url"], follow_redirects=True)
+                    g.raise_for_status()
+                    raw = g.content
+                    ext = {"image/jpeg": ".jpg", "image/webp": ".webp"}.get(g.headers.get("content-type", "").split(";")[0], ".png")
+                else:
+                    raise RuntimeError(f"{m.get('label', m['id'])} 沒有回傳圖片：{str(r.json())[:300]}")
+        return raw, ext
+
+    raw, ext = await _with_keys(woof, m, once)
     out = _out(ext, session_id)
     out.write_bytes(raw)
     return {"path": str(out), "seconds": round(time.time() - t0, 1), "bytes": len(raw), "params": p, "notes": notes}
@@ -359,9 +402,7 @@ async def gen_video(woof, m: dict, prompt: str, *, seconds: int | None = None, a
     秒數、比例、解析度：呼叫時給的 → 模型設定的生成參數 → 預設；超出範圍的換成最接近的（notes）。"""
     base = str(m.get("base_url") or "").rstrip("/")
     fam = family(m)
-    key = _key(woof, m)
     name = m.get("model") or m["id"]
-    hdr = {"Authorization": f"Bearer {key}"}
     p, notes = settle(m, ratio=aspect, seconds=seconds, resolution=resolution)
     sec, ratio = p.get("seconds") or 5, p.get("ratio") or "16:9"
     t0 = time.time()
@@ -371,8 +412,11 @@ async def gen_video(woof, m: dict, prompt: str, *, seconds: int | None = None, a
         fmt = {"type": "video", "aspect_ratio": ratio, "duration": f"{sec}s", "delivery": "uri"}
         if p.get("resolution"):
             fmt["resolution"] = p["resolution"]
-        async with httpx.AsyncClient(timeout=timeout) as c:
-            raw, _ = await _gemini(c, m, key, [{"type": "text", "text": prompt}], fmt, "video")
+        async def once(key: str) -> bytes:
+            async with httpx.AsyncClient(timeout=timeout) as c:
+                return (await _gemini(c, m, key, [{"type": "text", "text": prompt}], fmt, "video"))[0]
+
+        raw = await _with_keys(woof, m, once)
         out = _out(".mp4", session_id)
         out.write_bytes(raw)
         return {"path": str(out), "seconds": round(time.time() - t0, 1), "bytes": len(raw), "video_seconds": sec,
@@ -387,18 +431,24 @@ async def gen_video(woof, m: dict, prompt: str, *, seconds: int | None = None, a
         url, body = f"{base}/videos", {"model": name, "prompt": prompt, "seconds": str(sec),
                                        "size": "720x1280" if ratio == "9:16" else "1280x720"}
     async with httpx.AsyncClient(timeout=120) as c:
-        # 服務商排隊滿（503 queue full）：等一下再送，最多約 2 分鐘
-        for i in range(6):
-            r = await c.post(url, json=body, headers=hdr)
-            if r.status_code not in (429, 503) or i == 5:
-                break
-            if progress:
-                await progress(0, f"服務商排隊滿，{10 + i * 5} 秒後重試（第 {i + 1} 次）")
-            await asyncio.sleep(10 + i * 5)
-        if r.status_code in (429, 503):
-            raise RuntimeError(f"{m.get('label', m['id'])} 的影片佇列一直是滿的（服務商忙，重試 6 次約 2 分鐘），過幾分鐘再送一次")
-        if r.status_code >= 400:
-            raise RuntimeError(f"{m.get('label', m['id'])} 建立影片任務失敗（{_err(r)}）")
+        async def create(key: str):
+            hdr = {"Authorization": f"Bearer {key}"}
+            # 服務商排隊滿（503 queue full）：等一下再送，最多約 2 分鐘；429 是這把 key 限流，換下一把
+            for i in range(6):
+                r = await c.post(url, json=body, headers=hdr)
+                if r.status_code != 503 or i == 5:
+                    break
+                if progress:
+                    await progress(0, f"服務商排隊滿，{10 + i * 5} 秒後重試（第 {i + 1} 次）")
+                await asyncio.sleep(10 + i * 5)
+            _key_ok(r, f"{m.get('label', m['id'])} 建立影片任務失敗（{_err(r)}）")
+            if r.status_code == 503:
+                raise RuntimeError(f"{m.get('label', m['id'])} 的影片佇列一直是滿的（服務商忙，重試 6 次約 2 分鐘），過幾分鐘再送一次")
+            if r.status_code >= 400:
+                raise RuntimeError(f"{m.get('label', m['id'])} 建立影片任務失敗（{_err(r)}）")
+            return r, hdr
+
+        r, hdr = await _with_keys(woof, m, create)   # 查進度、下載用建立任務的同一把 key
         j = r.json()
         vid = j.get("request_id") or j.get("video_id") or j.get("id") or j.get("task_id")
         if not vid:

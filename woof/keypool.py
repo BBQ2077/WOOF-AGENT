@@ -4,10 +4,25 @@
 """
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from .config import load_keys
+
+
+def reset_at(body: str) -> float | None:
+    """錯誤訊息裡的額度重置時間（例如「quota resets at 2026-11-20T02:05」）；沒寫時區當本機時間。"""
+    mm = re.search(r"reset\w*\s+(?:at|on)\s+(\d{4}-\d\d-\d\d[T ]\d\d:\d\d(?::\d\d)?(?:\.\d+)?(?:Z|[+-]\d\d:?\d\d)?)", body or "", re.I)
+    if not mm:
+        return None
+    try:
+        t = datetime.fromisoformat(mm.group(1).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    ts = t.timestamp()   # 沒有時區就是本機時間
+    return ts if ts > time.time() else None
 
 
 @dataclass
