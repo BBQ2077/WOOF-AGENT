@@ -348,6 +348,8 @@ class PruneBeforeSummary(unittest.TestCase):
             r = await hooks["prepare_turn"](ctx)   # 超過門檻：交給背景，回合不等
             await mod._bg[sid]
             return r
+        from woof.agent import loop as _loop
+        _loop.LAST_REQ[sid] = {"at": time.time()}   # 上一步剛送過（快取還在）才在背景壓縮
         r = asyncio.run(turn())
         es = store.get_session(sid)["engine_state"]
         self.assertFalse(r)

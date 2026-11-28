@@ -555,6 +555,7 @@ async def _complete(model_cfg: dict, system: str, messages: list[dict], tools, e
                         pass
                     if session_id:
                         cachediag.finish(session_id, ev.get("input_tokens"), ev.get("cache_read"))
+                        AUX_USAGE[session_id] = {"input_tokens": ev.get("input_tokens"), "cache_read": ev.get("cache_read")}
     except TimeoutError:
         if not tmo.expired():
             raise
@@ -2029,6 +2030,32 @@ def _unique_call_ids(ctx, content: list[dict]) -> None:
 
 
 LAST_REQ: dict[str, dict] = {}   # 對話 → 上一步實際送出的 system／messages／工具／思考強度（壓縮沿用快取用）
+AUX_USAGE: dict[str, dict] = {}  # 對話 → 最近一次帶 session_id 的輔助呼叫（壓縮）回報的輸入量、快取讀取量
+
+
+async def rebuild_request(session_id: str, model_cfg: dict, turn: "TurnContext | None" = None) -> dict | None:
+    """照現在的對話狀態重組下一步要送的請求（壓縮用：WOOF 重開過、記憶體裡沒有上一步，或對話狀態已經變了）。
+    跟主回合同一套流程；回合中就用這一回合的 ctx，背景、手動用跟面板預覽一樣的設定；
+    系統提示詞用存下的那份（跟送過的一字不差），還沒存過才照常組。"""
+    from woof.effort import resolve as _resolve_effort
+
+    session = store.get_session(session_id)
+    hist = history(session_id) if session else []
+    if not hist:
+        return None
+    if isinstance(turn, TurnContext):
+        ctx = turn
+        system = await system_for(ctx)
+    else:
+        ctx = preview_ctx(session, model_cfg)
+        ctx.effort = _resolve_effort(model_cfg.get("efforts"), session.get("effort") or model_cfg.get("default_effort"),
+                                     model_cfg.get("default_effort"))
+        snap = store.get_prompt_snapshot(session_id)
+        system = snap["text"] if snap and snap.get("text") else await system_for(ctx)
+    messages = await REG.events.pipe("before_request", hist, ctx)
+    messages, _ = trim_images(session_id, messages)
+    messages = strip_stale_thinking(session_id, messages, model_cfg)
+    return {"system": system, "messages": messages, "specs": await tool_specs_for(ctx), "effort": ctx.effort}
 
 
 def req_sig(session_id: str) -> list:

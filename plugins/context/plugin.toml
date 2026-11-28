@@ -58,19 +58,6 @@ type = "number"
 default = 20
 label = "第一次寫摘要時，長度佔原文的百分之幾（壓縮幅度，建議 10 到 30）；不超過摘要上限"
 
-[settings.method]
-in_settings = "compress"
-type = "select"
-default = "單次"
-options = ["單次", "多工"]
-label = "壓縮方式：單次＝一次摘要（預設）；多工＝依字數分段同時摘要，最後合併"
-
-[settings.parallel]
-in_settings = "compress"
-type = "number"
-default = 4
-label = "多工時，一次同時跑幾段（1 到 8）"
-
 [settings.keep_images]
 in_settings = "compress"
 type = "number"
