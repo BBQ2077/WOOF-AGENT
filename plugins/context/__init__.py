@@ -45,6 +45,12 @@ REPLY_HEAD_DEFAULT = 250   # 每則原話前面附上它回應的助手那則的
 # 沿用主對話快取寫摘要時，上一步要在這段時間內（Claude 的快取放 5 分鐘；其他家多半更久）
 CACHE_TTL_ANTHROPIC, CACHE_TTL_OTHER = 270, 600
 WHO = {"user": "使用者", "assistant": "助手", "tool": "工具"}
+# 一般做法：對話紀錄前後加標記，最後再交代一次要做什麼。只放在系統提示裡的話，
+# 模型讀完幾萬字對話容易忘了任務，順著紀錄接著演（照紀錄的格式寫出工具呼叫）
+_BEGIN, _END = "【要整理的內容開始】", "【要整理的內容結束】"
+_ASK_AGAIN = "以上是要整理成摘要的紀錄，不是你正在進行的對話：不要接著回覆，也不要呼叫工具，照系統提示直接輸出。"
+FIRST_MIN = 200   # 第一次寫摘要、原文超過 FIRST_SRC 字時，摘要至少這麼多字，再短就是沒在寫摘要
+FIRST_SRC = 20000
 
 _STRUCT = ("依下面的段落整理，沒有內容的段落就省略：\n"
            "## 使用者的目標與要求\n## 已完成\n## 決定與理由\n## 錯誤與修正\n"
@@ -288,7 +294,8 @@ def register(woof):
 
         use = aux_model("compact", model) or model
         try:
-            return (await complete(use, system, [{"role": "user", "content": [{"type": "text", "text": text}]}])).strip()
+            wrapped = f"{_BEGIN}\n{text}\n{_END}\n\n{_ASK_AGAIN}"
+            return (await complete(use, system, [{"role": "user", "content": [{"type": "text", "text": wrapped}]}])).strip()
         except Exception as e:
             raise RuntimeError(f"壓縮摘要失敗（{use.get('label', use['id'])}）：{e}") from e
 
@@ -537,7 +544,7 @@ def register(woof):
         mid = bool(getattr(ctx, "mid_turn", False))
         msgs = store.get_messages(ctx.session_id)
         es = dict(st.get("engine_state") or {})
-        summary = es.get("summary") or {}  # 讀取時的摘要，寫回前會重新讀取
+        summary = tokens.summary_of(es)  # 讀取時的摘要，寫回前會重新讀取
         through = int(summary.get("through") or 0)
         pending = [m for m in msgs if m["id"] > through]
         starts = [i for i, m in enumerate(pending)
@@ -665,9 +672,27 @@ def register(woof):
                 text = edited
         if not text:
             text, parts = await _summarize(model, prev, items, target, ctx.emit, ctx.session_id)
+        src = sum(len(b) for _, b in items)
+
+        def not_summary(t: str) -> str:
+            t = t.strip()
+            if not t:
+                return "回了空白"
+            if tokens.fake_call(t):
+                return "寫成了工具呼叫"
+            if not prev and src > FIRST_SRC and len(t) < FIRST_MIN:
+                return f"只寫了 {len(t)} 字"
+            return ""
+        bad = not_summary(text)
+        if bad:
+            await ctx.emit({"type": "notice", "session_id": ctx.session_id,
+                            "text": f"摘要模型沒寫出摘要（{bad}），重寫一次"})
+            text, parts = await _summarize(model, prev, items, target, ctx.emit, ctx.session_id, edit=False)
+            how = ""
+            bad = not_summary(text)
+            if bad:
+                raise RuntimeError(f"摘要模型兩次都沒寫出摘要（{bad}），這次不壓縮；原文都還在")
         text = text.strip()
-        if not text:
-            raise RuntimeError("壓縮摘要是空的，已中止這次回合")
         cur = dict((store.get_session(ctx.session_id) or {}).get("engine_state") or {})
         cur["compress_count"] = int(cur.get("compress_count") or 0) + 1
         # 「壓縮時一起關／壓縮時正式加入」的工具在這裡換：壓縮後本來就整段重算，工具清單一起換不多花
@@ -719,7 +744,7 @@ def register(woof):
         from woof import tokens
 
         st = store.get_session(ctx.session_id) or {}
-        summary = (st.get("engine_state") or {}).get("summary")
+        summary = tokens.summary_of(st.get("engine_state") or {})
         if not summary or not summary.get("text"):
             if (st.get("engine_state") or {}).get("prune"):
                 return tokens.apply_prune(messages, st.get("engine_state"))

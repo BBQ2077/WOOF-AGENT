@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 
 def estimate_text(text: str) -> int:
@@ -95,6 +96,20 @@ def used_of(usage: dict | None) -> int:
     return int(usage.get("input_tokens") or 0) + int(usage.get("output_tokens") or 0)
 
 
+# 摘要模型沒寫摘要、把對話演下去時常見的開頭：照對話紀錄裡的格式寫出一個工具呼叫
+_FAKE_CALL = re.compile(r"\s*(?:</?tool_call>|</?function_calls>|<invoke\b|\[呼叫 \S+\])")
+
+
+def fake_call(text: str | None) -> bool:
+    return bool(_FAKE_CALL.match(text or ""))
+
+
+def summary_of(es: dict) -> dict:
+    """對話目前有效的摘要；存成工具呼叫的（摘要模型沒寫摘要）當作沒有，整段原文照送、下次重新壓縮。"""
+    s = es.get("summary") or {}
+    return {} if fake_call(s.get("text")) else s
+
+
 def _estimate_all(session_id: str, es: dict, upto: int = 0) -> int:
     """整段估計：系統提示詞快照＋工具＋實際會送出的訊息（摘要、附的原話、到 upto 為止的歷史；之後不送的思考不算）。"""
     from woof import store
@@ -103,7 +118,7 @@ def _estimate_all(session_id: str, es: dict, upto: int = 0) -> int:
     hist = history(session_id)
     if upto:
         hist = [m for m in hist if int(m.get("id") or 0) <= upto]
-    summ = es.get("summary") or {}
+    summ = summary_of(es)
     n = 0
     if summ.get("text"):
         through = int(summ.get("through") or 0)

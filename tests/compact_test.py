@@ -188,6 +188,58 @@ class Flow(unittest.TestCase):
         self.assertIn("2. 跑測試全過", summ["text"])
 
 
+class NotSummary(unittest.TestCase):
+    """摘要模型沒寫摘要（照紀錄寫出工具呼叫、太短）：重寫一次；兩次都不行就不存"""
+    run_with = Flow.run_with
+
+    def setUp(self):
+        Flow.setUp(self)
+        es = dict(store.get_session(self.sid)["engine_state"])
+        es.pop("summary")                                 # 第一次壓縮
+        store.update_session(self.sid, engine_state=es)
+
+    FAKE = "<tool_call>\n[呼叫 terminal] cd C:/x && ls\n</tool_call>"
+
+    def test_transcript_wrapped_and_asked_again(self):
+        good = "## 已完成\n" + "1. 讀完 f0 到 f3，內容是資料。\n" * 20
+        calls = self.run_with([good])
+        text = calls[0][1]
+        self.assertTrue(text.startswith(C._BEGIN))
+        self.assertTrue(text.endswith(C._ASK_AGAIN))
+        self.assertIn(C._END, text)
+
+    def test_fake_call_rewritten_once(self):
+        good = "## 已完成\n" + "1. 讀完 f0 到 f3，內容是資料。\n" * 20
+        calls = self.run_with([self.FAKE, good])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(store.get_session(self.sid)["engine_state"]["summary"]["text"], good.strip())
+        self.assertTrue(any("寫成了工具呼叫" in (e.get("text") or "") for e in self.events))
+
+    def test_two_bad_answers_store_nothing(self):
+        with self.assertRaises(RuntimeError) as cm:
+            self.run_with([self.FAKE, "好的，我來看看。"])
+        self.assertIn("只寫了", str(cm.exception))
+        self.assertNotIn("summary", store.get_session(self.sid)["engine_state"])
+
+    def test_stored_fake_summary_ignored(self):
+        from woof import tokens
+        es = dict(store.get_session(self.sid)["engine_state"])
+        es["summary"] = {"through": 5, "text": self.FAKE}
+        store.update_session(self.sid, engine_state=es)
+        self.assertEqual(tokens.summary_of(es), {})
+        self.assertTrue(tokens.fake_call("  [呼叫 read_file] a.py"))
+        self.assertFalse(tokens.fake_call("## 已完成\n1. [呼叫 x] 之後改好"))
+        msgs = store.get_messages(self.sid)
+        sent = self.hooks["before_request"]([{"id": m["id"], "role": m["role"], "content": m["content"], "meta": {}}
+                                             for m in msgs], self.ctx)
+        self.assertIsNone(sent)                           # 整段原文照送
+        good = "## 已完成\n" + "1. 讀完 f0 到 f3，內容是資料。\n" * 20
+        calls = self.run_with([good])
+        self.assertNotIn("先前摘要", calls[0][1])          # 從頭重寫，不拿壞的當舊摘要
+        summ = store.get_session(self.sid)["engine_state"]["summary"]
+        self.assertEqual(summ["text"], good.strip())
+
+
 class Background(unittest.TestCase):
     """超過門檻：交給背景寫摘要，對話不等；到等待線才等"""
 
