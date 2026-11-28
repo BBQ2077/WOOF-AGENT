@@ -662,15 +662,16 @@ def register(woof):
 
     woof.add_tool(
         "watch_video",
-        "看影片：YouTube、B 站等網址或本機影片檔。抽幾格畫面拼成一張圖給你看，有字幕就附上。先看整段，再用 start／end 或 times 看細節。",
+        "看影片（YouTube、B 站等網址，或本機影片檔）：在 start～end 之間平均抽 frames 格畫面，拼成一張標了時間的圖；"
+        "網址影片有字幕會附上同一段。聽不到聲音。先看整段，再縮小範圍或用 times 看細節。",
         {"type": "object", "properties": {
-            "url": {"type": "string", "description": "影片網址"},
-            "path": {"type": "string", "description": "本機影片檔（或用 url）"},
-            "start": {"type": "number", "description": "從第幾秒"},
-            "end": {"type": "number", "description": "到第幾秒"},
-            "frames": {"type": "integer", "description": f"抽幾格，預設 9，最多 {video.MAX_FRAMES}"},
-            "times": {"type": "array", "items": {"type": "number"}, "description": "指定要看的秒數，取代 frames"},
-            "question": {"type": "string", "description": "要看什麼"},
+            "url": {"type": "string", "description": "影片網址（與 path 擇一）"},
+            "path": {"type": "string", "description": "本機影片檔（與 url 擇一）"},
+            "start": {"type": "number", "description": "從第幾秒，預設片頭"},
+            "end": {"type": "number", "description": "到第幾秒，預設片尾"},
+            "frames": {"type": "integer", "description": f"抽幾格，預設 9，最多 {video.MAX_FRAMES}；格數越少每格越大"},
+            "times": {"type": "array", "items": {"type": "number"}, "description": "只看這幾秒的畫面（不用 start／end／frames）"},
+            "question": {"type": "string", "description": "看完要回答的問題"},
         }},
         watch_video,
     )

@@ -1337,8 +1337,6 @@ function renderSessions() {
 
   const roots = S.sessions.filter((s) => !(s.parent && ids.has(s.parent)));
   const pinned = roots.filter((s) => !s.archived && s.pinned);
-  const archived = roots.filter((s) => s.archived);
-  const arcOpen = !!q || S.showArchived;
   const gids = new Set(groups.map((g) => g.id));
   const inGrp = (s) => !s.archived && !s.pinned && s.grp && gids.has(s.grp);
   const loose = roots.filter((s) => !s.archived && !s.pinned && !inGrp(s));
@@ -1365,10 +1363,6 @@ function renderSessions() {
       if (g !== last) { html += `<div class="grp" data-drop="">${g}</div>`; last = g; }
       html += flat([s]);
     }
-  }
-  if (archived.length) {
-    html += `<div class="arctog" data-arctog>${arcOpen ? '▾' : '▸'} 已封存 ${archived.length} 個</div>`;
-    if (arcOpen) html += flat(archived);
   }
   if (q) html += `<div class="grp">對話內容</div><div id="ftsBox">${S.fts && S.fts.q === q ? ftsHtml(S.fts) : '<div class="sempty">搜尋中…</div>'}</div>`;
   $('#sessionList').innerHTML = html || '<div class="sempty">還沒有對話</div>';
@@ -1407,8 +1401,6 @@ async function gotoHit(sid, mid, q) {
   if (t && window.find) { getSelection().removeAllRanges(); const r = document.createRange(); r.setStart(el, 0); r.collapse(true); getSelection().addRange(r); window.find(t, false, false, false); }
 }
 $('#sessionList').addEventListener('click', async (e) => {
-  const at = e.target.closest('[data-arctog]');
-  if (at) { S.showArchived = !S.showArchived; renderSessions(); return; }
   const fh = e.target.closest('.fts');
   if (fh) { gotoHit(fh.dataset.fsid, +fh.dataset.fmid, $('#search').value.trim()); return; }
   const ds = e.target.closest('[data-delsubs]');
@@ -1491,7 +1483,7 @@ async function toggleArchive(sid) {
   const s = S.sessions.find((x) => x.id === sid); if (!s) return;
   try {
     Object.assign(s, await api('PATCH', `/api/sessions/${sid}`, { archived: !s.archived }));
-    if (s.archived) { notify('ok', '已封存', '在側邊欄最下面的「已封存」可以找回來'); if (sid === S.sid) newSession(); }
+    if (s.archived) { notify('ok', '已封存', '在「設定 → 封存的對話」可以還原'); if (sid === S.sid) newSession(); }
     renderSessions();
   } catch (e) { notify('error', '封存失敗', e.message); }
 }
@@ -5730,6 +5722,7 @@ const SECTIONS = [
   ['flow', '方案模式', '對話框左下「方案・人工／對抗／拓展」的次數上限、審核等多久，以及審核、拓展模型收到的提示詞。'],
   ['styles', '輸出風格', '每個對話可以選一種風格，內容會放進系統提示。'],
   ['pet', '寵物', '陪你聊天的小角色。他有自己的對話、記憶和角色檔，跟主對話分開；對你的對話只看不改——不會插話、不會用工具、不會動任何檔案。'],
+  ['archive', '封存的對話', '封存的對話不會出現在左側對話欄。可以在這裡打開來看、還原回對話欄，或刪除。'],
   ['compress', '上下文壓縮', '對話變長時把較早的內容摘要起來，全文仍留在資料庫。圖片送出前縮多小也在這裡。'],
   ['perms', '權限', '模型要用工具時，依類別決定直接執行、先問你、或不允許。'],
   ['tools', '工具', '每個工具的總開關（含 Skill、記憶的讀和寫），依插件分組。停用後模型看不到該工具；整個插件的啟停、安裝在「插件」頁，單一對話在「上下文 → 本回合工具」。'],
@@ -5746,7 +5739,7 @@ const SECTIONS = [
 // 側欄分組：同一類放一個框，項目長短不一也整齊
 const SET_GROUPS = [
   ['模型', ['vendors', 'aux', 'keys']],
-  ['對話', ['prompts', 'flow', 'styles', 'compress']],
+  ['對話', ['prompts', 'flow', 'styles', 'compress', 'archive']],
   ['寵物', ['pet']],
   ['能力', ['perms', 'presets', 'tools', 'skills']],
   ['環境', ['general', 'translate', 'appearance', 'remote']],
@@ -6184,7 +6177,7 @@ function renderSettings() {
   const box = $('#setList');
   box.onclick = null;
   box.className = 'sec-' + sec[0];
-  ({ mcp: renderMcpSec, aux: renderAux, compress: renderCompressSec, prompts: renderPromptsSec, flow: renderFlowSec, vendors: renderVendors, keys: renderKeyEditor, appearance: renderAppearance, general: renderGeneral, translate: renderTranslateSec, perms: renderPermsSec, presets: renderPresetsSec, remote: renderRemoteSec, about: renderAbout, styles: renderStylesSec, pet: renderPetSec, snapshots: renderSnapshotsSec, tools: renderToolsSet, skills: renderSkillsSet })[sec[0]](box);}
+  ({ mcp: renderMcpSec, aux: renderAux, compress: renderCompressSec, prompts: renderPromptsSec, flow: renderFlowSec, vendors: renderVendors, keys: renderKeyEditor, appearance: renderAppearance, general: renderGeneral, translate: renderTranslateSec, perms: renderPermsSec, presets: renderPresetsSec, remote: renderRemoteSec, about: renderAbout, styles: renderStylesSec, pet: renderPetSec, snapshots: renderSnapshotsSec, archive: renderArchiveSec, tools: renderToolsSet, skills: renderSkillsSet })[sec[0]](box);}
 $('#setNav').onclick = (e) => { const d = e.target.closest('[data-sec]'); if (!d) return; setFindClear(); S.setSec = d.dataset.sec; localStorage.setItem('woof.setSec', S.setSec); renderSettings(); };
 $('#setQ').oninput = (e) => { S.setQ = e.target.value; renderSettings(); };
 $('#setQ').onkeydown = (e) => {
@@ -7776,6 +7769,48 @@ async function presetEditor(p) {
 }
 // ---- 檔案還原（快照）的保留規則與容量
 const fmtBytes = (n) => n >= 1073741824 ? (n / 1073741824).toFixed(2) + ' GB' : n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : n >= 1024 ? Math.round(n / 1024) + ' KB' : n + ' B';
+// 封存的對話：側邊欄不顯示，只在這裡看、還原、刪除
+async function renderArchiveSec(box) {
+  await loadSessions().catch(() => {});
+  const ids = new Set(S.sessions.map((s) => s.id));
+  const all = S.sessions.filter((s) => s.archived && !(s.parent && ids.has(s.parent)))
+    .sort((a, b) => String(b.updated || b.created || '').localeCompare(String(a.updated || a.created || '')));
+  const q = (S.arcQ || '').trim().toLowerCase();
+  const list = q ? all.filter((s) => (s.title || '').toLowerCase().includes(q)) : all;
+  const row = (s) => {
+    const m = modelOf(s.model);
+    return `<div class="frow arc-row" data-arc="${esc(s.id)}"><div><b>${esc(s.title || '新對話')}</b><small>${esc([m ? m.label : s.model, fmtTime(s.updated || s.created)].filter(Boolean).join(' · '))}</small></div>`
+      + `<div class="fctl"><span class="btn" data-arcopen>打開</span><span class="btn primary" data-arcback>還原</span><span class="btn danger" data-arcdel>刪除</span></div></div>`;
+  };
+  box.innerHTML = all.length
+    ? `<div class="card" data-f="arcList"><div class="arc-top"><input type="search" id="arcQ" placeholder="搜尋標題" value="${esc(S.arcQ || '')}">`
+      + `<span class="muted">${all.length} 個對話</span><span class="grow"></span><span class="btn" data-arcall>全部還原</span></div>`
+      + (list.map(row).join('') || '<div class="blank">沒有符合的對話</div>') + '</div>'
+    : '<div class="card"><div class="blank">沒有封存的對話。在對話欄按右鍵選「封存」就會移到這裡。</div></div>';
+  const qi = $('#arcQ', box);
+  if (qi) qi.oninput = () => { S.arcQ = qi.value; const p = qi.selectionStart; renderArchiveSec(box).then(() => { const n = $('#arcQ', box); n.focus(); n.setSelectionRange(p, p); }); };
+  const unarc = async (sid) => {
+    const s = S.sessions.find((x) => x.id === sid);
+    Object.assign(s, await api('PATCH', `/api/sessions/${sid}`, { archived: false }));
+  };
+  box.onclick = async (e) => {
+    if (e.target.closest('[data-arcall]')) {
+      if (!await confirmBox('全部還原', `${all.length} 個封存的對話都放回對話欄？`, { ok: '還原' })) return;
+      let bad = 0;
+      for (const s of all) { try { await unarc(s.id); } catch (err) { bad++; } }
+      if (bad) notify('error', '有幾個沒還原', `${bad} 個失敗`); else notify('ok', '已全部還原');
+      renderSessions(); renderArchiveSec(box); return;
+    }
+    const r = e.target.closest('[data-arc]'); if (!r) return;
+    const sid = r.dataset.arc;
+    if (e.target.closest('[data-arcopen]')) { showView('chat'); openSession(sid); return; }
+    if (e.target.closest('[data-arcback]')) {
+      try { await unarc(sid); notify('ok', '已還原到對話欄'); } catch (err) { notify('error', '還原失敗', err.message); }
+      renderSessions(); renderArchiveSec(box); return;
+    }
+    if (e.target.closest('[data-arcdel]')) { await deleteSession(sid); renderArchiveSec(box); }
+  };
+}
 async function renderSnapshotsSec(box) {
   box.innerHTML = '<div class="card"><div class="blank">讀取中…</div></div>';
   let u;

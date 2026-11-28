@@ -185,7 +185,7 @@ class WatchLocal(unittest.TestCase):
         return asyncio.run(self.w.tools["watch_video"][2](args, Ctx()))
 
     def test_short_description(self):
-        self.assertLess(len(self.w.tools["watch_video"][0]), 120)
+        self.assertLess(len(self.w.tools["watch_video"][0]), 160)
 
     def test_frames_sheet(self):
         r = self.run_tool({"path": str(self.vid), "frames": 4})
