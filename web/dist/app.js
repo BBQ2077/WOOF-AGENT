@@ -6452,7 +6452,7 @@ async function pfSave(auto) {
   } catch (e) { const d = $('#pfDirty'); if (d) d.innerHTML = `<span class="qerr">沒存到：${esc(e.message)}</span>`; }
 }
 // ---- 壓縮（設定存在 context 插件，儲存後插件會重新載入）
-const CMP_KEYS = ['window', 'ratio', 'trigger', 'wait_at', 'tail_tokens', 'summary_tokens', 'quote_count', 'quote_tokens', 'quote_each_chars', 'quote_reply_chars'];
+const CMP_KEYS = ['window', 'ratio', 'trigger', 'wait_at', 'tail_tokens', 'summary_tokens', 'recap_chars', 'quote_count', 'quote_tokens', 'quote_each_chars', 'quote_reply_chars'];
 // 壓縮用的上下文大小（設定頁填的）；0＝照模型。用量圈、上下文面板都用它算百分比
 async function loadCtxCap() {
   try { const p = (await api('GET', '/api/plugins')).find((r) => r.name === 'context'); S.ctxOn = !!(p && p.enabled); S.ctxCap = p && p.enabled ? Number((p.settings || {}).window) || 0 : 0; }
@@ -6497,6 +6497,7 @@ async function renderCompressSec(box) {
     <div class="card cmp">
       ${row('c-tail', '原樣保留多少', '壓縮後最近的訊息原樣保留多少 token（1000 到 200000），照模型實際算法校正過，最多上下文的 25%。至少留最後一步，不拆開工具呼叫和結果。', num('tail_tokens', 1000, 200000, 'token', 'wide'))}
       ${row('c-sum', '摘要上限', '摘要最多幾 token（1000 到 30000），最多上下文的 10%。再壓縮時模型只改有變的行，沒變的程式原樣保留；超過上限才刪掉最舊、最不需要的細節。', num('summary_tokens', 1000, 30000, 'token', 'wide'))}
+      ${row('c-recap', '回顧上限', '摘要裡「回顧」段落最多幾字（200 到 10000）。較早做過的事一行一件：你要什麼 → 結果（完成、改成什麼、放棄和原因），相關的併成一行；超過時合併最舊的幾行，前面做過什麼不會整個忘掉。', num('recap_chars', 200, 10000, '字', 'wide'))}
       ${row('c-quote', '附幾則原話', '摘要後面照抄你最近幾則原話（0 到 20，0＝不附）。更早的寫進摘要，原文用 session_search 查得到。', num('quote_count', 0, 20, '則'))}
       ${row('c-quotetok', '原話上限', '附的原話合計最多幾 token（0 到 20000）。', num('quote_tokens', 0, 20000, 'token', 'wide'))}
       ${row('c-quoteeach', '單則原話上限', '單則原話最多幾字（100 到 20000）。超過只附開頭和結尾（例如直接貼文件），中間註明用 session_search 查全文。', num('quote_each_chars', 100, 20000, '字', 'wide'))}

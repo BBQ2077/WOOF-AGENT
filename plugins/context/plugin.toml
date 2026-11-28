@@ -46,6 +46,12 @@ type = "number"
 default = 1500
 label = "附的原話合計最多幾 token"
 
+[settings.recap_chars]
+in_settings = "compress"
+type = "number"
+default = 1000
+label = "摘要裡「回顧」最多幾字（200 到 10000）：較早做過的事一行一件（要什麼 → 結果），超過時合併最舊的幾行"
+
 [settings.quote_each_chars]
 in_settings = "compress"
 type = "number"

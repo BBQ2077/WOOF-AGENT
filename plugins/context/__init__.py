@@ -13,6 +13,7 @@
   tail_tokens   壓縮後原樣保留的最近訊息（token，照模型實際算法校正過）；至少留最後一步
   quote_count   摘要後面附上被壓縮那段裡使用者最近幾則原話
   quote_tokens  附的原話合計最多幾 token
+  recap_chars 摘要裡「回顧」段落（較早做過的事：要什麼 → 結果）最多幾字，超過時模型合併最舊的幾行
   quote_each_chars 單則原話最多幾字，超過只附開頭和結尾（例如直接貼文件），註明用 session_search 查全文
   quote_reply_chars 每則原話前面附它回應的助手那則開頭幾字
   summary_tokens 摘要最多幾 token；更新時只輸出要改的行（行號編輯指令），沒變的由程式原樣保留
@@ -48,6 +49,8 @@ TAIL_TOK_DEFAULT, TAIL_WIN = 10000, 0.25
 # 摘要後面附上被壓縮那段裡使用者最近幾則原話（新的在前）：則數、合計 token（設定 quote_count、quote_tokens）、單則上限（字）
 # 單則超過上限字數（設定 quote_each_chars，例如直接貼文件）只附開頭和結尾，註明用 session_search 查全文
 QUOTE_N_DEFAULT, QUOTE_TOK_DEFAULT, USER_MAX = 3, 1500, 750
+# 摘要裡「回顧」段落（較早做過的事，一行一件：要什麼 → 結果）的上限字數（設定 recap_chars）
+RECAP_DEFAULT = 1000
 REPLY_HEAD_DEFAULT = 250   # 每則原話前面附上它回應的助手那則的開頭（先講結論，開頭就是重點），看得出回的是什麼
 # 快取大概還在的時間（Claude 放 5 分鐘；其他家多半更久）：超過就先讓這一步照常送（順便把快取建回來），下一步再壓縮
 CACHE_TTL_ANTHROPIC, CACHE_TTL_OTHER = 270, 600
@@ -56,6 +59,17 @@ SHORT_SRC_TOK, MIN_CHARS = 10000, 200
 FIT = 0.95           # 請求估計超過模型窗口的這個比例：從最舊的訊息往後拿掉，直到送得出去
 # 摘要用的提示詞在 woof/prompts.py（compact、compact_inline、compact_edit…），設定頁可以檢視、覆寫
 from woof.prompts import get as _prompt_get, get_in as _prompt_in  # noqa: E402
+
+
+def _section_len(text: str, title: str) -> int:
+    """摘要裡某個 ## 段落的字數（標題那行不算）；沒有這段＝0"""
+    n, inside = 0, False
+    for line in text.split("\n"):
+        if line.startswith("## "):
+            inside = line[3:].strip().startswith(title)
+        elif inside:
+            n += len(line.strip())
+    return n
 
 
 def _elide(text: str, cap: int, more: str = "") -> str:
@@ -389,6 +403,9 @@ def register(woof):
     def _reply_head() -> int:
         return _int("quote_reply_chars", REPLY_HEAD_DEFAULT, 0, 2000)
 
+    def _recap_cap() -> int:
+        return _int("recap_chars", RECAP_DEFAULT, 200, 10000)
+
     def _quote_each() -> int:
         return _int("quote_each_chars", USER_MAX, 100, 20000)
 
@@ -465,11 +482,14 @@ def register(woof):
             effort = use.get("default_effort")
             note = f"「設定 → 輔助模型 → 壓縮」指定了 {use.get('label', use['id'])}，跟主對話不同模型，吃不到主對話的快取"
         mode = _mode()
-        rules = _prompt_in("compact", mode)
+        rcap = _recap_cap()
+        rules = _prompt_in("compact", mode, recap=rcap)
         if prev:
             # 編輯：舊摘要附行號放在指令裡，模型只輸出要改的行（程式套用）；手動壓縮另外要它整份檢查清理一次（一樣只寫指令）
+            # 「回顧」現在幾字由程式算好告訴模型，超過上限才要它合併最舊的幾行
             n_lines = len(prev.split("\n"))
             rules += ("\n" + _prompt_in("compact_edit", mode, n=len(prev), cap=target, last=n_lines)
+                      + "\n" + _prompt_in("compact_recap", mode, cur=_section_len(prev, "回顧"), cap=rcap)
                       + ("\n" + _prompt_in("compact_tidy", mode) if tidy else "")
                       + "（【之後新增的對話】＝最前面那則【上下文摘要】後面到範圍結束為止的對話）"
                       + f"\n\n【先前摘要】（每行前面是行號，指令裡的行號照這個）\n{_numbered(prev)}")

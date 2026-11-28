@@ -294,11 +294,22 @@ class Flow(unittest.TestCase):
     def test_rules_keep_state_not_history(self):
         from woof import prompts
         for mode in ("lean", "normal"):
-            r = prompts.get_in("compact", mode)
+            r = prompts.get_in("compact", mode, recap=1000)
             self.assertIn("寫的是現在的狀態", r)
             self.assertIn("系統提示裡已經有的", r)
             self.assertIn("只寫正確的", r)
-            self.assertIn("刪掉", prompts.get_in("compact_edit", mode, n=1, cap=1, last=1))
+            self.assertIn("## 回顧", r)
+            self.assertIn("上限 1000 字", r)
+            e = prompts.get_in("compact_edit", mode, n=1, cap=1, last=1)
+            self.assertIn("刪掉", e)
+            self.assertIn("做完的事不要刪", e)                            # 做完的縮進回顧，不刪
+
+    def test_recap_length_told(self):
+        self.prev_text = "## 回顧\n- 修字型 → 完成\n- 發 v0.4.25 → 完成\n## 已完成\n1. 改了 a.py"
+        self.assertEqual(C._section_len(self.prev_text, "回顧"), len("- 修字型 → 完成") + len("- 發 v0.4.25 → 完成"))
+        self.assertEqual(C._section_len("## 已完成\n1. x", "回顧"), 0)
+        self.run_with(["@@ 改 7\n- 在讀 f3\n@@ 完"])
+        self.assertIn("「回顧」段落現在 0 字，上限 1000 字", self.calls[0]["ask"])   # 程式算好字數告訴模型
 
     def test_new_messages_after_last_request_appended(self):
         self.snap["messages"] = self.sent[:-2]
