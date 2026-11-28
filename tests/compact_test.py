@@ -274,13 +274,14 @@ class Flow(unittest.TestCase):
 
     def test_manual_tidies_with_edits(self):
         self.ctx.tidy = True                                             # 已經有摘要、按「立即壓縮」：一樣只寫編輯指令，順便整份清理
-        self.run_with(["@@ 刪 2\n@@ 改 7\n- 在讀 f3\n@@ 完"])
+        self.run_with(["@@ 刪 2\n@@ 插 5\n3. 讀完 f0 到 f2\n4. 查到 X 可以用\n@@ 改 7\n- 在讀 f3\n@@ 完"])
         c = self.calls[0]
         self.assertEqual(c["messages"][:-1], self.sent)                  # 接在原本的請求後面，前面吃快取
         self.assertIn("1| ## 使用者的目標與要求", c["ask"])              # 舊摘要附行號，只寫要改的行
         self.assertIn("逐段檢查整份", c["ask"])
         text = self.summ()["text"]
         self.assertNotIn("- 做 A", text)
+        self.assertIn("2. 跑測試全過\n3. 讀完 f0 到 f2\n4. 查到 X 可以用", text)   # 新的照樣插進去
         self.assertTrue(text.endswith("- 在讀 f3"))
         self.assertIn("順便整份清理", self.notices())
 
