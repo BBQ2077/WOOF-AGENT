@@ -45,7 +45,8 @@ CHARS_PER_TOK = 1.5
 # 原樣保留的最近訊息（實際 token，設定 tail_tokens）；最多佔上下文的 25%，小模型才不會整段都是保留區
 TAIL_TOK_DEFAULT, TAIL_WIN = 10000, 0.25
 # 摘要後面附上被壓縮那段裡使用者最近幾則原話（新的在前）：則數、合計 token（設定 quote_count、quote_tokens）、單則上限（字）
-QUOTE_N_DEFAULT, QUOTE_TOK_DEFAULT, USER_MAX = 3, 1500, 1500
+# 單則超過 USER_MAX 字（例如直接貼文件）只附開頭和結尾，註明用 session_search 查全文
+QUOTE_N_DEFAULT, QUOTE_TOK_DEFAULT, USER_MAX = 3, 1500, 500
 REPLY_HEAD_DEFAULT = 250   # 每則原話前面附上它回應的助手那則的開頭（先講結論，開頭就是重點），看得出回的是什麼
 # 快取大概還在的時間（Claude 放 5 分鐘；其他家多半更久）：超過就先讓這一步照常送（順便把快取建回來），下一步再壓縮
 CACHE_TTL_ANTHROPIC, CACHE_TTL_OTHER = 270, 600
@@ -56,11 +57,11 @@ FIT = 0.95           # 請求估計超過模型窗口的這個比例：從最舊
 from woof.prompts import get as _prompt_get, get_in as _prompt_in  # noqa: E402
 
 
-def _elide(text: str, cap: int) -> str:
+def _elide(text: str, cap: int, more: str = "") -> str:
     if len(text) <= cap:
         return text
     head = cap * 3 // 4
-    return f"{text[:head]}\n…（中間省略 {len(text) - cap} 字）…\n{text[-(cap - head):]}"
+    return f"{text[:head]}\n…（中間省略 {len(text) - cap} 字{more}）…\n{text[-(cap - head):]}"
 
 
 def _users_section(messages: list[dict], through: int, n: int = QUOTE_N_DEFAULT,
@@ -89,7 +90,7 @@ def _users_section(messages: list[dict], through: int, n: int = QUOTE_N_DEFAULT,
         room = budget - used
         if len(picked) >= n or room < 60:
             break
-        text = _elide(text, min(USER_MAX, room))
+        text = _elide(text, min(USER_MAX, room), f"，全文用 session_search around={m['id']} 查" if m.get("id") else "")
         cap = min(head, room - len(text))
         reply = (reply[:cap] + "…" if len(reply) > cap else reply) if reply and cap >= 40 else ""
         when = time.strftime("%m-%d %H:%M", time.localtime(m["created"])) if m.get("created") else ""
@@ -420,7 +421,7 @@ def register(woof):
         return bool(snap) and time.time() - snap["at"] <= _ttl(model)
 
     async def _request(ctx, model: dict, prev: str, kept: list[dict], target: int, fit: float = FIT,
-                       redo: dict | None = None) -> dict:
+                       redo: dict | None = None, full: bool = False) -> dict:
         """寫摘要的請求：下一步本來就要送的內容（跟主對話一字不差），最後加一則壓縮指令。
         記憶體裡有上一步就接著用；WOOF 重開過或對話狀態變了，照現在的狀態重組（同一套流程）。
         超過模型窗口（上下文已經爆了）就從最舊的訊息往後拿掉，直到送得出去。"""
@@ -460,7 +461,10 @@ def register(woof):
             note = f"「設定 → 輔助模型 → 壓縮」指定了 {use.get('label', use['id'])}，跟主對話不同模型，吃不到主對話的快取"
         mode = _mode()
         rules = _prompt_in("compact", mode)
-        if prev:
+        if full:
+            # 手動壓縮：舊摘要就是最前面那則【上下文摘要】，照現在的規則整份重寫
+            rules += "\n" + _prompt_in("compact_full", mode, cap=target)
+        elif prev:
             # 編輯：舊摘要附行號放在指令裡，模型只輸出要改的行（程式套用）
             n_lines = len(prev.split("\n"))
             rules += ("\n" + _prompt_in("compact_edit", mode, n=len(prev), cap=target, last=n_lines)
@@ -503,8 +507,10 @@ def register(woof):
                 "snap": {"model": model.get("id"), "through": max(ids) if ids else 0, "system": system,
                          "messages": msgs, "specs": specs, "effort": effort}}
 
-    def _check(out: str | None, prev: str, src_tok: float, allow_big: bool = False) -> tuple[str, list[dict], str]:
-        """模型的回覆能不能當摘要：回傳 (摘要全文, 猜著套的地方, 不能用的原因)。每次壓縮都檢查"""
+    def _check(out: str | None, prev: str, src_tok: float, allow_big: bool = False,
+               full: bool = False) -> tuple[str, list[dict], str]:
+        """模型的回覆能不能當摘要：回傳 (摘要全文, 猜著套的地方, 不能用的原因)。每次壓縮都檢查。
+        整份重寫時模型還是寫了 @@ 編輯指令，就照編輯套在舊摘要上"""
         from woof import tokens
 
         if out is None:
@@ -515,7 +521,7 @@ def register(woof):
         if tokens.fake_call(out):
             return "", [], "寫成了工具呼叫"
         text, flags = out, []
-        if prev:
+        if prev and (not full or _parse_ops(out)[0]):
             text, flags, why = _apply_edits(prev, out, allow_big)
             if text is None:
                 return "", [], why
@@ -550,21 +556,21 @@ def register(woof):
                 stat[1] += int(u.get("cache_read") or 0)
 
     async def _write(ctx, model: dict, prev: str, kept: list[dict], target: int, src_tok: float, why: str,
-                     redo: dict | None = None, box: dict | None = None):
+                     redo: dict | None = None, box: dict | None = None, full: bool = False):
         """寫摘要，回傳 (摘要全文, [輸入, 快取讀取])。都接在同一份請求後面，前面吃快取：
         - 編輯指令有幾處只能猜著套：內容都已經收進去，再接一則請模型只補正那幾處（不重寫整份）；補正寫壞了就用補正前的
         - 完全沒寫出能用的東西：在指令後面註明哪裡不對再要一次；還是沒有就丟 _NoSummary（交給呼叫端決定要不要用程式整理的摘要）"""
         from woof.agent import loop
 
         sid = ctx.session_id
-        req = await _request(ctx, model, prev, kept, target, redo=redo)
+        req = await _request(ctx, model, prev, kept, target, redo=redo, full=full)
         if box is not None:
             box["req"] = req
         if redo is not None and req["dropped"] and not getattr(ctx, "manual", False):
             raise _RedoTooBig("原本那段已經超過模型上限，送不出完整的內容")
         await ctx.emit({"type": "notice", "session_id": sid,
                         "text": f"{why}，正在壓縮較早的 {ctx.compact_count} 則訊息"
-                                f"（{'只寫要改的行' if prev else f'目標約 {target} 字'}）…" + (f"（{req['note']}）" if req["note"] else "")})
+                                f"（{'整份重寫，清掉過時、重複的' if full else '只寫要改的行' if prev else f'目標約 {target} 字'}）…" + (f"（{req['note']}）" if req["note"] else "")})
         problem, stat = "", [0, 0]
         for attempt in range(2):
             msgs = req["messages"]
@@ -572,7 +578,7 @@ def register(woof):
                 ask = msgs[-1]
                 again = ask["content"][0]["text"] + _prompt_get(
                     "compact_retry", problem=problem,
-                    what="@@ 編輯指令（行號照【先前摘要】，最後一行 @@ 完）" if prev else "摘要正文")
+                    what="@@ 編輯指令（行號照【先前摘要】，最後一行 @@ 完）" if prev and not full else "摘要正文")
                 msgs = [*msgs[:-1], {**ask, "content": [{"type": "text", "text": again}]}]
                 await ctx.emit({"type": "notice", "session_id": sid,
                                 "text": f"摘要模型這次{problem}，用同一份內容再寫一次（前面照樣吃快取）"})
@@ -583,7 +589,7 @@ def register(woof):
             except Exception as e:
                 if attempt == 0 and loop.is_overflow_error(e):
                     # 估計比實際少：再多拿掉一些舊訊息重送
-                    req = await _request(ctx, model, prev, kept, target, fit=FIT * 0.8, redo=redo)
+                    req = await _request(ctx, model, prev, kept, target, fit=FIT * 0.8, redo=redo, full=full)
                     if box is not None:
                         box["req"] = req
                     problem = "超出模型上限"
@@ -592,7 +598,7 @@ def register(woof):
                                             + (f"（{req['note']}）" if req["note"] else "")})
                     continue
                 raise RuntimeError(f"壓縮摘要失敗（{req['use'].get('label', req['use']['id'])}）：{str(e)[:300]}") from e
-            text, flags, problem = _check(out, prev, src_tok)
+            text, flags, problem = _check(out, prev, src_tok, full=full)
             if problem:
                 continue
             if flags:
@@ -912,7 +918,8 @@ def register(woof):
             or bool(window and used / window >= _wait_at())
         fallback, box = False, {}
         try:
-            text, stat = await _write(ctx, model, prev, pending[cut:], target, src_tok, why, redo=redo, box=box)
+            text, stat = await _write(ctx, model, prev, pending[cut:], target, src_tok, why, redo=redo, box=box,
+                                      full=bool(prev) and bool(getattr(ctx, "rewrite", False)))
         except asyncio.CancelledError:
             raise
         except Exception as e:

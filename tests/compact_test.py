@@ -138,6 +138,15 @@ class Quotes(unittest.TestCase):
         self.assertLessEqual(len(C._users_section(self.msgs(), 99, 20, 300)), 900)
         self.assertEqual(C._users_section(self.msgs(), 99, 0, 2000), "")
 
+    def test_long_paste_cut_with_search_hint(self):
+        msgs = self.msgs()
+        msgs[-1]["content"][0]["text"] = "開頭" + "貼上的文件內容" * 300 + "結尾"
+        s = C._users_section(msgs, 99, 1, 5000)
+        self.assertIn("開頭", s)
+        self.assertIn("結尾", s)
+        self.assertIn("全文用 session_search around=10 查", s)   # 單則超過 500 字只附開頭和結尾
+        self.assertLess(len(s.split("使用者：")[1]), 600)
+
 
 def big(n):
     return "資料內容 " * n
@@ -262,6 +271,32 @@ class Flow(unittest.TestCase):
         self.assertLessEqual(tokens.estimate_messages(kept), 3000)
         sent = self.hooks["before_request"]([{**m, "meta": {}} for m in store.get_messages(self.sid)], self.ctx)
         self.assertIn(s["quotes"], sent[0]["content"][0]["text"])
+
+    def test_manual_rewrites_whole_summary(self):
+        self.ctx.rewrite = True                                          # 已經有摘要、按「立即壓縮」：整份重寫
+        new = "## 目前目標\n- 做 A\n## 已完成\n1. 改了 a.py\n2. 跑測試全過\n3. 讀完 f0 到 f2\n## 壓縮當時進行中\n- 在讀 f3"
+        self.run_with([new])
+        c = self.calls[0]
+        self.assertEqual(c["messages"][:-1], self.sent)                  # 一樣接在原本的請求後面，前面吃快取
+        self.assertIn("整份重寫成一份新的摘要", c["ask"])
+        self.assertNotIn("1| ## 使用者的目標與要求", c["ask"])           # 不附行號、不要編輯指令
+        self.assertEqual(self.summ()["text"], new)
+        self.assertIn("整份重寫", self.notices())
+
+    def test_manual_rewrite_still_takes_edits(self):
+        self.ctx.rewrite = True
+        self.run_with(["@@ 改 7\n- 在讀 f3\n@@ 完"])                     # 還是寫了編輯指令：照編輯套上
+        self.assertTrue(self.summ()["text"].endswith("- 在讀 f3"))
+        self.assertIn("- 做 A", self.summ()["text"])
+
+    def test_rules_keep_state_not_history(self):
+        from woof import prompts
+        for mode in ("lean", "normal"):
+            r = prompts.get_in("compact", mode)
+            self.assertIn("寫的是現在的狀態", r)
+            self.assertIn("系統提示裡已經有的", r)
+            self.assertIn("只寫正確的", r)
+            self.assertIn("刪掉", prompts.get_in("compact_edit", mode, n=1, cap=1, last=1))
 
     def test_new_messages_after_last_request_appended(self):
         self.snap["messages"] = self.sent[:-2]
